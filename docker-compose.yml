@@ -1,6 +1,24 @@
 services:
+  # Generates YouTube PO tokens for yt-dlp — YouTube increasingly requires
+  # these to avoid the "Sign in to confirm you're not a bot" wall, especially
+  # from datacenter/cloud IPs. Runs as a persistent HTTP server (the
+  # project's own docs say the alternative script-per-request mode "is NOT
+  # recommended"). See BGUTIL_BASE_URL below and main.py's download attempts,
+  # which all now pass this provider's config to yt-dlp.
+  bgutil-pot:
+    image: brainicism/bgutil-ytdlp-pot-provider:latest
+    container_name: openshorts-bgutil-pot
+    restart: unless-stopped
+
   backend:
-    build: .
+    # CPU-safe base (self-host works anywhere). The GPU build arg, device
+    # reservation and nvenc/cuda env vars live in docker-compose.gpu.yml —
+    # start_studio.sh adds that override automatically when the host's docker
+    # daemon exposes the nvidia runtime (see docker-compose.gpu.yml).
+    build:
+      context: .
+      args:
+        GPU: "0"
     container_name: openshorts-backend
     ports:
       - "8000:8000"
@@ -8,7 +26,11 @@ services:
       - .:/app
       - /app/__pycache__
       - ./output:/app/output
+    environment:
+      - BGUTIL_BASE_URL=http://bgutil-pot:4416
     restart: unless-stopped
+    depends_on:
+      - bgutil-pot
 
   frontend:
     build:

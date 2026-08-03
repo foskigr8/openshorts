@@ -1,5 +1,6 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { Download, Copy, Check, Play } from 'lucide-react';
+import { pauseAllOtherPlayers } from '../lib/playerSync';
 
 export default function GalleryCard({ clip }) {
     const [copied, setCopied] = useState(null);
@@ -81,6 +82,7 @@ export default function GalleryCard({ clip }) {
                         playsInline
                         preload="metadata"
                         onLoadedData={() => setHasLoaded(true)}
+                        onPlay={(e) => pauseAllOtherPlayers(e.currentTarget)}
                     />
                 ) : (
                     <div className="w-full h-full flex items-center justify-center bg-paper">

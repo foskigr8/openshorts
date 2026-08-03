@@ -10,6 +10,12 @@
     @apply bg-paper text-ink2 antialiased;
     font-family: var(--font-body);
     font-variant-numeric: tabular-nums;
+    /* Ambient light: two soft red pools bleeding in from the top edge, so the
+     * page reads as a lit room instead of flat #101010. Static gradients on a
+     * non-scrolling body — painted once, zero scroll cost. */
+    background-image:
+      radial-gradient(80% 55% at 50% -12%, rgba(239, 68, 68, 0.11) 0%, transparent 68%),
+      radial-gradient(45% 45% at 102% 2%, rgba(239, 68, 68, 0.06) 0%, transparent 70%);
   }
 
   ::selection {
@@ -30,9 +36,55 @@
   .glass-panel {
     background:
       radial-gradient(120% 90% at 50% 0%, var(--color-paper-emit) 0%, transparent 70%),
+      var(--grad-sheen),
       var(--color-paper-2);
     border: 1px solid var(--color-rule);
     border-radius: var(--radius-card);
+    box-shadow: var(--shadow-card);
+  }
+
+  /* Accent-lit card: for the one surface that should pull focus (the active
+     job, the primary form). Adds a red rim + outer glow on top of .card. */
+  .card-lit {
+    border-color: color-mix(in oklab, var(--color-accent) 45%, var(--color-rule));
+    box-shadow:
+      0 1px 0 rgba(255, 255, 255, 0.05) inset,
+      0 0 0 1px rgba(239, 68, 68, 0.10),
+      0 0 26px -4px rgba(239, 68, 68, 0.28),
+      0 18px 48px -20px rgba(239, 68, 68, 0.45),
+      0 10px 30px -12px rgba(0, 0, 0, 0.9);
+  }
+
+  /* Icon in a tinted rounded square — the reference puts nearly every icon in
+     one of these instead of floating bare on the background. */
+  .icon-chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 9px;
+    background: var(--grad-accent-soft);
+    border: 1px solid rgba(239, 68, 68, 0.22);
+    color: var(--color-accent);
+    flex-shrink: 0;
+  }
+  .icon-chip-muted {
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.06) 0%, rgba(255, 255, 255, 0.02) 100%);
+    border-color: var(--color-rule-2);
+    color: var(--color-muted);
+  }
+
+  /* Glow for SVG status rings / active nodes. drop-shadow on a thin stroke is
+     cheap; it is never animated on a large surface. */
+  .glow-accent { filter: drop-shadow(0 0 5px rgba(239, 68, 68, 0.65)); }
+  .glow-ok     { filter: drop-shadow(0 0 5px rgba(34, 197, 94, 0.45)); }
+
+  /* Spec (round 4): the glow that makes "alive" read instantly. Applies to
+     ACTIVE/processing elements only — never to failed/terminal states, which
+     must stay flat so urgent and broken don't blur together. */
+  .glow-processing {
+    box-shadow: 0 0 24px var(--color-glow), 0 0 4px var(--color-glow);
   }
 
   .card-hover {
@@ -42,7 +94,11 @@
   }
   .card-hover:hover {
     transform: translateY(-4px);
-    border-color: var(--color-rule-2);
+    border-color: color-mix(in oklab, var(--color-accent) 30%, var(--color-rule-2));
+    box-shadow:
+      0 1px 0 rgba(255, 255, 255, 0.05) inset,
+      0 18px 40px -18px rgba(239, 68, 68, 0.28),
+      0 12px 30px -14px rgba(0, 0, 0, 0.9);
   }
 
   /* mono UPPERCASE micro label — the only uppercase surface */
@@ -75,21 +131,74 @@
     transition: border-color var(--dur-short) var(--ease-out);
   }
   .input-field::placeholder { color: var(--color-muted); opacity: 0.7; }
-  .input-field:focus { border-color: var(--color-accent); }
+  .input-field:focus {
+    border-color: var(--color-accent);
+    box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.12);
+  }
+
+  /* Red-filled range slider (reference UI): the inline background paints the
+     filled track; the thumb floats on top with the accent glow. */
+  input[type='range'].slider-filled {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 6px;
+    border-radius: 999px;
+    outline: none;
+  }
+  input[type='range'].slider-filled::-webkit-slider-runnable-track {
+    background: transparent;
+    border: none;
+  }
+  input[type='range'].slider-filled::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #fff;
+    border: 2px solid var(--color-accent);
+    box-shadow: 0 0 10px var(--color-glow);
+    cursor: pointer;
+    margin-top: -6px;
+  }
+  input[type='range'].slider-filled::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #fff;
+    border: 2px solid var(--color-accent);
+    box-shadow: 0 0 10px var(--color-glow);
+    cursor: pointer;
+  }
+  input[type='range'].slider-filled:disabled::-webkit-slider-thumb {
+    opacity: 0.35;
+  }
 
   .btn-primary {
-    @apply inline-flex items-center justify-center gap-2 px-6 py-3 text-sm font-medium lowercase;
-    background: var(--color-accent);
+    @apply inline-flex items-center justify-center gap-2 px-6 py-3 text-sm font-medium;
+    background: var(--grad-accent);
     color: var(--color-accent-ink);
     border-radius: 999px;
-    transition: filter var(--dur-short) var(--ease-out), transform var(--dur-short) var(--ease-out);
+    box-shadow:
+      0 1px 0 rgba(255, 255, 255, 0.18) inset,
+      var(--shadow-glow);
+    transition: box-shadow var(--dur-short) var(--ease-out),
+                filter var(--dur-short) var(--ease-out),
+                transform var(--dur-short) var(--ease-out);
   }
-  .btn-primary:hover { filter: brightness(1.08); }
+  .btn-primary:hover {
+    filter: brightness(1.06);
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.22) inset, var(--shadow-glow-strong);
+  }
   .btn-primary:active { transform: translateY(1px); }
-  .btn-primary:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btn-primary:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    box-shadow: none;
+  }
 
   .btn-ghost {
-    @apply inline-flex items-center justify-center gap-2 px-6 py-3 text-sm font-medium lowercase text-ink;
+    @apply inline-flex items-center justify-center gap-2 px-6 py-3 text-sm font-medium text-ink;
     background: transparent;
     border: 1px solid var(--color-rule-2);
     border-radius: 999px;
@@ -100,7 +209,7 @@
   .btn-ghost:disabled { opacity: 0.45; cursor: not-allowed; }
 
   .btn-quiet {
-    @apply inline-flex items-center justify-center gap-2 px-4 py-2 text-sm lowercase text-ink2;
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 text-sm text-ink2;
     background: var(--color-paper-3);
     border-radius: 999px;
     transition: filter var(--dur-short) var(--ease-out);

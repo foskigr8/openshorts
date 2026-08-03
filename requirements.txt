@@ -18,3 +18,11 @@ python-multipart==0.0.27
 httpx==0.28.1
 Pillow==12.2.0
 beautifulsoup4==4.14.3
+# Voice isolation for the 'remove background audio' option (audio_cleanup.py).
+# Only imported when that option is used; absent -> the FFmpeg denoise fallback.
+demucs==4.1.0
+# Linear-assignment solver required by ultralytics' ByteTrack/BoT-SORT
+# trackers (already vendored in ultralytics; it just won't import without this).
+lap==0.5.13
+# MFCC features for LR-ASD active-speaker detection (asd_worker.py).
+python_speech_features==0.6

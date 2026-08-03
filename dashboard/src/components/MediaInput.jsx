@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Link2, Upload, FileVideo, X, Info, Loader2 } from 'lucide-react';
+import { Link2, Upload, FileVideo, X, Info, Loader2, Youtube, Sparkles } from 'lucide-react';
 import { getApiUrl } from '../config';
 
 const SUPPORTED_PLATFORMS = [
@@ -7,18 +7,33 @@ const SUPPORTED_PLATFORMS = [
     'Facebook', 'Instagram', 'Dailymotion', 'Reddit', 'Streamable',
 ];
 
+const YT_HOST_RE = /(^|\.)(youtube\.com|youtu\.be)$/i;
+
 export default function MediaInput({ onProcess, isProcessing }) {
     const [youtubeUrlEnabled, setYoutubeUrlEnabled] = useState(true);
-    // File upload is the primary path; the link is secondary.
-    const [mode, setMode] = useState('file'); // 'file' | 'url'
+    // Source tabs (reference UI): file upload / general video URL / YouTube
+    // link — all three submit through the same real handler.
+    const [mode, setMode] = useState('file'); // 'file' | 'url' | 'youtube'
     const [url, setUrl] = useState('');
     const [file, setFile] = useState(null);
     const [acknowledged, setAcknowledged] = useState(false);
-    const [outputFormat, setOutputFormat] = useState('vertical'); // vertical | horizontal | square
+    const [outputFormat, setOutputFormat] = useState('vertical'); // vertical | square | horizontal | custom
+    const [customW, setCustomW] = useState(1080);
+    const [customH, setCustomH] = useState(1350);
+    // Manual by default — the slider is the primary control; Auto is opt-in,
+    // not opt-out (the user picks a count, they don't get defaulted past it).
+    const [clipCount, setClipCount] = useState(8);
+    const [longContextClips, setLongContextClips] = useState(0);
+    // AI Preferences — each control maps to a REAL per-job effect. Auto Zoom
+    // and hook "style" were dropped: framing is already decided
+    // automatically per scene, and picking a style before watching the
+    // source clip isn't a real choice for the user to make — both stay
+    // fully automatic server-side (no override sent, so the default applies).
+    const [captions, setCaptions] = useState(true);
+    const [removeBgAudio, setRemoveBgAudio] = useState(false);
     const [showInfo, setShowInfo] = useState(false);
     const infoRef = useRef(null);
 
-    // Close the compatibility popover on any outside click.
     useEffect(() => {
         if (!showInfo) return;
         const onClick = (e) => {
@@ -40,9 +55,6 @@ export default function MediaInput({ onProcess, isProcessing }) {
             .catch(() => {});
     }, []);
 
-    // A link pasted in the landing hero: preload it here so the user picks up
-    // where they left off. Not auto-submitted — the rights attestation below
-    // has to be ticked by the user.
     useEffect(() => {
         let pending = null;
         try {
@@ -50,7 +62,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
             if (pending) localStorage.removeItem('os_pending_url');
         } catch { /* ignore */ }
         if (pending) {
-            setMode('url');
+            setMode('youtube');
             setUrl(pending);
         }
     }, []);
@@ -58,10 +70,32 @@ export default function MediaInput({ onProcess, isProcessing }) {
     const handleSubmit = (e) => {
         e.preventDefault();
         if (!acknowledged) return;
-        if (mode === 'url' && url) {
-            onProcess({ type: 'url', payload: url, acknowledged: true, outputFormat });
+        if ((mode === 'url' || mode === 'youtube') && url) {
+            if (mode === 'youtube' && !YT_HOST_RE.test(new URL(url).hostname)) {
+                alert('That does not look like a YouTube link — use the Video URL tab for other sites.');
+                return;
+            }
+            onProcess({
+                type: 'url', payload: url, acknowledged: true,
+                outputFormat: outputFormat === 'custom' ? 'custom' : outputFormat,
+                customWidth: customW, customHeight: customH,
+                captions,
+                // "isolate" = Demucs voice separation, the only mode that
+                // actually removes music. "" = leave the audio untouched.
+                removeBackgroundAudio: removeBgAudio ? 'isolate' : '',
+                clipCount, longContextClips,
+            });
         } else if (mode === 'file' && file) {
-            onProcess({ type: 'file', payload: file, acknowledged: true, outputFormat });
+            onProcess({
+                type: 'file', payload: file, acknowledged: true,
+                outputFormat: outputFormat === 'custom' ? 'custom' : outputFormat,
+                customWidth: customW, customHeight: customH,
+                captions,
+                // "isolate" = Demucs voice separation, the only mode that
+                // actually removes music. "" = leave the audio untouched.
+                removeBackgroundAudio: removeBgAudio ? 'isolate' : '',
+                clipCount, longContextClips,
+            });
         }
     };
 
@@ -73,42 +107,47 @@ export default function MediaInput({ onProcess, isProcessing }) {
         }
     };
 
+    const isCustom = outputFormat === 'custom';
+    const sliderPct = clipCount == null
+        ? 0
+        : ((clipCount - 1) / (40 - 1)) * 100;
+
     return (
-        <div className="card p-4 sm:p-6 animate-fade">
-            <div className="flex gap-4 sm:gap-6 mb-6 border-b border-rule">
-                <button
-                    onClick={() => setMode('file')}
-                    className={`flex items-center gap-2 pb-3 px-1 -mb-px border-b-2 text-sm lowercase whitespace-nowrap transition-colors ${mode === 'file'
-                        ? 'text-ink border-brass'
-                        : 'text-muted border-transparent hover:text-ink2'
-                        }`}
-                >
-                    <Upload size={16} className={`hidden sm:block ${mode === 'file' ? 'text-brass' : ''}`} />
-                    Upload File
-                </button>
-                {youtubeUrlEnabled && (
+        <div className="card card-lit p-4 sm:p-6 animate-fade">
+            {/* Source tabs — above the dropzone, underline style (reference) */}
+            <div className="flex gap-1 border-b border-rule mb-5">
+                {[
+                    { id: 'file', label: 'Upload File', Icon: Upload },
+                    { id: 'url', label: 'Video URL', Icon: Link2 },
+                    ...(youtubeUrlEnabled ? [{ id: 'youtube', label: 'YouTube Link', Icon: Youtube }] : []),
+                ].map(({ id, label, Icon }) => (
                     <button
-                        onClick={() => setMode('url')}
-                        className={`flex items-center gap-2 pb-3 px-1 -mb-px border-b-2 text-sm lowercase whitespace-nowrap transition-colors ${mode === 'url'
-                            ? 'text-ink border-brass'
-                            : 'text-muted border-transparent hover:text-ink2'
-                            }`}
+                        key={id}
+                        type="button"
+                        onClick={() => setMode(id)}
+                        className={`flex items-center gap-1.5 pb-2.5 px-1 -mb-px border-b-2 text-xs whitespace-nowrap transition-colors ${
+                            mode === id
+                                ? 'border-brass text-ink'
+                                : 'border-transparent text-muted hover:text-ink2'
+                        }`}
                     >
-                        <Link2 size={16} className={`hidden sm:block ${mode === 'url' ? 'text-brass' : ''}`} />
-                        Video URL
+                        <Icon size={14} className={mode === id ? 'text-brass' : ''} />
+                        {label}
                     </button>
-                )}
+                ))}
             </div>
 
             <form onSubmit={handleSubmit}>
-                {mode === 'url' ? (
+                {mode === 'url' || mode === 'youtube' ? (
                     <div className="space-y-4">
                         <div className="relative">
                             <input
                                 type="url"
                                 value={url}
                                 onChange={(e) => setUrl(e.target.value)}
-                                placeholder="https://... paste a video link"
+                                placeholder={mode === 'youtube'
+                                    ? 'paste a YouTube link (youtube.com / youtu.be)'
+                                    : 'https://... paste a video link'}
                                 className="input-field pr-11"
                                 required
                             />
@@ -123,7 +162,9 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                 </button>
                                 {showInfo && (
                                     <div className="absolute right-0 top-full mt-2 w-64 z-20 card p-4 text-left animate-fade">
-                                        <p className="eyebrow mb-2">Paste a link from</p>
+                                        <p className="eyebrow mb-2">
+                                            {mode === 'youtube' ? 'YouTube links only' : 'Paste a link from'}
+                                        </p>
                                         <div className="flex flex-wrap gap-1.5">
                                             {SUPPORTED_PLATFORMS.map((p) => (
                                                 <span key={p} className="text-xs px-2 py-0.5 rounded-full bg-paper3 text-ink2">
@@ -131,9 +172,11 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                                 </span>
                                             ))}
                                         </div>
-                                        <p className="text-xs text-muted mt-2.5 leading-relaxed">
-                                            …and 1,000+ more sites. If a link has a public video, we can usually fetch it.
-                                        </p>
+                                        {mode === 'youtube' && (
+                                            <p className="text-xs text-muted mt-2.5 leading-relaxed">
+                                                This tab validates the host is YouTube. Other platforms go through Video URL.
+                                            </p>
+                                        )}
                                     </div>
                                 )}
                             </div>
@@ -174,14 +217,15 @@ export default function MediaInput({ onProcess, isProcessing }) {
                     </div>
                 )}
 
-                {/* Output format selector */}
+                {/* Output format selector — 4 tiles including Custom */}
                 <div className="mt-5">
-                    <p className="eyebrow mb-2">Output format</p>
-                    <div className="grid grid-cols-3 gap-2">
+                    <p className="eyebrow mb-2">Output Format</p>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                         {[
-                            { value: 'vertical', label: '9:16', hint: 'Shorts · Reels · TikTok', w: 18, h: 32 },
+                            { value: 'vertical', label: '9:16', hint: 'Shorts · Reels', w: 18, h: 32 },
                             { value: 'square', label: '1:1', hint: 'Feed posts', w: 28, h: 28 },
-                            { value: 'horizontal', label: '16:9', hint: 'Keep landscape · YouTube', w: 36, h: 20 },
+                            { value: 'horizontal', label: '16:9', hint: 'Landscape', w: 36, h: 20 },
+                            { value: 'custom', label: 'Custom', hint: 'Set your own', w: 24, h: 28 },
                         ].map((f) => {
                             const active = outputFormat === f.value;
                             return (
@@ -189,10 +233,13 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                     key={f.value}
                                     type="button"
                                     onClick={() => setOutputFormat(f.value)}
-                                    className={`py-3 px-2 rounded-input border flex flex-col items-center gap-2 transition-colors
+                                    className={`py-3 px-2 rounded-input border flex flex-col items-center gap-2 transition-all
                                         ${active ? 'border-[color:var(--color-accent)] text-ink' : 'border-rule2 text-muted hover:border-[color:var(--color-accent)]'}`}
+                                    style={active ? {
+                                        background: 'linear-gradient(180deg, rgba(239,68,68,0.12) 0%, rgba(239,68,68,0.02) 100%)',
+                                        boxShadow: '0 0 18px -6px var(--color-glow)',
+                                    } : undefined}
                                 >
-                                    {/* Aspect-ratio glyph */}
                                     <span
                                         className="rounded-[3px] border-2 transition-colors"
                                         style={{
@@ -208,6 +255,160 @@ export default function MediaInput({ onProcess, isProcessing }) {
                             );
                         })}
                     </div>
+                    {isCustom && (
+                        <div className="flex items-center gap-3 mt-3">
+                            <label className="flex items-center gap-2 text-xs text-muted">
+                                width
+                                <input
+                                    type="number"
+                                    min="100"
+                                    max="4000"
+                                    value={customW}
+                                    onChange={(e) => setCustomW(Math.max(100, Math.min(4000, Number(e.target.value) || 1080)))}
+                                    className="input-field py-1.5 px-2 w-24 text-sm"
+                                />
+                            </label>
+                            <span className="text-muted">×</span>
+                            <label className="flex items-center gap-2 text-xs text-muted">
+                                height
+                                <input
+                                    type="number"
+                                    min="100"
+                                    max="4000"
+                                    value={customH}
+                                    onChange={(e) => setCustomH(Math.max(100, Math.min(4000, Number(e.target.value) || 1350)))}
+                                    className="input-field py-1.5 px-2 w-24 text-sm"
+                                />
+                            </label>
+                        </div>
+                    )}
+                </div>
+
+                {/* Clip count: null = auto, a number = hard target */}
+                <div className="mt-5">
+                    <div className="flex items-center justify-between mb-3">
+                        <p className="eyebrow">Clip Count</p>
+                        <label className="flex items-center gap-1.5 text-xs text-muted cursor-pointer select-none">
+                            <input
+                                type="checkbox"
+                                checked={clipCount === null}
+                                onChange={(e) => setClipCount(e.target.checked ? null : 8)}
+                                className="accent-[var(--color-accent)] cursor-pointer"
+                            />
+                            Auto
+                        </label>
+                    </div>
+                    <div className="relative pt-5 pb-1">
+                        {clipCount !== null && (
+                            <span
+                                className="absolute top-0 -translate-x-1/2 px-2 py-0.5 rounded-md bg-paper3 border border-brass/40 readout text-[10px] text-ink"
+                                style={{ left: `calc(${sliderPct}% + 9px)` }}
+                            >
+                                {clipCount}
+                            </span>
+                        )}
+                        <input
+                            type="range"
+                            min="1"
+                            max="40"
+                            step="1"
+                            value={clipCount ?? 8}
+                            disabled={clipCount === null}
+                            onChange={(e) => setClipCount(Number(e.target.value))}
+                            className="slider-filled w-full cursor-pointer disabled:opacity-40"
+                            style={{
+                                background: clipCount === null
+                                    ? 'var(--color-rule-2)'
+                                    : `linear-gradient(90deg, var(--color-accent) 0%, var(--color-accent) ${sliderPct}%, var(--color-rule-2) ${sliderPct}%, var(--color-rule-2) 100%)`,
+                            }}
+                            aria-label="Number of clips to generate"
+                        />
+                    </div>
+                    <div className="flex justify-between text-[10px] text-muted mt-1">
+                        <span>1</span>
+                        <span className={clipCount === null ? 'text-muted' : 'text-ink2 font-medium'}>
+                            {clipCount === null ? 'auto · based on video length' : `hard target: ${clipCount} clips`}
+                        </span>
+                        <span>40</span>
+                    </div>
+                </div>
+
+                {/* AI Preferences — every control maps to a real per-job effect */}
+                <div className="mt-5 rounded-input border border-rule p-3 space-y-3">
+                    <div className="flex items-center justify-between">
+                        <span className="flex items-center gap-1.5 text-xs text-ink2">
+                            <Sparkles size={13} className="text-brass" /> AI Preferences
+                        </span>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <label className="flex items-center gap-2 text-xs text-muted cursor-pointer select-none">
+                            <input
+                                type="checkbox"
+                                checked={captions}
+                                onChange={(e) => setCaptions(e.target.checked)}
+                                className="accent-[var(--color-accent)] cursor-pointer"
+                            />
+                            Add Captions
+                        </label>
+                        <label
+                            className="flex items-center gap-2 text-xs text-muted cursor-pointer select-none"
+                            title="Separates the voice from music and ambience so only speech remains. Adds roughly 30s per clip."
+                        >
+                            <input
+                                type="checkbox"
+                                checked={removeBgAudio}
+                                onChange={(e) => setRemoveBgAudio(e.target.checked)}
+                                className="accent-[var(--color-accent)] cursor-pointer"
+                            />
+                            Remove background audio
+                        </label>
+                        <div className="flex items-center justify-between gap-2 text-xs text-muted">
+                            Auto Detect Highlights
+                            <span className="px-2 py-1 rounded-full border border-brass/40 text-[10px] readout text-brass">
+                                always on
+                            </span>
+                        </div>
+                    </div>
+                    {/* Auto Zoom (TRACK/GENERAL) and hook "style" were removed here —
+                        both are the AI's job, not a pre-watch guess: framing is
+                        already decided automatically per scene, and a style pick
+                        made before anyone has seen the source clip isn't a real
+                        choice, it's a coin flip. Both stay fully automatic. */}
+                </div>
+
+                {/* Long-context clips: opt-in full-arc category */}
+                <div className="mt-3 rounded-input border border-rule p-3">
+                    <label className="flex items-center gap-2 text-xs text-ink2 cursor-pointer select-none">
+                        <input
+                            type="checkbox"
+                            checked={longContextClips > 0}
+                            onChange={(e) => setLongContextClips(e.target.checked ? 1 : 0)}
+                            className="accent-[var(--color-accent)] cursor-pointer"
+                        />
+                        <span>
+                            Include long-context clips
+                            <span className="block text-[10px] text-muted mt-0.5">
+                                full 1–3 min arcs (setup → tension → resolution), trimmed of dead air
+                            </span>
+                        </span>
+                    </label>
+                    {longContextClips > 0 && (
+                        <div className="flex items-center gap-2 mt-2.5">
+                            <span className="readout text-[10px] text-muted">how many</span>
+                            <input
+                                type="number"
+                                min="1"
+                                max="5"
+                                value={longContextClips}
+                                onChange={(e) => {
+                                    const v = Number(e.target.value);
+                                    setLongContextClips(Number.isFinite(v) ? Math.max(0, Math.min(5, v)) : 0);
+                                }}
+                                className="input-field py-1 px-2 w-16 text-sm"
+                                aria-label="Number of long-context clips"
+                            />
+                        </div>
+                    )}
                 </div>
 
                 <label className="flex items-start gap-2 mt-5 text-xs text-muted cursor-pointer select-none">
@@ -224,7 +425,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
 
                 <button
                     type="submit"
-                    disabled={isProcessing || !acknowledged || (mode === 'url' && !url) || (mode === 'file' && !file)}
+                    disabled={isProcessing || !acknowledged || ((mode === 'url' || mode === 'youtube') && !url) || (mode === 'file' && !file)}
                     className="w-full btn-primary mt-4"
                 >
                     {isProcessing ? (

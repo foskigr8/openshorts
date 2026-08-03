@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 from typing import Dict, Optional, List
 from contextlib import asynccontextmanager
+from hardware_defaults import default_max_concurrent_jobs
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -34,7 +35,10 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Configuration
 # Default to 1 if not set, but user can set higher for powerful servers
-MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "5"))
+# GPU hosts run up to 5 jobs in parallel; CPU hosts default to 1 (one job
+# already occupies several cores via CLIP_WORKERS). Env override wins.
+MAX_CONCURRENT_JOBS = int(
+    os.environ.get("MAX_CONCURRENT_JOBS") or default_max_concurrent_jobs())
 MAX_FILE_SIZE_MB = 2048  # 2GB limit
 
 # How TikTok receives our uploads. MEDIA_UPLOAD lands the video in the user's
@@ -46,11 +50,12 @@ MAX_FILE_SIZE_MB = 2048  # 2GB limit
 # where covers, sounds and hashtags actually get chosen. The UI must say so —
 # a user who expects a published post and finds a draft will read it as a bug.
 TIKTOK_POST_MODE = os.environ.get("TIKTOK_POST_MODE", "MEDIA_UPLOAD").strip()
-JOB_RETENTION_SECONDS = int(os.environ.get("JOB_RETENTION_SECONDS", "3600"))  # job/file retention (issue #46)
+JOB_RETENTION_SECONDS = int(os.environ.get("JOB_RETENTION_SECONDS", "0"))  # 0 disables age-based deletion — jobs persist until explicitly deleted (see /api/history)
+UPLOAD_RETENTION_SECONDS = int(os.environ.get("UPLOAD_RETENTION_SECONDS", "3600"))  # raw source uploads aren't history — safe to clear once processed
 # Ceiling for the working directory once it lives on a persistent volume: the
 # age-based sweep alone can't stop a burst of long videos from filling the disk.
 # 0 disables the cap.
-OUTPUT_MAX_GB = int(os.environ.get("OUTPUT_MAX_GB", "25"))
+OUTPUT_MAX_GB = int(os.environ.get("OUTPUT_MAX_GB", "100"))
 # Same idea for source uploads, which are the biggest single files on disk.
 UPLOADS_MAX_GB = int(os.environ.get("UPLOADS_MAX_GB", "15"))
 # Pre-flight quality gate: warn before processing a YouTube source below this
@@ -124,6 +129,56 @@ async def resolve_upload_post(request: Request, body_key: Optional[str] = None):
     header = request.headers.get("X-Upload-Post-Key")
     key = header or body_key or os.environ.get("UPLOAD_POST_API_KEY")
     return key, None
+
+
+async def resolve_assemblyai(request: Request) -> Optional[str]:
+    """Resolve the AssemblyAI API key for a request (transcription backend).
+
+    Optional feature — a missing key just means the pipeline falls back to
+    Whisper, so this never raises. Self-host BYOK only for now: header wins,
+    else the env fallback. Not wired into cloud/billing managed keys yet.
+    """
+    header = request.headers.get("X-AssemblyAI-Key")
+    if header:
+        return header
+    return os.environ.get("ASSEMBLYAI_API_KEY")
+
+
+async def resolve_deepseek(request: Request) -> Optional[str]:
+    """Resolve the DeepSeek API key for a request (narrative clip selection).
+
+    Optional feature — a missing key just means clip selection falls back to
+    Gemini's text scoring, so this never raises. Self-host BYOK: header wins,
+    else the env fallback.
+    """
+    header = request.headers.get("X-DeepSeek-Key")
+    if header:
+        return header
+    return os.environ.get("DEEPSEEK_API_KEY")
+
+
+async def resolve_gemini_pool(request: Request) -> List[str]:
+    """Resolve the full pool of Gemini keys available for a request.
+
+    Vision-confirmation calls spread across this pool so a single key's rate
+    limit doesn't serialize the whole job. Order of preference, all merged
+    (not exclusive like resolve_gemini): the multi-key ``X-Gemini-Keys``
+    header (comma-separated, from the Settings "extra keys" list) plus
+    whatever ``resolve_gemini`` would have returned alone (the primary
+    ``X-Gemini-Key`` header, else the env fallback) — deduplicated, primary
+    key first. Returns an empty list if nothing is configured; callers should
+    treat that the same as "no Gemini key" (existing behavior).
+    """
+    primary = await resolve_gemini(request)
+    extra_header = request.headers.get("X-Gemini-Keys", "")
+    extra = [k.strip() for k in extra_header.split(",") if k.strip()]
+    pool = []
+    if primary:
+        pool.append(primary)
+    for k in extra:
+        if k not in pool:
+            pool.append(k)
+    return pool
 
 
 def gemini_missing_error():
@@ -309,6 +364,14 @@ async def _assert_job_owner(request, record):
     if user is None or str(user.id) != str(owner):
         raise HTTPException(status_code=404, detail="Not found")
 
+async def _request_owner_id(request: Request):
+    """The caller's user id for scoping history, or None (self-host/BYOK)."""
+    if not BILLING_ENABLED:
+        return None
+    user = await _user_from_request(request)
+    return str(user.id) if user else None
+
+
 # Application State
 # PriorityQueue holds (priority, seq, job_id). Lower priority dispatches first:
 # pro=0, starter/creator=1, BYOK/anonymous/self-host=2. The seq counter keeps
@@ -388,6 +451,86 @@ def _canonical_clip_file(output_dir, base_name, index):
     return os.path.basename(max(derived, key=os.path.getmtime))
 
 
+def _newest_metadata_file(job_path):
+    """Newest ``*_metadata.json`` in a job dir, or None.
+
+    Convenience wrapper over _sorted_metadata for callers that want a single
+    path rather than the ordered list.
+    """
+    try:
+        matches = _sorted_metadata(glob.glob(os.path.join(job_path, "*_metadata.json")))
+        return matches[0] if matches else None
+    except OSError:
+        return None
+
+
+def _sorted_metadata(matches):
+    """Newest-first sort for a metadata glob — replaces the arbitrary
+    filesystem order of ``glob()[0]`` selection (round-5 spec 4.1)."""
+    return sorted(matches, key=os.path.getmtime, reverse=True)
+
+
+def _find_completed_job_for_source(source_url):
+    """job_id of a completed on-disk job for the same source URL, or None.
+
+    Round-5 feature ("if the clip already exists, just map it"): re-submitting
+    the same YouTube URL must not re-download/re-analyze/re-render from
+    scratch when a previous run already produced playable clips for it. The
+    source URL is stamped into the metadata by main.py at job start.
+    """
+    if not source_url:
+        return None
+    try:
+        job_ids = os.listdir(OUTPUT_DIR)
+    except FileNotFoundError:
+        return None
+    for job_id in job_ids:
+        job_path = os.path.join(OUTPUT_DIR, job_id)
+        meta = _newest_metadata_file(job_path)
+        if not meta:
+            continue
+        try:
+            with open(meta, 'r') as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        if data.get('source_url') != source_url:
+            continue
+        base_name = os.path.basename(meta).replace('_metadata.json', '')
+        for i, clip in enumerate(data.get('shorts', [])):
+            filename = _canonical_clip_file(job_path, base_name, i)
+            marker = os.path.join(job_path, f"{base_name}_clip_{i+1}.mp4.ready")
+            if (os.path.exists(os.path.join(job_path, filename))
+                    and os.path.getsize(os.path.join(job_path, filename)) > 0
+                    and os.path.exists(marker)):
+                return job_id
+    return None
+
+
+def _collect_ready_clips(output_dir, base_name, clips, job_id):
+    """Resolve which metadata clips are safe to surface to the UI right now.
+
+    A clip is surfaced only when BOTH its canonical file exists non-empty AND
+    main.py has written the ``.ready`` marker for its clean filename. The
+    marker lands only after the final file — captions included — is fully on
+    disk, so the preview player is never pointed at a mid-write file or a
+    pre-caption cut (the partial-results race). Returns clips with
+    ``video_url`` set; mid-write / not-yet-captioned clips are skipped.
+    """
+    from pipeline_progress import clip_ready_marker
+    ready = []
+    for i, clip in enumerate(clips):
+        clip_filename = _canonical_clip_file(output_dir, base_name, i)
+        clip_path = os.path.join(output_dir, clip_filename)
+        marker_path = clip_ready_marker(output_dir, f"{base_name}_clip_{i+1}.mp4")
+        if (os.path.exists(marker_path)
+                and os.path.exists(clip_path)
+                and os.path.getsize(clip_path) > 0):
+            clip['video_url'] = f"/videos/{job_id}/{clip_filename}"
+            ready.append(clip)
+    return ready
+
+
 def _strip_burned_captions(output_dir, filename):
     """Walk ``subtitled_<ts>_`` prefixes back to the file without burned captions.
 
@@ -414,7 +557,7 @@ def _reapply_captions(job_id, clip_index, video_path):
     Returns the captioned path, or None if there was nothing to caption.
     """
     try:
-        meta_files = glob.glob(os.path.join(OUTPUT_DIR, job_id, "*_metadata.json"))
+        meta_files = _sorted_metadata(glob.glob(os.path.join(OUTPUT_DIR, job_id, "*_metadata.json")))
         if not meta_files:
             return None
         with open(meta_files[0], 'r') as f:
@@ -449,32 +592,55 @@ def _recover_jobs_from_disk():
         job_path = os.path.join(OUTPUT_DIR, job_id)
         if not os.path.isdir(job_path) or job_id in jobs:
             continue
-        json_files = glob.glob(os.path.join(job_path, "*_metadata.json"))
+        json_files = _sorted_metadata(glob.glob(os.path.join(job_path, "*_metadata.json")))
         if not json_files:
             continue
         try:
             with open(json_files[0], 'r') as f:
                 data = json.load(f)
             base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
-            clips = data.get('shorts', [])
-            for i, clip in enumerate(clips):
+            all_clips = data.get('shorts', [])
+            # A metadata.json only proves narrative analysis finished — the
+            # render loop that actually produces each clip's .mp4 runs AFTER
+            # that and clip-by-clip. If the backend restarts mid-render (e.g.
+            # to pick up a code change), the subprocess dies with metadata.json
+            # already on disk but zero/partial clip files written. This used
+            # to blindly mark the job 'completed' and hand the frontend
+            # video_urls for files that don't exist — "2 CLIPS" shown with
+            # nothing playable behind them. Only recover clips whose file is
+            # actually present; a job with none is a real failure, not done.
+            ready_clips = []
+            for i, clip in enumerate(all_clips):
+                filename = _canonical_clip_file(job_path, base_name, i)
+                if not os.path.exists(os.path.join(job_path, filename)):
+                    continue
                 if not clip.get('video_url'):
-                    clip['video_url'] = (
-                        f"/videos/{job_id}/"
-                        f"{_canonical_clip_file(job_path, base_name, i)}")
+                    clip['video_url'] = f"/videos/{job_id}/{filename}"
+                ready_clips.append(clip)
             owner = None
             owner_path = os.path.join(job_path, ".owner")
             if os.path.exists(owner_path):
                 with open(owner_path) as f:
                     raw = f.read().strip()
                 owner = int(raw) if raw.isdigit() else (raw or None)
-            jobs[job_id] = {
-                'status': 'completed',
-                'logs': ["♻️ Job recovered from disk after server restart."],
-                'output_dir': job_path,
-                'user_id': owner,
-                'result': {'clips': clips, 'cost_analysis': data.get('cost_analysis')},
-            }
+            if ready_clips:
+                jobs[job_id] = {
+                    'status': 'completed',
+                    'logs': [_log_entry("♻️ Job recovered from disk after server restart.")],
+                    'output_dir': job_path,
+                    'user_id': owner,
+                    'result': {'clips': ready_clips, 'cost_analysis': data.get('cost_analysis')},
+                }
+            else:
+                jobs[job_id] = {
+                    'status': 'failed',
+                    'logs': [_log_entry(
+                        "Job was interrupted before any clip finished rendering "
+                        "(likely a server restart mid-render) and could not be resumed.")],
+                    'output_dir': job_path,
+                    'user_id': owner,
+                    'result': None,
+                }
             recovered += 1
         except Exception as e:
             print(f"⚠️ Could not recover job {job_id}: {e}")
@@ -584,7 +750,7 @@ def _resume_interrupted_jobs() -> set:
 
         jobs[job_id] = {
             'status': 'queued',
-            'logs': [f"♻️ Resuming your video after a server update (attempt {attempts})."],
+            'logs': [_log_entry(f"♻️ Resuming your video after a server update (attempt {attempts}).")],
             'cmd': m.get("cmd"),
             'env': env,
             'output_dir': job_path,
@@ -685,20 +851,23 @@ async def cleanup_jobs():
             await asyncio.sleep(300) # Check every 5 minutes
             now = time.time()
             
-            # Simple directory cleanup based on modification time
-            # Check OUTPUT_DIR
-            for job_id in os.listdir(OUTPUT_DIR):
-                # Not a job: the thumbnails dir backs a StaticFiles mount, so
-                # deleting it would 500 every /thumbnails request until reboot.
-                if job_id == os.path.basename(THUMBNAILS_DIR):
-                    continue
-                job_path = os.path.join(OUTPUT_DIR, job_id)
-                if os.path.isdir(job_path):
-                    if now - os.path.getmtime(job_path) > JOB_RETENTION_SECONDS:
-                        print(f"🧹 Purging old job: {job_id}")
-                        shutil.rmtree(job_path, ignore_errors=True)
-                        if job_id in jobs:
-                            del jobs[job_id]
+            # Age-based directory cleanup — opt-in only (JOB_RETENTION_SECONDS=0
+            # disables it by default). Jobs otherwise persist on disk until the
+            # user explicitly deletes them via /api/history, and are still
+            # bounded by the size caps below so disk usage can't run away.
+            if JOB_RETENTION_SECONDS > 0:
+                for job_id in os.listdir(OUTPUT_DIR):
+                    # Not a job: the thumbnails dir backs a StaticFiles mount, so
+                    # deleting it would 500 every /thumbnails request until reboot.
+                    if job_id == os.path.basename(THUMBNAILS_DIR):
+                        continue
+                    job_path = os.path.join(OUTPUT_DIR, job_id)
+                    if os.path.isdir(job_path):
+                        if now - os.path.getmtime(job_path) > JOB_RETENTION_SECONDS:
+                            print(f"🧹 Purging old job: {job_id}")
+                            shutil.rmtree(job_path, ignore_errors=True)
+                            if job_id in jobs:
+                                del jobs[job_id]
 
             # Hard disk cap. The time-based sweep above bounds the *age* of what
             # we keep, not its size: a burst of long videos can fill the volume
@@ -715,6 +884,7 @@ async def cleanup_jobs():
                     if jdata.get("status") in ("completed", "failed")
                     and jdata.get("output_dir")
                     and os.path.isdir(jdata["output_dir"])
+                    and JOB_RETENTION_SECONDS > 0
                     and now - os.path.getmtime(jdata["output_dir"]) > JOB_RETENTION_SECONDS
                 ]
                 for jid in saas_expired:
@@ -722,11 +892,12 @@ async def cleanup_jobs():
             except NameError:
                 pass
 
-            # Cleanup Uploads
+            # Cleanup Uploads — raw source files, not history; fine to clear
+            # on their own (shorter, always-on) retention regardless of job retention.
             for filename in os.listdir(UPLOAD_DIR):
                 file_path = os.path.join(UPLOAD_DIR, filename)
                 try:
-                    if now - os.path.getmtime(file_path) > JOB_RETENTION_SECONDS:
+                    if now - os.path.getmtime(file_path) > UPLOAD_RETENTION_SECONDS:
                          os.remove(file_path)
                 except Exception: pass
 
@@ -935,9 +1106,10 @@ def _job_error_text(logs) -> str:
     a silent upload got reported as a broken download path, and a Gemini blip
     as an ffmpeg problem. Pick the error-bearing lines instead, newest last.
     """
-    hits = [ln for ln in logs if any(m in ln for m in _ERROR_MARKERS)]
+    texts = [ln.get("text") if isinstance(ln, dict) else str(ln) for ln in logs]
+    hits = [ln for ln in texts if any(m in ln for m in _ERROR_MARKERS)]
     if not hits:
-        return " ".join(logs[-10:])  # nothing recognisable — fall back to the tail
+        return " ".join(texts[-10:])  # nothing recognisable — fall back to the tail
     return " ".join(hits[-6:])
 
 
@@ -1094,19 +1266,29 @@ _SENSITIVE_LOG_RE = re.compile(
 def _visible_logs(logs):
     """Logs to surface to the client.
 
-    Self-host (BILLING off) shows the full pipeline output so people running
-    their own instance can debug. Cloud shows a curated whitelist view
-    (log_view.friendly_logs): plain progress for normal users — transcription
-    percentage, clip counters — with no file paths, model names or pipeline
-    internals.
+    Every log entry is ``{"ts": <epoch seconds>, "text": <str>}`` — the
+    timestamp is captured server-side at append time, never fabricated
+    client-side (round 3, item 3).
 
-    DEBUG_LOGS=true forces the full output even under billing — for local dev
-    where you run in paid mode but still want the raw logs.
+    Self-host (BILLING off) shows pipeline output through a LIGHTWEIGHT noise
+    filter by default (plain_logs: drops bare long URLs, base64 blobs and
+    yt-dlp [debug] spam — the raw-spew complaint), with ?raw=1 opting back
+    into the fully unfiltered stream. Cloud shows the curated whitelist view
+    (log_view.friendly_logs). DEBUG_LOGS=true forces raw everywhere.
     """
-    if not BILLING_ENABLED or DEBUG_LOGS:
-        return logs
-    from log_view import friendly_logs
-    return friendly_logs(logs)
+    raw = DEBUG_LOGS
+    if not raw and not BILLING_ENABLED:
+        from log_view import plain_logs
+        return plain_logs(logs)
+    if not raw:
+        from log_view import friendly_logs
+        return friendly_logs(logs)
+    return logs
+
+
+def _log_entry(text):
+    """One log entry with the REAL capture timestamp (epoch seconds)."""
+    return {"ts": time.time(), "text": str(text)}
 
 
 def enqueue_output(out, job_id):
@@ -1125,7 +1307,7 @@ def enqueue_output(out, job_id):
                     continue
                 print(f"📝 [Job Output] {decoded_line}")
                 if job_id in jobs:
-                    jobs[job_id]['logs'].append(decoded_line)
+                    jobs[job_id]['logs'].append(_log_entry(decoded_line))
     except Exception as e:
         print(f"Error reading output for job {job_id}: {e}")
     finally:
@@ -1139,7 +1321,8 @@ async def run_job(job_id, job_data):
     output_dir = job_data['output_dir']
     
     jobs[job_id]['status'] = 'processing'
-    jobs[job_id]['logs'].append("Job started by worker.")
+    jobs[job_id]['started_at'] = time.time()
+    jobs[job_id]['logs'].append(_log_entry("Job started by worker."))
     print(f"🎬 [run_job] Executing command for {job_id}: {' '.join(cmd)}")
     
     try:
@@ -1150,7 +1333,8 @@ async def run_job(job_id, job_data):
             env=env,
             cwd=os.getcwd()
         )
-        
+        jobs[job_id]['process'] = process
+
         # We need to capture logs in a thread because Popen isn't async
         t_log = threading.Thread(target=enqueue_output, args=(process.stdout, job_id))
         t_log.daemon = True
@@ -1164,7 +1348,7 @@ async def run_job(job_id, job_data):
             # Check for partial results every 2 seconds
             # Look for metadata file
             try:
-                json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+                json_files = _sorted_metadata(glob.glob(os.path.join(output_dir, "*_metadata.json")))
                 if json_files:
                     target_json = json_files[0]
                     # Read metadata (it might be being written to, so simple try/except or just read)
@@ -1179,15 +1363,8 @@ async def run_job(job_id, job_data):
                         cost_analysis = data.get('cost_analysis')
                         
                         # Check which clips actually exist on disk
-                        ready_clips = []
-                        for i, clip in enumerate(clips):
-                             clip_filename = f"{base_name}_clip_{i+1}.mp4"
-                             clip_path = os.path.join(output_dir, clip_filename)
-                             if os.path.exists(clip_path) and os.path.getsize(clip_path) > 0:
-                                 # Checking if file is growing? For now assume if it exists and main.py moves it there, it's done.
-                                 # main.py writes to temp_... then moves to final name. So presence means ready!
-                                 clip['video_url'] = f"/videos/{job_id}/{clip_filename}"
-                                 ready_clips.append(clip)
+                        ready_clips = _collect_ready_clips(
+                            output_dir, base_name, clips, job_id)
                         
                         if ready_clips:
                              jobs[job_id]['result'] = {'clips': ready_clips, 'cost_analysis': cost_analysis}
@@ -1196,10 +1373,16 @@ async def run_job(job_id, job_data):
                 pass
 
         returncode = process.returncode
-        
+
+        if jobs[job_id]['status'] == 'cancelled':
+            # /api/jobs/{job_id}/cancel already set this and killed the
+            # process — the exit code is just "killed", not a real failure.
+            jobs[job_id]['logs'].append(_log_entry("Job cancelled by user."))
+            return
+
         if returncode == 0:
             jobs[job_id]['status'] = 'completed'
-            jobs[job_id]['logs'].append("Process finished successfully.")
+            jobs[job_id]['logs'].append(_log_entry("Process finished successfully."))
             
             # Self-host: silent AWS S3 backup. Cloud mode stores to R2 instead
             # (see _archive_managed_job), so skip the redundant/paid AWS upload.
@@ -1208,11 +1391,11 @@ async def run_job(job_id, job_data):
                 loop.run_in_executor(None, upload_job_artifacts, output_dir, job_id)
             
             # Find result JSON
-            json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+            json_files = _sorted_metadata(glob.glob(os.path.join(output_dir, "*_metadata.json")))
             if not json_files:
                 # Backward-compat rescue if outputs were written to OUTPUT_DIR root
                 if _relocate_root_job_artifacts(job_id, output_dir):
-                    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+                    json_files = _sorted_metadata(glob.glob(os.path.join(output_dir, "*_metadata.json")))
             if json_files:
                 target_json = json_files[0] 
                 with open(target_json, 'r') as f:
@@ -1230,21 +1413,94 @@ async def run_job(job_id, job_data):
                 jobs[job_id]['result'] = {'clips': clips, 'cost_analysis': cost_analysis}
             else:
                  jobs[job_id]['status'] = 'failed'
-                 jobs[job_id]['logs'].append("No metadata file generated.")
+                 jobs[job_id]['logs'].append(_log_entry("No metadata file generated."))
         else:
             jobs[job_id]['status'] = 'failed'
-            jobs[job_id]['logs'].append(_scrub_secrets(f"Process failed with exit code {returncode}"))
+            jobs[job_id]['logs'].append(_log_entry(_scrub_secrets(f"Process failed with exit code {returncode}")))
             
     except Exception as e:
         jobs[job_id]['status'] = 'failed'
         # Exception text can embed URLs with credentials (e.g. the proxy URL
         # inside a yt-dlp/httpx error) — scrub before it reaches client logs.
-        jobs[job_id]['logs'].append(_scrub_secrets(f"Execution error: {str(e)}"))
+        jobs[job_id]['logs'].append(_log_entry(_scrub_secrets(f"Execution error: {str(e)}")))
 
 @app.get("/health")
 async def health():
     """Lightweight liveness probe for uptime monitoring / Coolify health checks."""
     return {"status": "ok"}
+
+@app.get("/api/system")
+async def system_status():
+    """Itemized system status for the dashboard's status strip (plan item 1).
+
+    Every indicator is a REAL, specific check — backend reachability is the
+    request itself, YouTube cookie freshness is the cookies file's mtime (the
+    file main.py writes from YOUTUBE_COOKIES at job start), and GPU is a live
+    nvidia-smi probe. Absent/unknown values render as "unavailable", never as
+    a misleading blanket "offline" state.
+    """
+    # YouTube session cookies: /app/cookies.txt is written by main.py from the
+    # YOUTUBE_COOKIES env at download time; auto_refresh_cookies.sh refreshes
+    # the same file. No file + no env var = self-host BYOK or a fresh deploy.
+    cookies = {"present": False, "age_seconds": None, "refreshed_at": None}
+    for candidate in ("/app/cookies.txt", "cookies.txt"):
+        try:
+            if os.path.exists(candidate):
+                mtime = os.path.getmtime(candidate)
+                cookies = {
+                    "present": True,
+                    "age_seconds": max(0.0, time.time() - mtime),
+                    "refreshed_at": datetime.fromtimestamp(mtime).isoformat(),
+                }
+                break
+        except OSError:
+            continue
+
+    # GPU: quick live probe; null on CPU hosts / missing nvidia-smi.
+    gpu = {"detected": False, "name": None}
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=3)
+        name = (out.stdout or "").strip()
+        if name:
+            gpu = {"detected": True, "name": name.splitlines()[0]}
+    except Exception:
+        pass
+
+    # Storage used vs the OUTPUT_MAX_GB cap — the "GB used / cap" bar the
+    # dashboard should surface honestly (the cap exists server-side but was
+    # never visible before).
+    storage = {"used_gb": 0.0, "cap_gb": OUTPUT_MAX_GB, "pct": 0}
+    try:
+        total = 0
+        for root, _dirs, files in os.walk(OUTPUT_DIR):
+            for f in files:
+                try:
+                    total += os.path.getsize(os.path.join(root, f))
+                except OSError:
+                    continue
+        used_gb = total / (1024 ** 3)
+        storage = {
+            "used_gb": round(used_gb, 2),
+            "cap_gb": OUTPUT_MAX_GB,
+            "pct": int(round(100 * used_gb / max(1, OUTPUT_MAX_GB))),
+        }
+    except Exception:
+        pass
+
+    # Real active-job count (not the reference's decorative spinner) — jobs
+    # currently mid-processing, the same field the header's "Queue" pill
+    # displays.
+    active_jobs = sum(1 for j in jobs.values() if j.get('status') == 'processing')
+
+    return {
+        "backend": True,
+        "cookies": cookies,
+        "gpu": gpu,
+        "storage": storage,
+        "queue": {"active": active_jobs},
+    }
 
 @app.get("/api/config")
 async def get_config():
@@ -1278,7 +1534,15 @@ async def process_endpoint(
     url: Optional[str] = Form(None),
     acknowledged: Optional[str] = Form(None),
     output_format: Optional[str] = Form(None),
-    force_low_quality: Optional[str] = Form(None)
+    force_low_quality: Optional[str] = Form(None),
+    clip_count: Optional[str] = Form(None),
+    long_context_clips: Optional[str] = Form(None),
+    remove_background_audio: Optional[str] = Form(None),
+    custom_width: Optional[str] = Form(None),
+    custom_height: Optional[str] = Form(None),
+    captions: Optional[str] = Form(None),
+    zoom_mode: Optional[str] = Form(None),
+    style_variant: Optional[str] = Form(None)
 ):
     api_key = await resolve_gemini(request)
     if not api_key:
@@ -1286,6 +1550,43 @@ async def process_endpoint(
 
     ack_flag = str(acknowledged).lower() in ("1", "true", "yes")
     force_low = str(force_low_quality).lower() in ("1", "true", "yes")
+    parsed_clip_count = None
+    if clip_count not in (None, ""):
+        try:
+            parsed_clip_count = int(clip_count)
+        except (TypeError, ValueError):
+            parsed_clip_count = None
+        if parsed_clip_count is not None:
+            parsed_clip_count = max(1, min(40, parsed_clip_count))
+    # "" / None -> off. Anything outside the known modes is treated as off
+    # rather than trusted straight into the subprocess argv.
+    parsed_bg_audio = ""
+    if remove_background_audio in ("auto", "isolate", "denoise"):
+        parsed_bg_audio = remove_background_audio
+
+    parsed_long_context = 0
+    if long_context_clips not in (None, ""):
+        try:
+            parsed_long_context = max(0, min(5, int(long_context_clips)))
+        except (TypeError, ValueError):
+            parsed_long_context = 0
+    parsed_custom_w = None
+    parsed_custom_h = None
+    if custom_width not in (None, "") and custom_height not in (None, ""):
+        try:
+            parsed_custom_w = int(custom_width)
+            parsed_custom_h = int(custom_height)
+            if not (100 <= parsed_custom_w <= 4000 and 100 <= parsed_custom_h <= 4000):
+                parsed_custom_w = parsed_custom_h = None
+        except (TypeError, ValueError):
+            parsed_custom_w = parsed_custom_h = None
+    captions_on = str(captions).lower() not in ("0", "false", "no", "off")
+    zoom_mode = str(zoom_mode or "auto").strip().lower()
+    if zoom_mode not in ("auto", "track", "wide"):
+        zoom_mode = "auto"
+    style_variant = str(style_variant or "balanced").strip().lower()
+    if style_variant not in ("balanced", "high_energy", "story_driven"):
+        style_variant = "balanced"
 
     # Handle JSON body manually for URL payload
     content_type = request.headers.get("content-type", "")
@@ -1295,9 +1596,40 @@ async def process_endpoint(
         ack_flag = bool(body.get("acknowledged"))
         force_low = bool(body.get("force_low_quality"))
         output_format = body.get("output_format")
+        body_clip_count = body.get("clip_count")
+        if body_clip_count is not None:
+            try:
+                parsed_clip_count = max(1, min(40, int(body_clip_count)))
+            except (TypeError, ValueError):
+                pass
+        body_bg_audio = body.get("remove_background_audio")
+        if body_bg_audio in ("auto", "isolate", "denoise"):
+            parsed_bg_audio = body_bg_audio
+        body_long_context = body.get("long_context_clips")
+        if body_long_context is not None:
+            try:
+                parsed_long_context = max(0, min(5, int(body_long_context)))
+            except (TypeError, ValueError):
+                pass
+        body_cw = body.get("custom_width")
+        body_ch = body.get("custom_height")
+        if body_cw is not None and body_ch is not None:
+            try:
+                parsed_custom_w = int(body_cw)
+                parsed_custom_h = int(body_ch)
+                if not (100 <= parsed_custom_w <= 4000 and 100 <= parsed_custom_h <= 4000):
+                    parsed_custom_w = parsed_custom_h = None
+            except (TypeError, ValueError):
+                pass
+        if body.get("captions") is not None:
+            captions_on = str(body.get("captions")).lower() not in ("0", "false", "no", "off")
+        if body.get("zoom_mode") in ("auto", "track", "wide"):
+            zoom_mode = body.get("zoom_mode")
+        if body.get("style_variant") in ("balanced", "high_energy", "story_driven"):
+            style_variant = body.get("style_variant")
 
     # Normalize output format (auto = keep pipeline default).
-    if output_format not in ("vertical", "horizontal", "square"):
+    if output_format not in ("vertical", "horizontal", "square", "custom"):
         output_format = "auto"
 
     if not url and not file:
@@ -1308,6 +1640,38 @@ async def process_endpoint(
 
     if url and DISABLE_YOUTUBE_URL:
         raise HTTPException(status_code=403, detail="YouTube URL ingest is disabled on this deployment. Please upload a file you own.")
+
+    # Same-source reuse (round-5 feature): a completed job for this exact URL
+    # already produced playable clips — map to it instead of re-downloading,
+    # re-analyzing and re-rendering from scratch. Registers the existing job
+    # in memory (same shape as restore) so every edit endpoint works.
+    if url:
+        existing_job = _find_completed_job_for_source(url)
+        if existing_job:
+            job_path = os.path.join(OUTPUT_DIR, existing_job)
+            meta = _newest_metadata_file(job_path)
+            if meta:
+                with open(meta, 'r') as f:
+                    data = json.load(f)
+                base_name = os.path.basename(meta).replace('_metadata.json', '')
+                clips = data.get('shorts', [])
+                for i, clip in enumerate(clips):
+                    if not clip.get('video_url'):
+                        clip['video_url'] = (
+                            f"/videos/{existing_job}/"
+                            f"{_canonical_clip_file(job_path, base_name, i)}")
+                jobs[existing_job] = {
+                    'status': 'completed',
+                    'logs': [_log_entry(
+                        "♻️ Reusing existing clips for this source.")],
+                    'output_dir': job_path,
+                    'user_id': None,
+                    'result': {'clips': clips,
+                               'cost_analysis': data.get('cost_analysis')},
+                }
+                print(f"♻️ Reusing completed job {existing_job} for {url}")
+                return {"job_id": existing_job, "status": "completed",
+                        "reused": True}
 
     # Pre-flight quality gate: probe the offered resolution BEFORE starting, so
     # the user can abort (refresh cookies / update yt-dlp) instead of burning
@@ -1343,11 +1707,29 @@ async def process_endpoint(
     job_id = str(uuid.uuid4())
     job_output_dir = os.path.join(OUTPUT_DIR, job_id)
     os.makedirs(job_output_dir, exist_ok=True)
+    # Record when this job was CREATED. The history list used the job
+    # directory's mtime, which a directory updates every time a file is added
+    # or removed inside it — so subtitling, re-rendering or deleting a clip
+    # silently re-dated the project. Measured across the existing library:
+    # every job was showing the wrong DAY, drifting up to 43.5 hours.
+    _mark_job_created(job_output_dir)
 
     # Prepare Command
     cmd = ["python", "-u", "main.py"] # -u for unbuffered
     env = os.environ.copy()
     env["GEMINI_API_KEY"] = api_key # Override with key from request
+    assemblyai_key = await resolve_assemblyai(request)
+    if assemblyai_key:
+        env["ASSEMBLYAI_API_KEY"] = assemblyai_key
+    deepseek_key = await resolve_deepseek(request)
+    if deepseek_key:
+        env["DEEPSEEK_API_KEY"] = deepseek_key
+    gemini_pool = await resolve_gemini_pool(request)
+    if len(gemini_pool) > 1:
+        # Primary key already lands in GEMINI_API_KEY above; only the extras
+        # need passing separately (gemini_pool.pool_from_env folds both back
+        # together in the subprocess).
+        env["GEMINI_API_KEYS"] = ",".join(k for k in gemini_pool if k != api_key)
 
     input_path = None
     if url:
@@ -1377,6 +1759,21 @@ async def process_endpoint(
     cmd.extend(["-o", job_output_dir])
     if output_format and output_format != "auto":
         cmd.extend(["--format", output_format])
+    if parsed_clip_count is not None:
+        cmd.extend(["--clip-count", str(parsed_clip_count)])
+    if parsed_long_context > 0:
+        cmd.extend(["--long-context-clips", str(parsed_long_context)])
+    if output_format == "custom" and parsed_custom_w and parsed_custom_h:
+        cmd.extend(["--custom-width", str(parsed_custom_w),
+                    "--custom-height", str(parsed_custom_h)])
+    if style_variant != "balanced":
+        cmd.extend(["--style-variant", style_variant])
+    if parsed_bg_audio:
+        cmd.extend(["--remove-background-audio", parsed_bg_audio])
+    if not captions_on:
+        env["AUTO_CAPTIONS"] = "0"
+    if zoom_mode != "auto":
+        env["SCENE_STRATEGY_OVERRIDE"] = zoom_mode
 
     print(f"[attestation] job={job_id} ip={attestation['ip']} source={attestation['source']} ack=true")
 
@@ -1390,7 +1787,7 @@ async def process_endpoint(
     # Enqueue Job
     jobs[job_id] = {
         'status': 'queued',
-        'logs': [f"Job {job_id} queued."],
+        'logs': [_log_entry(f"Job {job_id} queued.")],
         'cmd': cmd,
         'env': env,
         'output_dir': job_output_dir,
@@ -1426,11 +1823,311 @@ async def get_status(job_id: str, request: Request):
 
     job = jobs[job_id]
     await _assert_job_owner(request, job)
+    # Live progress snapshot written by the main.py subprocess (see
+    # pipeline_progress.write_progress). Absent -> null, UI falls back to a
+    # stage-less spinner. When present, enrich it with the ETA computed from
+    # the rolling per-stage averages (plan round 2, item 3).
+    progress = None
+    try:
+        progress_path = os.path.join(job['output_dir'], "progress.json")
+        if os.path.exists(progress_path):
+            with open(progress_path, 'r') as f:
+                progress = json.load(f)
+            from pipeline_progress import estimate_eta_seconds
+            progress['eta_seconds'] = estimate_eta_seconds(
+                job['output_dir'], progress)
+            # Real "x.x faster than realtime" (round 3, item 3): source
+            # duration over wall-clock elapsed since the job started. Null
+            # until the duration is known and some time has actually elapsed.
+            started_at = job.get('started_at')
+            duration = progress.get('duration_seconds')
+            if started_at and duration:
+                elapsed = time.time() - started_at
+                if elapsed > 5:
+                    progress['speed_multiplier'] = round(
+                        float(duration) / elapsed, 2)
+    except Exception:
+        progress = None
+
+    # Rolling per-stage averages for the performance chart — means only, no
+    # fabricated series.
+    stage_durations = None
+    try:
+        sd_path = os.path.join(job['output_dir'], "stage_durations.json")
+        if os.path.exists(sd_path):
+            with open(sd_path, 'r') as f:
+                raw = json.load(f)
+            stage_durations = {
+                k: round(float(v.get("mean") or 0.0), 1)
+                for k, v in raw.items() if isinstance(v, dict)
+            }
+    except Exception:
+        stage_durations = None
     return {
         "status": job['status'],
         "logs": _visible_logs(job['logs']),
-        "result": job.get('result')
+        "result": job.get('result'),
+        "progress": progress,
+        "stage_durations": stage_durations,
     }
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+async def cancel_job(job_id: str, request: Request):
+    """Stop a running job. The user asked for this explicitly — starting the
+    wrong video and having no way to stop it short of restarting the whole
+    backend was a real gap."""
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = jobs[job_id]
+    await _assert_job_owner(request, job)
+    if job['status'] != 'processing':
+        raise HTTPException(status_code=400, detail=f"Job is {job['status']}, not running")
+
+    job['status'] = 'cancelled'
+    process = job.get('process')
+    if process and process.poll() is None:
+        process.terminate()
+
+        async def _force_kill_if_stuck():
+            await asyncio.sleep(5)
+            if process.poll() is None:
+                process.kill()
+        asyncio.create_task(_force_kill_if_stuck())
+    return {"status": "cancelled"}
+
+
+_CREATED_MARKER = ".created"
+
+
+def _mark_job_created(job_path):
+    """Stamp the job's real creation time (best-effort, never fatal)."""
+    try:
+        marker = os.path.join(job_path, _CREATED_MARKER)
+        if not os.path.exists(marker):
+            with open(marker, "w") as f:
+                f.write(str(time.time()))
+    except OSError:
+        pass
+
+
+def _job_created_at(job_path):
+    """When this job was actually generated, newest-first ordering aside.
+
+    Prefers the explicit marker. Falls back to the OLDEST file in the job
+    directory — the first thing the pipeline wrote, i.e. roughly when
+    generation began — because the directory's own mtime tracks the LAST
+    change to its contents, not the first.
+    """
+    marker = os.path.join(job_path, _CREATED_MARKER)
+    try:
+        with open(marker) as f:
+            return float(f.read().strip())
+    except (OSError, ValueError):
+        pass
+    oldest = None
+    try:
+        for root, _dirs, files in os.walk(job_path):
+            for name in files:
+                try:
+                    ts = os.path.getmtime(os.path.join(root, name))
+                except OSError:
+                    continue
+                if oldest is None or ts < oldest:
+                    oldest = ts
+    except OSError:
+        pass
+    if oldest is not None:
+        return oldest
+    try:
+        return os.path.getmtime(job_path)
+    except OSError:
+        return time.time()
+
+
+@app.get("/api/history")
+async def list_history(request: Request):
+    """Every clip still on disk, newest job first — the durable history view.
+
+    Reads OUTPUT_DIR directly rather than the in-memory ``jobs`` dict, so it
+    reflects everything _recover_jobs_from_disk would rebuild after a restart,
+    without waiting for a restart to happen. Jobs only leave this list when the
+    user explicitly deletes them via DELETE /api/history/{job_id} — age-based
+    purging is off by default (JOB_RETENTION_SECONDS=0).
+
+    Shape matches the self-host self-serve library (one item per clip, grouped
+    client-side by job_id): {"videos": [{id, job_id, title, created_at,
+    view_url, download_url}]}.
+    """
+    owner = await _request_owner_id(request)
+    videos = []
+    try:
+        job_ids = os.listdir(OUTPUT_DIR)
+    except FileNotFoundError:
+        job_ids = []
+    for job_id in job_ids:
+        job_path = os.path.join(OUTPUT_DIR, job_id)
+        if job_id == os.path.basename(THUMBNAILS_DIR) or not os.path.isdir(job_path):
+            continue
+        # Ownership is checked before anything else so it guards the
+        # no-metadata branch below too.
+        job_owner = None
+        owner_path = os.path.join(job_path, ".owner")
+        if os.path.exists(owner_path):
+            try:
+                raw = open(owner_path).read().strip()
+                job_owner = int(raw) if raw.isdigit() else (raw or None)
+            except Exception:
+                job_owner = None
+        if job_owner is not None and job_owner != owner:
+            continue
+
+        json_files = _sorted_metadata(glob.glob(os.path.join(job_path, "*_metadata.json")))
+        if not json_files:
+            # A job that died BEFORE the analysis step ever wrote metadata.
+            # It can still hold the entire downloaded source video (hundreds of
+            # MB), and skipping it here meant it appeared nowhere in the UI —
+            # so there was no way to see it, and no way to delete it. The disk
+            # just filled up invisibly. Surface it as a failed project carrying
+            # its real on-disk size so it can be reviewed and removed.
+            total = 0
+            biggest = None
+            for root, _dirs, files in os.walk(job_path):
+                for name in files:
+                    try:
+                        size = os.path.getsize(os.path.join(root, name))
+                    except OSError:
+                        continue
+                    total += size
+                    if biggest is None or size > biggest[1]:
+                        biggest = (name, size)
+            label = os.path.splitext(biggest[0])[0].replace('.f140-4', '') if biggest else None
+            videos.append({
+                "id": f"{job_id}_0",
+                "job_id": job_id,
+                "title": label or "Unfinished project",
+                "created_at": datetime.fromtimestamp(
+                    _job_created_at(job_path), tz=timezone.utc).isoformat(),
+                "status": "failed",
+                "size_bytes": total,
+                "view_url": "",
+                "download_url": "",
+            })
+            continue
+        try:
+            with open(json_files[0], 'r') as f:
+                data = json.load(f)
+            base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
+            clips = data.get('shorts', [])
+            created_at = datetime.fromtimestamp(
+                _job_created_at(job_path), tz=timezone.utc).isoformat()
+            # Per-job status for the history rail's filter chips: real signal
+            # from progress.json when present; fall back to playability for
+            # legacy jobs (pre-progress) — metadata with no playable clips
+            # means the render never produced anything.
+            job_status = "processing"
+            progress_path = os.path.join(job_path, "progress.json")
+            has_progress = False
+            if os.path.exists(progress_path):
+                has_progress = True
+                try:
+                    with open(progress_path, 'r') as pf:
+                        stage = (json.load(pf) or {}).get("stage")
+                    if stage == "finalize":
+                        job_status = "completed"
+                except Exception:
+                    pass
+            playable = 0
+            for i, clip in enumerate(clips):
+                filename = _canonical_clip_file(job_path, base_name, i)
+                if not os.path.exists(os.path.join(job_path, filename)):
+                    continue
+                playable += 1
+                videos.append({
+                    "id": f"{job_id}_{i}",
+                    "job_id": job_id,
+                    # Prefer the AI-written short title the narrative pass
+                    # already produces — raw source slugs in the UI read as
+                    # "the AI isn't doing the creative part" (round-4 teardown).
+                    "title": (clip.get("title")
+                              or clip.get("video_title_for_youtube_short")
+                              or base_name),
+                    "created_at": created_at,
+                    "status": job_status,
+                    "duration": max(0.0, float(clip.get("end") or 0) - float(clip.get("start") or 0)),
+                    "size_bytes": os.path.getsize(os.path.join(job_path, filename))
+                    if os.path.exists(os.path.join(job_path, filename)) else 0,
+                    "view_url": f"/videos/{job_id}/{filename}",
+                    "download_url": f"/videos/{job_id}/{filename}",
+                })
+            if job_status == "processing" and playable == 0:
+                job_status = "failed"
+                # Keep the job visible in history (the rail's Failed filter is
+                # only real if failures surface): one entry with no media, so
+                # the UI can render a "failed" tile instead of a broken player.
+                videos.append({
+                    "id": f"{job_id}_0",
+                    "job_id": job_id,
+                    "title": (clips[0].get("title") if clips else None) or base_name,
+                    "created_at": created_at,
+                    "status": job_status,
+                    "view_url": "",
+                    "download_url": "",
+                })
+            elif job_status == "processing" and playable > 0 and not has_progress:
+                # A legacy job (no progress.json) that produced clips is done.
+                job_status = "completed"
+                for v in videos:
+                    if v["job_id"] == job_id:
+                        v["status"] = job_status
+        except Exception as e:
+            print(f"⚠️ Could not read history entry {job_id}: {e}")
+    videos.sort(key=lambda v: v["created_at"], reverse=True)
+    return {"videos": videos}
+
+
+@app.delete("/api/history/{job_id}")
+async def delete_history_job(job_id: str, request: Request):
+    """Explicitly delete a job's files and drop it from history. Irreversible —
+    this is the only way a job now leaves history, per user direction after
+    losing videos to the old 1-hour auto-purge."""
+    job_path = _safe_under(OUTPUT_DIR, job_id)
+    if not job_path or not os.path.isdir(job_path):
+        raise HTTPException(status_code=404, detail="Job not found")
+    owner = await _request_owner_id(request)
+    owner_path = os.path.join(job_path, ".owner")
+    if os.path.exists(owner_path):
+        raw = open(owner_path).read().strip()
+        job_owner = int(raw) if raw.isdigit() else (raw or None)
+        if job_owner is not None and job_owner != owner:
+            raise HTTPException(status_code=403, detail="Not your job")
+    # Measure before removing so the UI can tell the user what it actually
+    # reclaimed — "storage is adding up" is the reason this button gets used.
+    freed = 0
+    for root, _dirs, files in os.walk(job_path):
+        for name in files:
+            try:
+                freed += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                pass
+
+    shutil.rmtree(job_path, ignore_errors=True)
+
+    # The uploaded SOURCE lives outside the job directory, so removing only the
+    # job dir left the (often largest) original file on disk forever — deleting
+    # a project appeared to free far less space than it should.
+    for f in glob.glob(os.path.join(UPLOAD_DIR, f"{job_id}_*")):
+        try:
+            freed += os.path.getsize(f)
+        except OSError:
+            pass
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+
+    jobs.pop(job_id, None)
+    return {"deleted": job_id, "freed_bytes": freed}
 
 
 @app.get("/api/source/{job_id}")
@@ -1441,13 +2138,151 @@ async def get_source_video(job_id: str):
     so the recovered session points the preview here instead. Unauthenticated
     like the /videos mount — the UUID job_id is the capability.
     """
+    path = _resolve_source_path(job_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail="Source not found")
+    return FileResponse(path, media_type="video/mp4")
+
+
+def _resolve_source_path(job_id: str):
+    """Absolute path of a job's original source video, or None.
+
+    Uploads live in UPLOAD_DIR as ``{job_id}_*``; URL jobs download into the
+    job dir and main.py stamps the filename into metadata (``source_file``).
+    Failed jobs never reach the metadata write, so as a last resort the job
+    dir itself is scanned for a plausible source (the largest remaining .mp4
+    that is not a clip/derivative) — the user must be able to SEE what was
+    actually downloaded even when the pipeline rejected everything.
+    """
     matches = [
         f for f in glob.glob(os.path.join(UPLOAD_DIR, f"{job_id}_*"))
         if not os.path.basename(f).startswith("thumb_")
     ]
-    if not matches:
+    if matches:
+        return matches[0]
+    job_path = os.path.join(OUTPUT_DIR, job_id)
+    meta = _newest_metadata_file(job_path)
+    if meta:
+        try:
+            with open(meta, 'r') as f:
+                data = json.load(f)
+            source_file = data.get('source_file')
+            if source_file:
+                candidate = os.path.join(job_path, source_file)
+                if os.path.exists(candidate):
+                    return candidate
+        except Exception:
+            pass
+    # Fallback for jobs that failed before metadata was written: the largest
+    # non-derivative video in the job dir is almost certainly the source.
+    candidates = [
+        os.path.join(job_path, f)
+        for f in os.listdir(job_path)
+        if f.lower().endswith(".mp4") and not _is_derived_source_file(f)
+    ]
+    if candidates:
+        return max(candidates, key=os.path.getsize)
+    return None
+
+
+def _is_derived_source_file(name):
+    """True for clip/derivative filenames — never a candidate for "the source".
+
+    Excludes rendered clips, subtitled/hook derivatives, temp files, the
+    preview proxy and the stills directory.
+    """
+    base = os.path.basename(name or "")
+    if any(base.startswith(p) for p in (
+            "subtitled_", "hook_", "temp_", "autosubs_", ".source_preview",
+            "source_preview", "source_frames")):
+        return True
+    return "_clip_" in base
+
+
+SOURCE_FRAME_COUNT = int(os.environ.get("SOURCE_FRAME_COUNT", "12"))
+
+
+@app.get("/api/source/{job_id}/images")
+async def source_images(job_id: str):
+    """Lazily-extracted stills from the source video (round-5 Source section).
+
+    Generates ``SOURCE_FRAME_COUNT`` evenly-spaced JPEG frames into
+    ``<job>/source_frames/`` on first request (cached thereafter) and returns
+    their URLs — served through the existing /videos static mount, so they
+    load instantly with zero transcoding on the front end.
+    """
+    job_path = os.path.join(OUTPUT_DIR, job_id)
+    frames_dir = os.path.join(job_path, "source_frames")
+    existing = sorted(glob.glob(os.path.join(frames_dir, "source_*.jpg")))
+    path = _resolve_source_path(job_id)
+    if len(existing) < SOURCE_FRAME_COUNT and path is None:
         raise HTTPException(status_code=404, detail="Source not found")
-    return FileResponse(matches[0], media_type="video/mp4")
+    os.makedirs(frames_dir, exist_ok=True)
+    if len(existing) < SOURCE_FRAME_COUNT:
+        existing = []
+        try:
+            probe = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "csv=p=0", path],
+                capture_output=True, text=True, timeout=30)
+            duration = float(probe.stdout.strip() or 0)
+        except Exception:
+            duration = 0.0
+        if duration > 0:
+            # Fast extraction: keyframe seek per still (no full decode).
+            for idx in range(SOURCE_FRAME_COUNT):
+                t = duration * (idx + 0.5) / SOURCE_FRAME_COUNT
+                subprocess.run(
+                    ["ffmpeg", "-y", "-loglevel", "error",
+                     "-ss", f"{t:.2f}", "-i", path,
+                     "-frames:v", "1",
+                     "-vf", "scale='min(480,iw)':-2",
+                     os.path.join(frames_dir, f"source_{idx + 1:02d}.jpg")],
+                    check=True, timeout=60)
+            existing = sorted(glob.glob(os.path.join(frames_dir, "source_*.jpg")))
+    frames = []
+    for i, frame_path in enumerate(existing):
+        try:
+            stamp = float(os.path.getmtime(frame_path))
+        except OSError:
+            stamp = 0
+        frames.append({
+            "index": i,
+            "url": f"/videos/{job_id}/source_frames/{os.path.basename(frame_path)}",
+        })
+    return {"source_url": f"/api/source/{job_id}", "frames": frames}
+
+
+@app.get("/api/source/{job_id}/preview.mp4")
+async def source_preview(job_id: str):
+    """Low-bitrate, +faststart preview proxy of the source video (cached).
+
+    The full-quality source can be tens of MB at a high bitrate — the reason
+    the source preview buffered. This lazily transcodes a ~480p, ~1Mbps,
+    faststart copy once per job and serves THAT to the browser, keeping the
+    original untouched for download/processing. Fail-open: if the transcode
+    fails, serve the original (slow but correct).
+    """
+    preview = os.path.join(OUTPUT_DIR, job_id, "source_preview.mp4")
+    if os.path.exists(preview):
+        return FileResponse(preview, media_type="video/mp4")
+    path = _resolve_source_path(job_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail="Source not found")
+    if not os.path.exists(preview):
+        tmp = os.path.join(OUTPUT_DIR, job_id, ".source_preview.tmp.mp4")
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error", "-i", path,
+                 "-t", "90", "-vf", "scale='min(720,iw)':-2",
+                 "-c:v", "libx264", "-preset", "fast", "-crf", "30",
+                 "-an", "-movflags", "+faststart", tmp],
+                check=True, timeout=300)
+            os.replace(tmp, preview)
+        except Exception as e:
+            print(f"⚠️ source preview transcode failed ({e}) — serving original")
+            return FileResponse(path, media_type="video/mp4")
+    return FileResponse(preview, media_type="video/mp4")
 
 
 @app.get("/api/jobs/{job_id}/download-all")
@@ -1458,7 +2293,7 @@ async def download_all_clips(job_id: str, request: Request):
         await _assert_job_owner(request, jobs[job_id])
 
     output_dir = os.path.join(OUTPUT_DIR, job_id)
-    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+    json_files = _sorted_metadata(glob.glob(os.path.join(output_dir, "*_metadata.json")))
     if not json_files:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -1516,7 +2351,44 @@ _restore_locks: Dict[str, asyncio.Lock] = {}
 @app.post("/api/projects/{job_id}/restore")
 async def restore_project(job_id: str, request: Request):
     if not BILLING_ENABLED:
-        raise HTTPException(status_code=404, detail="Not found")
+        # Self-host: every job on disk IS the project — no R2, no DB. Rebuild
+        # the in-memory record from the metadata + clips that are already
+        # there, and build a project_state so editing resumes unchanged.
+        job_dir = os.path.join(OUTPUT_DIR, job_id)
+        json_files = _sorted_metadata(glob.glob(os.path.join(job_dir, "*_metadata.json")))
+        if not json_files or not os.path.isdir(job_dir):
+            raise HTTPException(status_code=404, detail="Project not found")
+        with open(json_files[0], 'r') as f:
+            data = json.load(f)
+        base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
+        clips = data.get('shorts', [])
+        state_clips = []
+        for i, clip in enumerate(clips):
+            filename = _canonical_clip_file(job_dir, base_name, i)
+            if not os.path.exists(os.path.join(job_dir, filename)):
+                continue
+            clip['video_url'] = f"/videos/{job_id}/{filename}"
+            state_clips.append({
+                "index": i,
+                "server_file": filename,
+                "active_layers": [],
+            })
+        jobs[job_id] = {
+            'status': 'completed',
+            'logs': [_log_entry("♻️ Project restored from your library.")],
+            'output_dir': job_dir,
+            'user_id': None,
+            'result': {'clips': clips, 'cost_analysis': data.get('cost_analysis')},
+        }
+        first = clips[0] if clips else None
+        return {
+            "job_id": job_id,
+            "status": "completed",
+            "result": jobs[job_id]['result'],
+            "project_state": {"clips": state_clips},
+            "title": ((first.get("video_title_for_youtube_short")
+                       or first.get("title")) if first else None) or base_name,
+        }
     from sqlalchemy import select
     from cloud.auth import get_current_user_required
     from cloud.models import Project
@@ -1584,7 +2456,7 @@ async def restore_project(job_id: str, request: Request):
 
         # Register (or refresh) the in-memory job — same shape as
         # _recover_jobs_from_disk, so every edit endpoint works unchanged.
-        json_files = glob.glob(os.path.join(job_dir, "*_metadata.json"))
+        json_files = _sorted_metadata(glob.glob(os.path.join(job_dir, "*_metadata.json")))
         if not json_files:
             raise HTTPException(status_code=502, detail="Project metadata missing")
         with open(json_files[0], 'r') as f:
@@ -1598,7 +2470,7 @@ async def restore_project(job_id: str, request: Request):
                     f"{_canonical_clip_file(job_dir, base_name, i)}")
         jobs[job_id] = {
             'status': 'completed',
-            'logs': ["♻️ Project restored from your library."],
+            'logs': [_log_entry("♻️ Project restored from your library.")],
             'output_dir': job_dir,
             'user_id': str(user.id),
             'result': {'clips': clips, 'cost_analysis': data.get('cost_analysis')},
@@ -1611,6 +2483,43 @@ async def restore_project(job_id: str, request: Request):
         "project_state": proj.state,
         "title": proj.title,
     }
+
+
+@app.get("/api/projects")
+async def list_projects(request: Request):
+    """Projects the current user can reopen, newest first.
+
+    Self-host: every job dir on disk with playable clips (same source as
+    /api/history). Cloud: the signed-in user's Project rows.
+    """
+    if not BILLING_ENABLED:
+        history = await list_history(request)
+        by_job = {}
+        for v in history.get("videos", []):
+            if v["job_id"] not in by_job:
+                by_job[v["job_id"]] = {
+                    "job_id": v["job_id"],
+                    "title": v["title"],
+                    "created_at": v["created_at"],
+                }
+        return {"projects": sorted(
+            by_job.values(), key=lambda p: p.get("created_at") or "", reverse=True)}
+    from sqlalchemy import select
+    from cloud.auth import get_current_user_required
+    from cloud.models import Project
+    from cloud import database as cloud_db
+
+    user = await get_current_user_required(request)
+    async with cloud_db.session() as s:
+        rows = (await s.execute(
+            select(Project).where(Project.user_id == user.id)
+            .order_by(Project.created_at.desc())
+        )).scalars().all()
+    return {"projects": [
+        {"job_id": p.job_id, "title": p.title,
+         "created_at": p.created_at.isoformat() if p.created_at else None}
+        for p in rows
+    ]}
 
 
 async def _ensure_job_files(job_id: str, request: Request) -> bool:
@@ -1741,7 +2650,7 @@ async def edit_clip(
                 # Load transcript from metadata
                 transcript = None
                 try:
-                    meta_files = glob.glob(os.path.join(OUTPUT_DIR, req.job_id, "*_metadata.json"))
+                    meta_files = _sorted_metadata(glob.glob(os.path.join(OUTPUT_DIR, req.job_id, "*_metadata.json")))
                     if meta_files:
                         with open(meta_files[0], 'r') as f:
                             data = json.load(f)
@@ -1794,7 +2703,7 @@ async def edit_clip(
         if req.clip_index < len(job['result']['clips']):
             job['result']['clips'][req.clip_index]['video_url'] = new_video_url
         try:
-            meta_files = glob.glob(os.path.join(OUTPUT_DIR, req.job_id, "*_metadata.json"))
+            meta_files = _sorted_metadata(glob.glob(os.path.join(OUTPUT_DIR, req.job_id, "*_metadata.json")))
             if meta_files:
                 with open(meta_files[0], 'r') as f:
                     meta = json.load(f)
@@ -1823,6 +2732,16 @@ async def edit_clip(
         print(f"❌ Edit Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+class CaptionWordEdit(BaseModel):
+    """One (possibly user-corrected) caption word, clip-relative — same
+    shape GET /api/clip/{job_id}/{clip_index}/transcript returns, so the
+    modal can round-trip what it already fetched without reshaping it."""
+    text: str
+    startMs: int
+    endMs: int
+    speaker: Optional[str] = None
+
+
 class SubtitleRequest(BaseModel):
     job_id: str
     clip_index: int
@@ -1839,6 +2758,14 @@ class SubtitleRequest(BaseModel):
     effect: str = "none"  # none | glow | pop | box (karaoke only)
     base_opacity: float = 1.0  # opacity of non-active words (dimmed modern look)
     uppercase: bool = False
+    speaker_colors: bool = False  # each diarized speaker gets their own colour (karaoke only)
+    # User-edited word list (e.g. fixing a mis-transcribed word) — when
+    # present, this REPLACES the words re-read from metadata.json's stored
+    # transcript instead of being silently discarded. Previously the
+    # subtitle modal's textarea edit only ever reached the in-browser
+    # Remotion preview path; a karaoke/legacy-burn request ignored it
+    # entirely (ground-truthed 1-aug-2026).
+    captions: Optional[List[CaptionWordEdit]] = None
     input_filename: Optional[str] = None
 
 
@@ -1851,7 +2778,7 @@ async def get_clip_transcript(job_id: str, clip_index: int, request: Request):
 
     await _assert_job_owner(request, jobs[job_id])
     output_dir = os.path.join(OUTPUT_DIR, job_id)
-    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+    json_files = _sorted_metadata(glob.glob(os.path.join(output_dir, "*_metadata.json")))
 
     if not json_files:
         raise HTTPException(status_code=404, detail="Metadata not found")
@@ -1871,15 +2798,20 @@ async def get_clip_transcript(job_id: str, clip_index: int, request: Request):
     clip_start = clip_data.get('start', 0)
     clip_end = clip_data.get('end', 0)
 
-    # Extract words within clip range and convert to CaptionWord format
+    # Extract words within clip range and convert to CaptionWord format.
+    # 'speaker' rides along (segment-level, per AssemblyAI's diarization) so
+    # an edit round-trip through POST /api/subtitle's `captions` field can
+    # still colour per speaker (see CaptionWordEdit) instead of losing it.
     captions = []
     for segment in transcript.get('segments', []):
+        seg_speaker = segment.get('speaker')
         for word_info in segment.get('words', []):
             if word_info['end'] > clip_start and word_info['start'] < clip_end:
                 captions.append({
                     "text": word_info.get('word', '').strip(),
                     "startMs": int((max(0, word_info['start'] - clip_start)) * 1000),
                     "endMs": int((max(0, word_info['end'] - clip_start)) * 1000),
+                    "speaker": word_info.get('speaker', seg_speaker),
                 })
 
     duration_sec = clip_end - clip_start
@@ -2010,7 +2942,7 @@ async def generate_effects_config(
                 # Load transcript from metadata
                 transcript = None
                 try:
-                    meta_files = glob.glob(os.path.join(OUTPUT_DIR, req.job_id, "*_metadata.json"))
+                    meta_files = _sorted_metadata(glob.glob(os.path.join(OUTPUT_DIR, req.job_id, "*_metadata.json")))
                     if meta_files:
                         with open(meta_files[0], 'r') as f:
                             data = json.load(f)
@@ -2062,7 +2994,7 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
 
     # We need to access metadata.json to get the transcript
     output_dir = os.path.join(OUTPUT_DIR, req.job_id)
-    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+    json_files = _sorted_metadata(glob.glob(os.path.join(output_dir, "*_metadata.json")))
     
     if not json_files:
         raise HTTPException(status_code=404, detail="Metadata not found")
@@ -2073,13 +3005,42 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
     transcript = data.get('transcript')
     if not transcript:
         raise HTTPException(status_code=400, detail="Transcript not found in metadata. Please process a new video.")
-        
+
     clips = data.get('shorts', [])
     if req.clip_index >= len(clips):
         raise HTTPException(status_code=404, detail="Clip not found")
-        
+
     clip_data = clips[req.clip_index]
-    
+
+    # Edited captions (see CaptionWordEdit) replace the stored transcript's
+    # words for THIS burn — wrapped as a single synthetic segment at
+    # clip-relative time (0..duration) so the rest of the pipeline (which
+    # expects transcript-shaped input) doesn't need a second code path.
+    # Previously the modal's textarea edit only ever reached the in-browser
+    # Remotion preview path; a karaoke/legacy-burn request ignored it
+    # entirely (ground-truthed 1-aug-2026).
+    caption_transcript = transcript
+    caption_clip_start = clip_data['start']
+    caption_clip_end = clip_data['end']
+    if req.captions:
+        duration = max((c.endMs for c in req.captions), default=0) / 1000.0
+        caption_transcript = {
+            'language': transcript.get('language', 'en'),
+            'segments': [{
+                'start': 0, 'end': duration,
+                'words': [
+                    {
+                        'word': (c.text if i == 0 else f" {c.text}"),
+                        'start': c.startMs / 1000.0,
+                        'end': c.endMs / 1000.0,
+                        'speaker': c.speaker,
+                    }
+                    for i, c in enumerate(req.captions)
+                ],
+            }],
+        }
+        caption_clip_start, caption_clip_end = 0, duration
+
     # Video Path
     if req.input_filename:
         # Use chained file
@@ -2113,6 +3074,7 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
         border_width=req.border_width, highlight_color=req.highlight_color,
         bg_color=req.bg_color, bg_opacity=req.bg_opacity,
         effect=req.effect, base_opacity=req.base_opacity, uppercase=req.uppercase,
+        speaker_colors=req.speaker_colors,
     )
 
     # Output video
@@ -2151,9 +3113,10 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
             loop = asyncio.get_event_loop()
             success = await loop.run_in_executor(None, run_transcribe_srt)
         elif is_karaoke:
-            success = generate_ass(transcript, clip_data['start'], clip_data['end'], srt_path, **karaoke_opts)
+            success = generate_ass(caption_transcript, caption_clip_start, caption_clip_end,
+                                   srt_path, **karaoke_opts)
         else:
-            success = generate_srt(transcript, clip_data['start'], clip_data['end'], srt_path)
+            success = generate_srt(caption_transcript, caption_clip_start, caption_clip_end, srt_path)
 
         if not success:
              raise HTTPException(status_code=400, detail="No words found for this clip range.")
@@ -2229,7 +3192,7 @@ async def remove_subtitles(req: RemoveSubtitlesRequest, request: Request):
     await _assert_job_owner(request, job)
 
     output_dir = os.path.join(OUTPUT_DIR, req.job_id)
-    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+    json_files = _sorted_metadata(glob.glob(os.path.join(output_dir, "*_metadata.json")))
     if not json_files:
         raise HTTPException(status_code=404, detail="Metadata not found")
     with open(json_files[0], 'r') as f:
@@ -2290,7 +3253,7 @@ async def add_hook(req: HookRequest, request: Request):
     job = jobs[req.job_id]
     await _assert_job_owner(request, job)
     output_dir = os.path.join(OUTPUT_DIR, req.job_id)
-    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+    json_files = _sorted_metadata(glob.glob(os.path.join(output_dir, "*_metadata.json")))
     
     if not json_files:
         raise HTTPException(status_code=404, detail="Metadata not found")
@@ -2415,7 +3378,7 @@ async def translate_clip(
     job = jobs[req.job_id]
     await _assert_job_owner(request, job)
     output_dir = os.path.join(OUTPUT_DIR, req.job_id)
-    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+    json_files = _sorted_metadata(glob.glob(os.path.join(output_dir, "*_metadata.json")))
 
     if not json_files:
         raise HTTPException(status_code=404, detail="Metadata not found")

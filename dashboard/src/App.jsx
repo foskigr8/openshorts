@@ -1,9 +1,17 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download } from 'lucide-react';
+import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Search, Flame, TrendingUp, ChevronRight, Film } from 'lucide-react';
 import KeyInput from './components/KeyInput';
+import KeyListInput from './components/KeyListInput';
 import MediaInput from './components/MediaInput';
 import ResultCard from './components/ResultCard';
 import ProcessingAnimation from './components/ProcessingAnimation';
+import ClipSlotPlaceholder from './components/ClipSlotPlaceholder';
+import SystemStatusStrip from './components/SystemStatusStrip';
+import StageTracker from './components/StageTracker';
+import HomeRail from './components/HomeRail';
+import TelemetryGrid from './components/TelemetryGrid';
+import FloatingInputBar from './components/FloatingInputBar';
+import SourcePanel from './components/SourcePanel';
 // import Gallery from './components/Gallery';
 import ThumbnailStudio from './components/ThumbnailStudio';
 import SaaShortsTab from './components/SaaShortsTab';
@@ -11,7 +19,6 @@ import UGCGallery from './components/UGCGallery';
 import ScheduleWeekModal from './components/ScheduleWeekModal';
 import UsageMeter from './components/UsageMeter';
 import TopUpModal from './components/TopUpModal';
-import StarBanner from './components/StarBanner';
 import PlanChoiceModal from './components/PlanChoiceModal';
 import TrialUpgradeModal from './components/TrialUpgradeModal';
 import LoginModal from './components/LoginModal';
@@ -163,9 +170,19 @@ const UserProfileSelector = ({ profiles, selectedUserId, onSelect }) => {
 const SESSION_KEY = 'openshorts_session';
 const SESSION_MAX_AGE = 3600000; // 1 hour (matches server job retention)
 
+// Human "2m 30s" style readout for the ETA returned by /api/status.
+const formatEta = (seconds) => {
+  const s = Number(seconds);
+  if (!Number.isFinite(s) || s < 0) return null;
+  if (s < 60) return `${Math.max(1, Math.round(s))}s`;
+  const m = Math.floor(s / 60);
+  const rem = Math.round(s % 60);
+  return rem ? `${m}m ${rem}s` : `${m}m`;
+};
+
 // Mock polling function
-const pollJob = async (jobId) => {
-  const res = await apiFetch(`/api/status/${jobId}`);
+const pollJob = async (jobId, raw = false) => {
+  const res = await apiFetch(`/api/status/${jobId}${raw ? '?raw=1' : ''}`);
   if (!res.ok) throw new Error('Status check failed');
   return res.json();
 };
@@ -181,6 +198,22 @@ function App() {
   // Durable R2 URLs (per clip index) for the current job — used as a fallback when
   // the ephemeral local /videos/ files have been cleaned up (e.g. after a reload).
   const [durableClips, setDurableClips] = useState({});
+
+  // Header search: filters the Generated Shorts rail / History library by
+  // title (real, client-side substring match on what /api/history already
+  // returns — not a placeholder box that does nothing when you type in it).
+  const [historySearch, setHistorySearch] = useState('');
+  const searchInputRef = useRef(null);
+  useEffect(() => {
+    const onKeydown = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+      }
+    };
+    window.addEventListener('keydown', onKeydown);
+    return () => window.removeEventListener('keydown', onKeydown);
+  }, []);
 
   const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_key') || '');
   // Social API State - Load encrypted or plain
@@ -203,6 +236,34 @@ function App() {
     return '';
   });
 
+  // AssemblyAI API State (transcription backend) - Load encrypted
+  const [assemblyaiKey, setAssemblyaiKey] = useState(() => {
+    const stored = localStorage.getItem('assemblyaiKey_v1');
+    if (stored) return decrypt(stored);
+    return '';
+  });
+
+  // DeepSeek API State (narrative clip selection) - Load encrypted
+  const [deepseekKey, setDeepseekKey] = useState(() => {
+    const stored = localStorage.getItem('deepseekKey_v1');
+    if (stored) return decrypt(stored);
+    return '';
+  });
+
+  // Extra Gemini keys beyond the primary one above — a small pool spread
+  // across concurrent vision-confirmation calls so a single key's rate limit
+  // doesn't become the bottleneck. Stored as encrypted JSON.
+  const [geminiExtraKeys, setGeminiExtraKeys] = useState(() => {
+    const stored = localStorage.getItem('geminiExtraKeys_v1');
+    if (!stored) return [];
+    try {
+      const parsed = JSON.parse(decrypt(stored));
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (_) {
+      return [];
+    }
+  });
+
   const [uploadUserId, setUploadUserId] = useState(() => localStorage.getItem('uploadUserId') || '');
   const [userProfiles, setUserProfiles] = useState([]); // List of {username, connected: []}
   const [showKeyModal, setShowKeyModal] = useState(false);
@@ -216,8 +277,25 @@ function App() {
   // Pre-flight quality gate: { info: {max_height, min_height, cookies_invalid}, data }
   const [qualityGate, setQualityGate] = useState(null);
   const [logs, setLogs] = useState([]);
-  const [logsVisible, setLogsVisible] = useState(true);
+  // Live pipeline progress from main.py's progress.json: {stage, overall_pct,
+  // clips_done, clips_total}. null until the backend reports a snapshot.
+  const [progress, setProgress] = useState(null);
+  // Telemetry: raw-log toggle + per-stage averages for the performance chart.
+  const [logsRaw, setLogsRaw] = useState(false);
+  const [stageDurations, setStageDurations] = useState(null);
+  // Right-panel view: 'clips' (Generated Shorts) or 'source' (original video
+  // + stills — round-5 Source section).
+  const [rightTab, setRightTab] = useState('clips');
+  // Itemized system status for the status strip: {backend, cookies, gpu} from
+  // /api/system, refreshed on an interval. null = never checked yet.
+  const [systemStatus, setSystemStatus] = useState(null);
+  // The clip count the user requested at submit (or null = auto) — sizes the
+  // placeholder slots in the live grid before progress.json knows the total.
+  const [requestedClipCount, setRequestedClipCount] = useState(null);
   const [processingMedia, setProcessingMedia] = useState(null);
+  const [submittedFormat, setSubmittedFormat] = useState('auto');
+  // Sidebar "Today" mini-stats, derived from the disk-backed history.
+  const [todayStats, setTodayStats] = useState({ generated: 0, processing: 0, successRate: 100, loaded: false });
   const [activeTab, setActiveTab] = useState('dashboard'); // dashboard, settings
   // Reopened-project state (paid mode): per-clip {index, server_file, active_layers}
   // restored from the backend so ResultCards resume editing where they left off.
@@ -232,6 +310,8 @@ function App() {
   // Silent-success "saved" states for the settings key inputs (design.md: no alert popups)
   const [elevenLabsSaved, setElevenLabsSaved] = useState(false);
   const [falSaved, setFalSaved] = useState(false);
+  const [assemblyaiSaved, setAssemblyaiSaved] = useState(false);
+  const [deepseekSaved, setDeepseekSaved] = useState(false);
 
   // Sync state for original video playback
   const [syncedTime, setSyncedTime] = useState(0);
@@ -296,6 +376,48 @@ function App() {
     setActiveTab('dashboard');
   };
 
+  // Open any project from the rail — including a failed one. A failed job has
+  // no restorable project state (the pipeline never got far enough to write
+  // metadata), so restoring would 404; instead it opens in the error state with
+  // whatever the backend still knows, so the run can actually be inspected
+  // rather than being a dead tile you can only delete.
+  const openProject = async (v) => {
+    const targetId = v?.job_id;
+    if (!targetId) return;
+    setActiveTab('dashboard');
+    if (v.status === 'completed') {
+      try {
+        await restoreProject(targetId);
+        return;
+      } catch (e) {
+        // fall through to the read-only view below
+      }
+    }
+    flushClipState();
+    setProjectState(null);
+    setNoSource(true);
+    setProcessingMedia(null);
+    setQualityGate(null);
+    setResults(null);
+    setJobId(targetId);
+    setStatus(v.status === 'processing' ? 'processing' : 'error');
+    // /api/status only knows jobs still in memory; after a backend restart it
+    // 404s, so say so plainly rather than leaving the log panel implying more
+    // output is still coming.
+    try {
+      const data = await apiJson(`/api/status/${targetId}`);
+      setLogs(data.logs?.length ? data.logs : ['No logs retained for this run.']);
+      if (data.progress) setProgress(data.progress);
+      if (data.status) setStatus(data.status === 'processing' ? 'processing' : data.status);
+      if (data.result) setResults(data.result);
+    } catch (e) {
+      setLogs([
+        `Opened "${v.title || targetId}" from your library.`,
+        'This run failed and its live logs are no longer retained on the server.',
+      ]);
+    }
+  };
+
   // Apply one subtitle style to every clip of the job, sequentially.
   const handleBulkSubtitles = async (options) => {
     const clips = results?.clips || [];
@@ -340,6 +462,21 @@ function App() {
       const data = await pollJob(jobId);
       if (data.result) setResults(data.result);
     } catch { /* keep current results */ }
+  };
+
+  const [cancelling, setCancelling] = useState(false);
+  const handleCancelJob = async () => {
+    if (!jobId || cancelling) return;
+    if (!window.confirm('Stop this job? Clips already rendered will stay, the rest will not be generated.')) return;
+    setCancelling(true);
+    try {
+      await apiFetch(`/api/jobs/${jobId}/cancel`, { method: 'POST' });
+      setStatus('cancelled');
+    } catch (e) {
+      console.error('Cancel failed', e);
+    } finally {
+      setCancelling(false);
+    }
   };
 
   const handleDownloadAll = async () => {
@@ -482,21 +619,35 @@ function App() {
     if ((status === 'processing' || status === 'completed') && jobId) {
       interval = setInterval(async () => {
         try {
-          const data = await pollJob(jobId);
+          const data = await pollJob(jobId, logsRaw);
           console.log("Job status:", data);
 
           // Update results if available (real-time)
           if (data.result) {
             setResults(data.result);
           }
+          // Update live pipeline progress (stage + percentage + clips done).
+          if (data.progress) {
+            setProgress(data.progress);
+          }
+          // Rolling per-stage averages + raw-log mode for the telemetry grid.
+          if (data.stage_durations) setStageDurations(data.stage_durations);
 
           if (data.status === 'completed') {
             setStatus('complete');
             clearInterval(interval);
           } else if (data.status === 'failed') {
             setStatus('error');
-            const errorMsg = data.error || (data.logs && data.logs.length > 0 ? data.logs[data.logs.length - 1] : "Process failed");
+            const lastLog = data.logs && data.logs.length > 0
+              ? (typeof data.logs[data.logs.length - 1] === 'string'
+                  ? data.logs[data.logs.length - 1]
+                  : data.logs[data.logs.length - 1].text)
+              : "Process failed";
+            const errorMsg = data.error || lastLog;
             setLogs(prev => [...prev, "Error: " + errorMsg]);
+            clearInterval(interval);
+          } else if (data.status === 'cancelled') {
+            setStatus('cancelled');
             clearInterval(interval);
           } else {
             // Update logs if available
@@ -508,7 +659,68 @@ function App() {
       }, 2000);
     }
     return () => clearInterval(interval);
-  }, [status, jobId]);
+  }, [status, jobId, logsRaw]);
+
+  // System status strip: real, itemized checks (backend reachability, YouTube
+  // cookie freshness, GPU) — refreshed every 30s while the dashboard is open.
+  useEffect(() => {
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const res = await apiFetch('/api/system');
+        if (!cancelled && res.ok) setSystemStatus(await res.json());
+      } catch (_) {
+        if (!cancelled) setSystemStatus({ backend: false });
+      }
+    };
+    check();
+    const interval = setInterval(check, 30000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [activeTab]);
+
+  // Sidebar "Today" stats: clips generated today, jobs still processing, and
+  // the completed-vs-failed success rate — all from /api/history.
+  //
+  // This used to fetch exactly once per jobId, which is why the sidebar could
+  // sit at "processing 0" while a job was visibly running in the main panel:
+  // the single fetch fired before the backend had written the job to history,
+  // and nothing ever re-read it. It now re-polls while a job is live, and the
+  // rendered value is reconciled with the locally-known job below, so the
+  // sidebar and the main panel can never disagree about the same job.
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      apiFetch('/api/history')
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (cancelled || !d) return;
+          const videos = d.videos || [];
+          const today = new Date().toDateString();
+          const todayCount = videos.filter(
+            (v) => new Date(v.created_at).toDateString() === today).length;
+          const byStatus = {};
+          for (const v of videos) {
+            const s = v.status || 'completed';
+            byStatus[s] = (byStatus[s] || 0) + 1;
+          }
+          const done = byStatus.completed || 0;
+          const failed = byStatus.failed || 0;
+          const rate = done + failed > 0 ? Math.round(100 * done / (done + failed)) : 100;
+          setTodayStats({
+            generated: todayCount,
+            processing: byStatus.processing || 0,
+            successRate: rate,
+            loaded: true,
+          });
+        })
+        .catch(() => {});
+    };
+    load();
+    // Keep counts live for the duration of a run, and pick up the terminal
+    // state right after it ends, without the user refreshing anything.
+    const interval = status === 'processing' ? setInterval(load, 5000) : null;
+    return () => { cancelled = true; if (interval) clearInterval(interval); };
+  }, [jobId, status]);
 
 
   // silent: background auto-fetch — never alert(), just log. Managed users need
@@ -537,8 +749,10 @@ function App() {
   };
 
   // Hosted is paid-only (no BYOK core). Self-host uses BYOK keys.
-  // `keysMissing` now means "self-host BYOK keys missing" — it never fires on hosted.
-  const keysMissing = !billingEnabled && (!apiKey || !uploadPostKey);
+  // `keysMissing` means "self-host BYOK keys missing" — it never fires on hosted.
+  // Upload-Post is only needed for social auto-publishing, not clip generation,
+  // so it doesn't gate the main flow — just the Gemini key does.
+  const keysMissing = !billingEnabled && !apiKey;
   const needsPlan = billingEnabled && !isManaged;   // hosted, signed-out or no active plan/trial
 
   // Fresh sign-up: show the welcome plan-choice popup once (AuthContext set the
@@ -596,6 +810,10 @@ function App() {
     setStatus('processing');
     setLogs(["Starting process..."]);
     setResults(null);
+    setProgress(null);
+    setRequestedClipCount(data.clipCount ?? null);
+    setSubmittedFormat(data.outputFormat || 'auto');
+    setRightTab('clips');
     setProcessingMedia(data);
     setQualityGate(null);
     setProjectState(null);
@@ -604,8 +822,13 @@ function App() {
     try {
       let body;
       // BYOK sends the Gemini header; managed users rely on the bearer token
-      // that apiFetch attaches automatically.
+      // that apiFetch attaches automatically. AssemblyAI/DeepSeek/extra Gemini
+      // pool keys are all optional — the pipeline falls back (Whisper /
+      // Gemini-only 2-pass / single Gemini key) when any of these are unset.
       const headers = apiKey ? { 'X-Gemini-Key': apiKey } : {};
+      if (assemblyaiKey) headers['X-AssemblyAI-Key'] = assemblyaiKey;
+      if (deepseekKey) headers['X-DeepSeek-Key'] = deepseekKey;
+      if (geminiExtraKeys.length > 0) headers['X-Gemini-Keys'] = geminiExtraKeys.join(',');
 
       if (data.type === 'url') {
         headers['Content-Type'] = 'application/json';
@@ -614,12 +837,30 @@ function App() {
           acknowledged: !!data.acknowledged,
           output_format: data.outputFormat || 'auto',
           force_low_quality: forceLowQuality,
+          clip_count: data.clipCount ?? null,
+          long_context_clips: data.longContextClips || 0,
+          remove_background_audio: data.removeBackgroundAudio || '',
+          custom_width: data.outputFormat === 'custom' ? data.customWidth : null,
+          custom_height: data.outputFormat === 'custom' ? data.customHeight : null,
+          captions: data.captions !== false,
+          zoom_mode: data.zoomMode || 'auto',
+          style_variant: data.styleVariant || 'balanced',
         });
       } else {
         const formData = new FormData();
         formData.append('file', data.payload);
         formData.append('acknowledged', data.acknowledged ? 'true' : 'false');
         formData.append('output_format', data.outputFormat || 'auto');
+        if (data.clipCount != null) formData.append('clip_count', String(data.clipCount));
+        if (data.longContextClips > 0) formData.append('long_context_clips', String(data.longContextClips));
+        if (data.removeBackgroundAudio) formData.append('remove_background_audio', data.removeBackgroundAudio);
+        if (data.outputFormat === 'custom') {
+          formData.append('custom_width', String(data.customWidth || 1080));
+          formData.append('custom_height', String(data.customHeight || 1350));
+        }
+        formData.append('captions', data.captions !== false ? 'true' : 'false');
+        formData.append('zoom_mode', data.zoomMode || 'auto');
+        formData.append('style_variant', data.styleVariant || 'balanced');
         body = formData;
       }
 
@@ -664,6 +905,9 @@ function App() {
     setJobId(null);
     setResults(null);
     setLogs([]);
+    setProgress(null);
+    setRequestedClipCount(null);
+    setRightTab('clips');
     setProcessingMedia(null);
     setProjectState(null);
     setNoSource(false);
@@ -679,7 +923,11 @@ function App() {
       { id: 'ai-agent', ord: '03', icon: Bot, label: 'AI Agent', byok: true },
       { id: 'ugc-gallery', ord: '04', icon: LayoutGrid, label: 'UGC Gallery' },
       { id: 'thumbnails', ord: '05', icon: Image, label: 'YouTube Studio' },
-      ...(billingEnabled && isSignedIn ? [{ id: 'history', ord: '06', icon: History, label: 'History' }] : []),
+      // History must be reachable on self-host too: /api/history is disk-backed
+      // and works without sign-in, so the tab was hidden exactly when the user
+      // needed it most ("my projects disappeared" was this, not data loss).
+      // Cloud mode still gates it behind sign-in (R2 library is per-account).
+      ...(!billingEnabled || isSignedIn ? [{ id: 'history', ord: '06', icon: History, label: 'History' }] : []),
       { id: 'settings', ord: '07', icon: Settings, label: 'Settings' },
     ];
 
@@ -692,6 +940,20 @@ function App() {
           <span className="font-display lowercase text-lg text-ink hidden lg:block">openshorts</span>
         </a>
 
+        {/* New Project CTA (reference sidebar) */}
+        <div className="px-4 pb-3">
+          <button
+            onClick={() => { setActiveTab('dashboard'); handleReset(); }}
+            className="w-full flex items-center justify-center gap-2 py-2.5 rounded-input text-sm font-medium text-white transition-all hover:brightness-110"
+            style={{
+              background: 'var(--grad-accent)',
+              boxShadow: '0 1px 0 rgba(255,255,255,0.18) inset, var(--shadow-glow)',
+            }}
+          >
+            <Plus size={16} /> <span className="hidden lg:inline">New Project</span>
+          </button>
+        </div>
+
         <nav className="flex-1 px-4 py-4 space-y-1">
           {navItems.map((item) => {
             const NavIcon = item.icon;
@@ -700,13 +962,21 @@ function App() {
               <button
                 key={item.id}
                 onClick={() => setActiveTab(item.id)}
-                className={`relative w-full flex items-center gap-3 px-3 py-2.5 rounded-input transition-colors ${isActive ? 'bg-paper3 text-ink' : 'text-muted hover:text-ink2 hover:bg-paper3/50'}`}
+                className={`relative w-full flex items-center gap-3 px-3 py-2.5 rounded-input transition-all ${isActive ? 'text-ink' : 'text-muted hover:text-ink2 hover:bg-paper3/50'}`}
+                style={isActive ? {
+                  background: 'linear-gradient(90deg, rgba(239,68,68,0.18) 0%, rgba(239,68,68,0.04) 65%, transparent 100%)',
+                  boxShadow: 'inset 0 0 0 1px rgba(239,68,68,0.16)',
+                } : undefined}
               >
                 {isActive && (
-                  <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 bg-brass rounded-full" aria-hidden="true" />
+                  <span
+                    className="absolute left-0 top-1.5 bottom-1.5 w-[3px] rounded-full"
+                    style={{ background: 'var(--color-accent)', boxShadow: '0 0 8px var(--color-glow)' }}
+                    aria-hidden="true"
+                  />
                 )}
-                <NavIcon size={18} className={`shrink-0 ${isActive ? 'text-brass' : ''}`} />
-                <span className="text-sm lowercase hidden lg:block flex-1 text-left truncate">{item.label}</span>
+                <NavIcon size={18} className={`shrink-0 ${isActive ? 'text-brass glow-accent' : ''}`} />
+                <span className="text-sm hidden lg:block flex-1 text-left truncate">{item.label}</span>
                 {item.byok && <span className="readout hidden lg:block">BYOK</span>}
                 <span className="readout hidden lg:block">{item.ord}</span>
               </button>
@@ -714,12 +984,54 @@ function App() {
           })}
         </nav>
 
+        {/* Today mini-stats (reference sidebar) */}
+        <div className="px-4 pb-4">
+          <div className="card p-3.5">
+            <div className="flex items-center justify-between mb-2.5">
+              <p className="readout text-[10px] uppercase tracking-wider text-muted">today</p>
+              <Flame size={13} className="text-brass glow-accent" />
+            </div>
+            <div className="space-y-2">
+              {[
+                { icon: LayoutGrid, label: 'shorts generated', value: todayStats.generated, tone: 'text-ink' },
+                {
+                  icon: Loader2,
+                  label: 'processing',
+                  // Reconciled with the job this tab is actually running: a job
+                  // visible in the main panel must never coexist with a "0
+                  // processing" sidebar, even in the window before the backend
+                  // history has caught up.
+                  value: Math.max(todayStats.processing, status === 'processing' ? 1 : 0),
+                  tone: 'text-brass',
+                  spin: status === 'processing',
+                },
+                { icon: TrendingUp, label: 'success rate', value: `${todayStats.successRate}%`, tone: 'text-ok' },
+              ].map((s) => {
+                const SIcon = s.icon;
+                return (
+                  <div key={s.label} className="flex items-center gap-2">
+                    <SIcon size={13} className={`shrink-0 ${s.tone === 'text-ink' ? 'text-muted' : s.tone} ${s.spin ? 'animate-spin' : ''}`} />
+                    <span className="text-[11px] lowercase text-muted flex-1 truncate hidden lg:block">{s.label}</span>
+                    {/* Never show a static 0 that could be mistaken for a real
+                        count while the first fetch is still in flight. */}
+                    {todayStats.loaded ? (
+                      <span className={`text-xs font-semibold ${s.tone}`}>{s.value}</span>
+                    ) : (
+                      <span className="inline-block w-6 h-3 rounded bg-paper3 animate-pulse" />
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
         <div className="p-4 border-t border-rule space-y-1">
           <a
             href="#landing"
             className="flex items-center gap-2 px-3 py-1.5 text-xs lowercase text-muted hover:text-ink2 transition-colors"
           >
-            <Globe size={14} className="shrink-0" />
+            <span className="icon-chip-muted !w-6 !h-6 shrink-0"><Globe size={13} /></span>
             <span className="hidden lg:block truncate">landing page</span>
           </a>
           <a
@@ -728,7 +1040,7 @@ function App() {
             rel="noopener noreferrer"
             className="flex items-center gap-2 px-3 py-1.5 text-xs lowercase text-muted hover:text-ink2 transition-colors"
           >
-            <svg height="14" viewBox="0 0 16 16" version="1.1" width="14" aria-hidden="true" fill="currentColor" className="shrink-0"><path fillRule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
+            <span className="icon-chip-muted !w-6 !h-6 shrink-0"><svg height="13" viewBox="0 0 16 16" version="1.1" width="13" aria-hidden="true" fill="currentColor"><path fillRule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg></span>
             <span className="hidden lg:block truncate">open source</span>
           </a>
           {billingEnabled && (
@@ -736,7 +1048,7 @@ function App() {
               href="#/pricing"
               className="flex items-center gap-2 px-3 py-1.5 text-xs lowercase text-muted hover:text-ink2 transition-colors"
             >
-              <Sparkles size={14} className="shrink-0" />
+              <span className="icon-chip-muted !w-6 !h-6 shrink-0"><Sparkles size={13} /></span>
               <span className="hidden lg:block truncate">plans &amp; pricing</span>
             </a>
           )}
@@ -744,7 +1056,7 @@ function App() {
             href="mailto:info@openshorts.app"
             className="flex items-center gap-2 px-3 py-1.5 text-xs lowercase text-muted hover:text-ink2 transition-colors"
           >
-            <Mail size={14} className="shrink-0" />
+            <span className="icon-chip-muted !w-6 !h-6 shrink-0"><Mail size={13} /></span>
             <span className="hidden lg:block truncate">info@openshorts.app</span>
           </a>
         </div>
@@ -758,17 +1070,37 @@ function App() {
 
       <main className="flex-1 flex flex-col h-full overflow-hidden relative">
         {/* Top Header */}
-        <header className="h-14 border-b border-rule bg-paper flex items-center justify-between px-6 shrink-0 z-10">
-          <div className="flex items-center gap-4">
-            {status !== 'idle' && (
-              <button
-                onClick={handleReset}
-                className="btn-quiet px-3 py-1.5 text-xs"
-              >
-                <Plus size={14} />
-                <span className="hidden sm:inline">New Project</span>
-              </button>
-            )}
+        <header className="h-14 border-b border-rule bg-paper flex items-center gap-4 px-6 shrink-0 z-10">
+          {status !== 'idle' && (
+            <button
+              onClick={handleReset}
+              className="btn-quiet px-3 py-1.5 text-xs shrink-0"
+            >
+              <Plus size={14} />
+              <span className="hidden sm:inline">New Project</span>
+            </button>
+          )}
+
+          <div className="relative flex-1 max-w-md">
+            <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted pointer-events-none" />
+            <input
+              ref={searchInputRef}
+              type="text"
+              value={historySearch}
+              onChange={(e) => setHistorySearch(e.target.value)}
+              placeholder="Search projects, clips…"
+              className="w-full bg-paper2 border border-rule rounded-full pl-9 pr-12 py-1.5 text-xs text-ink placeholder:text-muted focus:outline-none focus:border-rule2 transition-colors"
+            />
+            <kbd className="hidden sm:flex items-center gap-0.5 absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-muted font-mono border border-rule rounded px-1.5 py-0.5 pointer-events-none">
+              &#8984;K
+            </kbd>
+          </div>
+
+          <div className="flex-1" />
+
+          {/* Live system pills (reference top bar) */}
+          <div className="hidden lg:block shrink-0">
+            <SystemStatusStrip status={systemStatus} />
           </div>
 
           <div className="flex items-center gap-4">
@@ -803,21 +1135,30 @@ function App() {
             )}
             {billingEnabled && isSignedIn && <ProfileMenu />}
 
+            {/* Same pill geometry as the system-status strip so the top bar
+                reads as one row of instruments, not a badge glued next to
+                three tiles. Actionable, so it keeps a warm border + arrow. */}
             {keysMissing && (
               <button
                 onClick={() => (billingEnabled && !isSignedIn ? setShowLogin(true) : setActiveTab('settings'))}
-                className="badge-warn hover:brightness-125 transition-all"
+                className="group flex items-center gap-2 h-9 pl-2.5 pr-3 rounded-lg border bg-paper2/80
+                           transition-colors duration-200 hover:bg-paper3"
+                style={{ borderColor: 'color-mix(in oklab, var(--color-warn) 38%, var(--color-rule))' }}
                 title="Configure API keys or choose a plan"
               >
-                <AlertTriangle size={12} />
-                <span className="hidden sm:inline">
-                  {!apiKey && !uploadPostKey
-                    ? 'Gemini & Upload-Post keys missing'
-                    : !apiKey
-                      ? 'Gemini API Key Missing'
-                      : 'Upload-Post API Key Missing'}
+                <AlertTriangle size={14} strokeWidth={1.75} className="shrink-0 text-warn" />
+                <span className="min-w-0 leading-none text-left">
+                  <span className="block readout text-[8px] uppercase tracking-[0.12em] text-muted/80">
+                    Gemini key
+                  </span>
+                  <span className="block text-[11px] font-medium text-warn truncate mt-0.5">
+                    Missing — set up
+                  </span>
                 </span>
-                <span className="sm:hidden">keys missing</span>
+                <ChevronRight
+                  size={13}
+                  className="shrink-0 text-muted transition-transform duration-200 group-hover:translate-x-0.5"
+                />
               </button>
             )}
           </div>
@@ -830,13 +1171,7 @@ function App() {
               <KeyRound size={16} className="shrink-0 text-warn" />
               <div>
                 <span className="font-medium text-ink">Required API keys missing.</span>{' '}
-                <span className="text-muted">
-                  {!apiKey && !uploadPostKey
-                    ? 'Set your Gemini and Upload-Post API keys to use OpenShorts.'
-                    : !apiKey
-                      ? 'Set your Gemini API key to use OpenShorts.'
-                      : 'Set your Upload-Post API key to use OpenShorts.'}
-                </span>
+                <span className="text-muted">Set your Gemini API key to use OpenShorts.</span>
               </div>
             </div>
             <button
@@ -934,6 +1269,102 @@ function App() {
                 <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
                   <div className="flex items-center gap-3">
                     <div className="w-9 h-9 rounded-input bg-paper3 flex items-center justify-center shrink-0">
+                      <Bot size={16} className="text-brass" />
+                    </div>
+                    <h2 className="text-base font-medium text-ink lowercase">Clip Intelligence</h2>
+                  </div>
+                  <span className="readout">BETA · BYOK</span>
+                </div>
+                <p className="text-xs text-muted mb-6 leading-relaxed">
+                  Narrative-aware clip selection: <strong>AssemblyAI</strong> transcribes, <strong>DeepSeek</strong> finds
+                  moments that carry a hook through to its payoff, and Gemini Vision confirms each candidate against the
+                  actual footage. All optional — the pipeline falls back to Whisper/Gemini-only if these are unset.
+                </p>
+
+                <div className="space-y-6">
+                  <div>
+                    <label className="block text-sm text-muted mb-2">AssemblyAI API Key</label>
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <input
+                        type="password"
+                        value={assemblyaiKey}
+                        onChange={(e) => setAssemblyaiKey(e.target.value)}
+                        className="input-field"
+                        placeholder="assemblyai key..."
+                      />
+                      <button
+                        onClick={() => {
+                          if (assemblyaiKey) {
+                            localStorage.setItem('assemblyaiKey_v1', encrypt(assemblyaiKey));
+                            setAssemblyaiSaved(true);
+                            setTimeout(() => setAssemblyaiSaved(false), 2000);
+                          }
+                        }}
+                        className={assemblyaiSaved ? 'badge-ok px-4' : 'btn-quiet py-2 px-4 text-sm'}
+                      >
+                        {assemblyaiSaved ? <><Check size={12} /> saved</> : 'Save'}
+                      </button>
+                    </div>
+                    <p className="mt-2 text-xs text-muted">
+                      <a href="https://www.assemblyai.com/dashboard/signup" target="_blank" rel="noopener noreferrer" className="text-brass hover:underline">
+                        Get your AssemblyAI API key →
+                      </a>
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm text-muted mb-2">DeepSeek API Key</label>
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <input
+                        type="password"
+                        value={deepseekKey}
+                        onChange={(e) => setDeepseekKey(e.target.value)}
+                        className="input-field"
+                        placeholder="sk-..."
+                      />
+                      <button
+                        onClick={() => {
+                          if (deepseekKey) {
+                            localStorage.setItem('deepseekKey_v1', encrypt(deepseekKey));
+                            setDeepseekSaved(true);
+                            setTimeout(() => setDeepseekSaved(false), 2000);
+                          }
+                        }}
+                        className={deepseekSaved ? 'badge-ok px-4' : 'btn-quiet py-2 px-4 text-sm'}
+                      >
+                        {deepseekSaved ? <><Check size={12} /> saved</> : 'Save'}
+                      </button>
+                    </div>
+                    <p className="mt-2 text-xs text-muted">
+                      <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noopener noreferrer" className="text-brass hover:underline">
+                        Get your DeepSeek API key →
+                      </a>
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm text-muted mb-2">
+                      Extra Gemini keys <span className="text-muted">(optional — spreads vision-confirmation calls across a pool so one key's rate limit isn't the bottleneck)</span>
+                    </label>
+                    <KeyListInput
+                      keys={geminiExtraKeys}
+                      onSave={(keys) => {
+                        localStorage.setItem('geminiExtraKeys_v1', encrypt(JSON.stringify(keys)));
+                        setGeminiExtraKeys(keys);
+                      }}
+                    />
+                  </div>
+                </div>
+
+                <p className="mt-6 text-xs text-muted leading-relaxed">
+                  Keys are only stored in your browser. They are sent to the backend only to process your request, never stored server-side.
+                </p>
+              </div>
+
+              <div className="card p-4 sm:p-6 mt-8">
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-input bg-paper3 flex items-center justify-center shrink-0">
                       <Share2 size={16} className="text-brass" />
                     </div>
                     <h2 className="text-base font-medium text-ink lowercase">Social Integration</h2>
@@ -958,7 +1389,7 @@ function App() {
                       Connect
                     </button>
                   </div>
-                  <p className="text-xs text-muted leading-relaxed">
+                  <div className="text-xs text-muted leading-relaxed">
                     Connect your Upload-Post account to enable one-click publishing.
                     <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2">
                       <a href="https://app.upload-post.com/login" target="_blank" rel="noopener noreferrer" className="p-2 border border-rule rounded-input hover:bg-paper3 transition-colors flex flex-col gap-1">
@@ -978,7 +1409,7 @@ function App() {
                     <span className="text-muted">
                       Keys are only stored in your browser. They are sent to the backend only to process your request, never stored server-side.
                     </span>
-                  </p>
+                  </div>
                 </div>
               </div>
 
@@ -1022,7 +1453,7 @@ function App() {
                       {elevenLabsSaved ? <><Check size={12} /> saved</> : 'Save'}
                     </button>
                   </div>
-                  <p className="text-xs text-muted leading-relaxed">
+                  <div className="text-xs text-muted leading-relaxed">
                     Get your API key from ElevenLabs to enable video translation.
                     <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
                       <a href="https://elevenlabs.io/sign-up" target="_blank" rel="noopener noreferrer" className="p-2 border border-rule rounded-input hover:bg-paper3 transition-colors flex flex-col gap-1">
@@ -1038,7 +1469,7 @@ function App() {
                     <span className="text-muted">
                       Keys are only stored in your browser. They are sent to the backend only to process your request, never stored server-side.
                     </span>
-                  </p>
+                  </div>
                 </div>
               </div>
 
@@ -1080,7 +1511,7 @@ function App() {
                       {falSaved ? <><Check size={12} /> saved</> : 'Save'}
                     </button>
                   </div>
-                  <p className="text-xs text-muted leading-relaxed">
+                  <div className="text-xs text-muted leading-relaxed">
                     Get your API key from fal.ai to enable AI actor video generation.
                     <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
                       <a href="https://fal.ai/dashboard/keys" target="_blank" rel="noopener noreferrer" className="p-2 border border-rule rounded-input hover:bg-paper3 transition-colors flex flex-col gap-1">
@@ -1096,7 +1527,7 @@ function App() {
                     <span className="text-muted">
                       Keys are only stored in your browser. Sent to backend only to process requests.
                     </span>
-                  </p>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1236,7 +1667,7 @@ function App() {
           {activeTab === 'history' && (
             <div className="h-full overflow-y-auto custom-scrollbar animate-fade">
               <div className="max-w-6xl mx-auto p-6 md:p-8">
-                <HistoryTab onReopenProject={restoreProject} />
+                <HistoryTab onReopenProject={restoreProject} search={historySearch} />
               </div>
             </div>
           )}
@@ -1252,51 +1683,129 @@ function App() {
 
           {/* View: Dashboard (Idle) */}
           {activeTab === 'dashboard' && status === 'idle' && (
-            <div className="h-full overflow-y-auto custom-scrollbar animate-fade">
-              <div className="min-h-full flex flex-col items-center justify-center px-4 py-6 sm:p-6">
-              <div className="max-w-xl w-full text-center space-y-8">
-                <div className="space-y-4">
-                  <p className="eyebrow">01 · CLIP GENERATOR</p>
-                  <h1 className="font-display lowercase text-4xl md:text-5xl text-ink">
-                    Create Viral Shorts
-                  </h1>
-                  <p className="text-muted text-lg">
-                    Drop your long-form video below to instantly generate viral clips with AI.
-                  </p>
+            <div className="flex h-full min-h-0">
+              <div className="flex-1 min-w-0 flex flex-col">
+                <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar animate-fade">
+                  <div className="relative min-h-full flex flex-col items-center justify-center px-4 py-6 sm:p-6">
+                    {/* Large, very-low-opacity OpenShorts mark behind the hero
+                        (round 3, item 6) — own branding, not a copied motif */}
+                    <div
+                      aria-hidden="true"
+                      className="pointer-events-none absolute -top-10 right-0 sm:-right-10 w-[320px] h-[320px] opacity-[0.05] -z-10 select-none"
+                    >
+                      <img src="/logo-openshorts.png" alt="" className="w-full h-full object-contain" />
+                    </div>
+                  <div className="max-w-xl w-full text-center space-y-8">
+                    <div className="space-y-4 relative">
+                      {/* Ambient pool behind the headline — pure CSS gradient,
+                          no blur filter, so it costs nothing to composite. */}
+                      <div
+                        aria-hidden="true"
+                        className="pointer-events-none absolute left-1/2 -translate-x-1/2 -top-24 w-[560px] h-[320px] -z-10"
+                        style={{ background: 'radial-gradient(50% 50% at 50% 50%, rgba(239,68,68,0.16) 0%, transparent 70%)' }}
+                      />
+                      <p className="eyebrow flex items-center justify-center gap-2">
+                        <Sparkles size={12} className="text-brass glow-accent" />
+                        01 · CLIP GENERATOR
+                      </p>
+                      <h1 className="font-display lowercase text-4xl md:text-5xl text-ink tracking-tight">
+                        create{' '}
+                        <span
+                          style={{
+                            background: 'linear-gradient(180deg, #f87171 0%, #ef4444 60%, #991b1b 100%)',
+                            WebkitBackgroundClip: 'text',
+                            WebkitTextFillColor: 'transparent',
+                            backgroundClip: 'text',
+                          }}
+                        >
+                          viral shorts
+                        </span>
+                      </h1>
+                      <p className="text-muted text-lg">
+                        Drop your long-form video below to instantly generate viral clips with AI.
+                      </p>
+                    </div>
+
+                    <MediaInput onProcess={handleProcess} isProcessing={status === 'processing'} />
+
+                    <div className="flex flex-wrap items-center justify-center gap-2.5 text-muted">
+                      {[
+                        { Icon: Youtube, label: 'YouTube' },
+                        { Icon: Instagram, label: 'Instagram' },
+                        { Icon: TikTokIcon, label: 'TikTok' },
+                      ].map(({ Icon, label }) => (
+                        <span
+                          key={label}
+                          className="flex items-center gap-2 px-3 py-1.5 rounded-full border border-rule bg-paper2 text-xs lowercase"
+                        >
+                          <Icon size={14} className="text-ink2" /> {label}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
                 </div>
-
-                <MediaInput onProcess={handleProcess} isProcessing={status === 'processing'} />
-
-                <div className="flex flex-wrap items-center justify-center gap-4 sm:gap-8 text-muted text-sm">
-                  <span className="flex items-center gap-2"><Youtube size={16} /> YouTube</span>
-                  <span className="flex items-center gap-2"><Instagram size={16} /> Instagram</span>
-                  <span className="flex items-center gap-2"><TikTokIcon size={16} /> TikTok</span>
                 </div>
               </div>
-              </div>
+              <HomeRail
+                onViewAll={() => setActiveTab("history")}
+                search={historySearch}
+                onOpenProject={openProject}
+                activeJob={jobId ? {
+                  id: jobId,
+                  status,
+                  pct: progress?.overall_pct ?? null,
+                  title: processingMedia?.type === 'file'
+                    ? (processingMedia.payload?.name || 'New project')
+                    : processingMedia?.type === 'url'
+                      ? processingMedia.payload
+                      : 'New project',
+                } : null}
+              />
             </div>
           )}
 
           {/* View: Processing / Results (Split View) */}
-          {activeTab === 'dashboard' && (status === 'processing' || status === 'complete' || status === 'error') && (
-            <div className="h-full flex flex-col md:flex-row gap-4 p-4 overflow-y-auto md:overflow-y-hidden custom-scrollbar animate-fade">
-
-              {/* Left Panel: Preview & Status */}
-              <div className={`${status === 'complete' ? 'w-full md:w-[30%] lg:w-[25%]' : 'w-full md:w-[55%] lg:w-[60%]'} md:h-full flex flex-col shrink-0 md:shrink card p-4 sm:p-6 overflow-y-auto custom-scrollbar transition-all duration-700 ease-in-out`}>
-                <div className="mb-6 flex items-center justify-between">
-                  <h2 className="text-sm font-medium text-ink lowercase flex items-center gap-2">
-                    <Activity className={`text-brass ${status === 'processing' ? 'animate-pulse' : ''}`} size={18} />
-                    Live Analysis
-                  </h2>
-                  <span className={status === 'processing' ? 'badge-brass' :
-                    status === 'complete' ? 'badge-ok' :
-                      'badge-danger'
-                    }>
-                    {status.toUpperCase()}
-                  </span>
+          {activeTab === 'dashboard' && (status === 'processing' || status === 'complete' || status === 'error' || status === 'cancelled') && (
+            <div className="flex h-full min-h-0">
+              <div className="flex-1 min-w-0 flex flex-col">
+                {/* Processing hero — same gradient-emphasis headline as Home */}
+                <div className="px-5 pt-4 pb-1 shrink-0">
+                  <p className="eyebrow">02 · LIVE PIPELINE</p>
+                  <h1 className="font-display lowercase text-2xl text-ink tracking-tight">
+                    making{' '}
+                    <span
+                      style={{
+                        background: 'linear-gradient(180deg, #f87171 0%, #ef4444 60%, #991b1b 100%)',
+                        WebkitBackgroundClip: 'text',
+                        WebkitTextFillColor: 'transparent',
+                        backgroundClip: 'text',
+                      }}
+                    >
+                      viral shorts
+                    </span>
+                  </h1>
                 </div>
-
-                {/* Video Preview */}
+                {/* Full-width pipeline header (reference layout) — this is the
+                    real curved-path/icon-node tracker; it needs the full
+                    content width to read properly, not the narrow left
+                    column, which only ever showed the cramped `compact` dots
+                    variant even after the wide one was built. */}
+                <div className="px-5 pt-2 pb-1 shrink-0">
+                  <StageTracker
+                    stage={progress?.stage}
+                    failed={status === 'error' || status === 'cancelled'}
+                    complete={status === 'complete'}
+                    pct={progress?.overall_pct ?? (status === 'complete' ? 100 : 0)}
+                    durations={stageDurations}
+                  />
+                </div>
+                {/* The job-status card spans the FULL content width, as in the
+                    reference. Squeezed into a ~60% column it had roughly 250px
+                    left for a 4-cell grid plus a 124px ring, so the ring wrapped
+                    below the grid and fell outside the visible panel — the
+                    "where is my video right now" answer was the thing pushed off
+                    screen. Full width fits grid and ring side by side. */}
+                <div className="flex-1 min-h-0 flex flex-col gap-4 p-4 overflow-y-auto custom-scrollbar animate-fade">
                 {processingMedia && (
                   <ProcessingAnimation
                     media={processingMedia}
@@ -1304,48 +1813,54 @@ function App() {
                     syncedTime={syncedTime}
                     isSyncedPlaying={isSyncedPlaying}
                     syncTrigger={syncTrigger}
+                    status={status}
+                    progress={progress}
+                    title={
+                      processingMedia.type === 'file'
+                        ? (processingMedia.payload?.name || 'Uploaded video')
+                        : processingMedia.type === 'url'
+                          ? processingMedia.payload
+                          : 'Source video'
+                    }
+                    format={{
+                      vertical: '9:16',
+                      square: '1:1',
+                      horizontal: '16:9',
+                      auto: 'auto',
+                    }[submittedFormat] || submittedFormat}
+                    onCancel={status === 'processing' ? handleCancelJob : null}
                   />
                 )}
 
-                {/* The wait is dead time — the best moment to ask for a star. */}
-                {status === 'processing' && (
-                  <div className="my-3">
-                    <StarBanner message="Free while it renders?" />
-                  </div>
-                )}
-
-                {/* Logs Terminal */}
-                <div className={`bg-paper rounded-card border border-rule overflow-hidden flex flex-col transition-all duration-500 ${status === 'complete' ? 'h-32 min-h-0 opacity-50 hover:opacity-100' : 'flex-1 min-h-[200px]'}`}>
-                  <div className="px-4 py-2 border-b border-rule flex items-center justify-between bg-paper2 shrink-0">
-                    <span className="readout flex items-center gap-2">
-                      <Terminal size={12} /> System Logs
-                    </span>
-                    <button onClick={() => setLogsVisible(!logsVisible)} className="text-muted hover:text-ink transition-colors">
-                      {logsVisible ? <ChevronDown size={14} /> : <ChevronDown size={14} className="rotate-180" />}
+              {/* Results / live clip slots — full width beneath the status card */}
+              <div className="flex flex-col card p-4 sm:p-6 shrink-0 min-h-[260px]">
+                <h2 className="font-display lowercase text-xl text-ink mb-6 flex flex-wrap items-center gap-2 shrink-0">
+                  <div className="flex items-center gap-1.5 mr-auto">
+                    <button
+                      onClick={() => setRightTab('clips')}
+                      className={`flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs transition-colors ${
+                        rightTab === 'clips'
+                          ? 'border-brass/50 bg-brass/10 text-ink'
+                          : 'border-rule text-muted hover:border-rule2'
+                      }`}
+                    >
+                      <span className="icon-chip !w-6 !h-6"><Sparkles size={13} /></span>
+                      Generated Shorts
+                    </button>
+                    <button
+                      onClick={() => setRightTab('source')}
+                      className={`flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs transition-colors ${
+                        rightTab === 'source'
+                          ? 'border-brass/50 bg-brass/10 text-ink'
+                          : 'border-rule text-muted hover:border-rule2'
+                      }`}
+                    >
+                      <span className="icon-chip !w-6 !h-6"><Film size={13} /></span>
+                      Source
                     </button>
                   </div>
-                  {logsVisible && (
-                    <div className="flex-1 p-4 overflow-y-auto font-mono text-xs space-y-1.5 custom-scrollbar text-muted">
-                      {logs.map((log, i) => (
-                        <div key={i} className={`flex gap-2 ${log.toLowerCase().includes('error') ? 'text-danger' : 'text-muted'}`}>
-                          <span className="text-muted opacity-50 shrink-0">{new Date().toLocaleTimeString()}</span>
-                          <span>{log}</span>
-                        </div>
-                      ))}
-                      {status === 'processing' && (
-                        <div className="animate-pulse text-brass">_</div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Right Panel: Results Grid */}
-              <div className={`${status === 'complete' ? 'w-full md:w-[70%] lg:w-[75%]' : 'w-full md:w-[45%] lg:w-[40%]'} md:h-full flex flex-col shrink-0 md:shrink card p-4 sm:p-6 transition-all duration-700 ease-in-out`}>
-                <h2 className="font-display lowercase text-xl text-ink mb-6 flex flex-wrap items-center gap-2 shrink-0">
-                  Generated Shorts
                   {results?.clips?.length > 0 && (
-                    <span className="readout bg-paper3 px-2.5 py-1 rounded-full ml-auto">
+                    <span className="readout px-2.5 py-1 rounded-full ml-auto border border-rule bg-paper2">
                       {results.clips.length} Clips
                     </span>
                   )}
@@ -1379,66 +1894,195 @@ function App() {
                   )}
                 </h2>
 
-                {status === 'complete' && results?.clips?.length > 0 && (
-                  <div className="mb-2 space-y-2">
-                    {/* Peak-moment upsell: they just SAW their clips — sell while
-                        they're proud of the result, before asking for stars. */}
-                    {plan === 'free' && (
-                      <button
-                        onClick={() => { setTopUpInfo({ context: 'upsell' }); setShowTopUp(true); }}
-                        className="w-full text-left px-3 py-2.5 rounded-input bg-paper3 border border-brass/40 hover:border-brass text-sm transition-colors"
-                      >
-                        <span className="text-ink">Like these clips?</span>{' '}
-                        <span className="text-muted">They carry a watermark and delete in 7 days.</span>{' '}
-                        <span className="text-brass font-medium">Keep them forever →</span>
-                      </button>
-                    )}
-                    <StarBanner message="Happy with your clips?" />
+                {/* Peak-moment upsell: they just SAW their clips — sell while
+                    they're proud of the result. NOTE: no GitHub-star ask on this
+                    screen in any state (spec rule) — it lives in the sidebar
+                    footer instead, so promo never sits in the job-status area. */}
+                {status === 'complete' && results?.clips?.length > 0 && plan === 'free' && (
+                  <div className="mb-2">
+                    <button
+                      onClick={() => { setTopUpInfo({ context: 'upsell' }); setShowTopUp(true); }}
+                      className="w-full text-left px-3 py-2.5 rounded-input bg-paper3 border border-brass/40 hover:border-brass text-sm transition-colors"
+                    >
+                      <span className="text-ink">Like these clips?</span>{' '}
+                      <span className="text-muted">They carry a watermark and delete in 7 days.</span>{' '}
+                      <span className="text-brass font-medium">Keep them forever →</span>
+                    </button>
                   </div>
                 )}
 
+                {rightTab === 'source' && jobId ? (
+                  <SourcePanel jobId={jobId} />
+                ) : (
                 <div className="flex-1 overflow-y-auto custom-scrollbar p-1">
-                  {results && results.clips && results.clips.length > 0 ? (
-                    <div className={`grid gap-4 pb-10 ${status === 'complete' ? 'grid-cols-1 xl:grid-cols-2' : 'grid-cols-1'}`}>
-                      {results.clips.map((clip, i) => (
-                        <ResultCard
-                          key={`${jobId}-${i}`}
-                          clip={clip}
-                          index={i}
-                          jobId={jobId}
-                          initialState={projectState?.clips?.find((c) => c.index === i) || null}
-                          onStateChange={handleClipStateChange}
-                          durableUrl={durableClips[i]}
-                          uploadPostKey={uploadPostKey}
-                          uploadUserId={uploadUserId}
-                          geminiApiKey={apiKey}
-                          elevenLabsKey={elevenLabsKey}
-                          isManaged={isManaged}
-                          connectedPlatforms={(userProfiles.find((p) => p.username === uploadUserId) || userProfiles[0])?.connected ?? null}
-                          onConnectSocials={isManaged ? handleConnectSocials : null}
-                          onPlay={(time) => handleClipPlay(time)}
-                          onPause={handleClipPause}
-                          onBulkSubtitle={handleBulkSubtitles}
-                          clipCount={results.clips.length}
-                          bulkProgress={bulkSub}
-                        />
-                      ))}
-                    </div>
-                  ) : (
-                    status === 'processing' ? (
-                      <div className="h-full flex flex-col items-center justify-center text-muted space-y-4">
-                        <Loader2 size={32} className="animate-spin text-brass" />
-                        <p className="text-sm lowercase">Waiting for clips...</p>
-                      </div>
-                    ) : status === 'error' ? (
-                      <div className="h-full flex flex-col items-center justify-center text-danger space-y-2">
-                        <p>Generation failed.</p>
-                      </div>
-                    ) : null
-                  )}
+                  {(() => {
+                    // Live grid: as many slots as the job will produce
+                    // (progress.json's clips_total once render starts,
+                    // otherwise the user's requested count). Ready clips flip
+                    // their slot to a real ResultCard the moment the backend
+                    // surfaces them; the rest stay "rendering…" placeholders.
+                    const readyCount = results?.clips?.length || 0;
+                    const slotCount = status === 'processing'
+                      ? (progress?.clips_total || requestedClipCount || 0)
+                      : 0;
+                    const total = Math.max(readyCount, slotCount);
+                    if (total > 0) {
+                      // Columns must react to this container's OWN width, not
+                      // the viewport's — this panel sits inside a nested
+                      // flex split (sidebar + live-analysis panel + this
+                      // results pane), so a viewport breakpoint like
+                      // `xl:grid-cols-2` used to fire on a wide monitor even
+                      // though the actual space here was ~670px, squeezing
+                      // each card's action-button grid down to ~20px wide
+                      // and overlapping every label. auto-fit sizes off the
+                      // real container width instead.
+                      const gridClass = status === 'complete'
+                        ? 'grid-cols-[repeat(auto-fit,minmax(440px,1fr))]'
+                        : 'grid-cols-1';
+                      return (
+                        <div className={`grid gap-4 pb-10 ${gridClass}`}>
+                          {Array.from({ length: total }).map((_, i) => (
+                            results?.clips?.[i] ? (
+                              <ResultCard
+                                key={`${jobId}-${i}`}
+                                clip={results.clips[i]}
+                                index={i}
+                                jobId={jobId}
+                                initialState={projectState?.clips?.find((c) => c.index === i) || null}
+                                onStateChange={handleClipStateChange}
+                                durableUrl={durableClips[i]}
+                                uploadPostKey={uploadPostKey}
+                                uploadUserId={uploadUserId}
+                                geminiApiKey={apiKey}
+                                elevenLabsKey={elevenLabsKey}
+                                isManaged={isManaged}
+                                connectedPlatforms={(userProfiles.find((p) => p.username === uploadUserId) || userProfiles[0])?.connected ?? null}
+                                onConnectSocials={isManaged ? handleConnectSocials : null}
+                                onPlay={(time) => handleClipPlay(time)}
+                                onPause={handleClipPause}
+                                onBulkSubtitle={handleBulkSubtitles}
+                                clipCount={readyCount}
+                                bulkProgress={bulkSub}
+                              />
+                            ) : (
+                              // Exactly one slot renders at a time (the pipeline
+                              // is sequential), so the first unfinished slot is
+                              // the one actually rendering and the rest are
+                              // honestly shown as still queued.
+                              <ClipSlotPlaceholder
+                                key={`ph-${i}`}
+                                index={i}
+                                total={total}
+                                state={status === 'processing' && i === readyCount ? 'rendering' : 'queued'}
+                              />
+                            )
+                          ))}
+                        </div>
+                      );
+                    }
+                    if (status === 'processing') {
+                      return (
+                        <div className="h-full flex flex-col items-center justify-center text-muted space-y-4">
+                          <Loader2 size={32} className="animate-spin text-brass" />
+                          <p className="text-sm lowercase">Waiting for clips...</p>
+                        </div>
+                      );
+                    }
+                    if (status === 'error') {
+                      const lastLog = logs && logs.length > 0
+                        ? (typeof logs[logs.length - 1] === 'string' ? logs[logs.length - 1] : logs[logs.length - 1].text)
+                        : '';
+                      const joined = (logs || []).map((l) => (typeof l === 'string' ? l : l.text || '')).join(' ');
+                      let cause = 'Something went wrong on our side while processing your video.';
+                      if (/download|yt-dlp|403|url|youtube/i.test(joined)) {
+                        cause = 'We couldn\u2019t fetch this video. This can happen when it\u2019s age-restricted, private, temporarily unavailable, or the download link expired.';
+                      } else if (/gemini|deepseek|api key|transcrib/i.test(joined)) {
+                        cause = 'The AI step hit an error (transcription or analysis). Try again — if it keeps failing, check your API keys in Settings.';
+                      } else if (/reframe|ffmpeg|encode|render|scene/i.test(joined)) {
+                        cause = 'Rendering hit an error while cutting the clips. The source may be unusual (odd codec or damaged file) — try a different link or upload.';
+                      }
+                      return (
+                        <div className="h-full flex flex-col items-center justify-center text-center px-6 space-y-3">
+                          <span className="icon-chip !w-12 !h-12 !border-danger/30" style={{ background: 'color-mix(in oklab, var(--color-danger) 14%, transparent)', color: 'var(--color-danger)' }}>
+                            <AlertTriangle size={22} />
+                          </span>
+                          {/* Plain text, not a \u-escape: this is JSX text
+                              content, where escapes are literal characters. */}
+                          <p className="text-sm font-semibold text-ink">We couldn’t process this video</p>
+                          <p className="text-xs text-muted max-w-md leading-relaxed">{cause}</p>
+                          {lastLog && (
+                            <details className="text-[10px] text-muted/70 text-left max-w-md w-full">
+                              <summary className="cursor-pointer select-none lowercase">raw error</summary>
+                              <p className="mt-1 break-words font-mono">{lastLog}</p>
+                            </details>
+                          )}
+                          <div className="flex flex-wrap items-center justify-center gap-2 mt-1">
+                            <button onClick={handleReset} className="btn-primary px-4 py-2 text-xs">
+                              Try again
+                            </button>
+                            <button onClick={handleReset} className="btn-ghost px-4 py-2 text-xs">
+                              Use a different link
+                            </button>
+                            <a href="mailto:info@openshorts.app" className="btn-ghost px-4 py-2 text-xs">
+                              Contact support
+                            </a>
+                          </div>
+                        </div>
+                      );
+                    }
+                    return null;
+                  })()}
                 </div>
+                )}
               </div>
 
+                {/* Telemetry: parsed logs (real server timestamps, noise filter
+                    with raw toggle) + real performance data. It lives INSIDE the
+                    single scroll container along with the status card and the
+                    results panel. Previously it was a separate fixed row below a
+                    nested `overflow-y-auto` region, which gave that region only
+                    a few hundred pixels — so the results panel (and, on a failed
+                    job, the entire "we couldn't process this video" explanation
+                    plus its Try-again buttons) was silently cut off below the
+                    fold with no indication anything was there. */}
+                <div className="shrink-0">
+                  <TelemetryGrid
+                    logs={logs}
+                    status={status}
+                    raw={logsRaw}
+                    onRawToggle={() => setLogsRaw((v) => !v)}
+                    stageDurations={stageDurations}
+                    speedMultiplier={progress?.speed_multiplier ?? null}
+                    currentStage={progress?.stage ?? null}
+                  />
+                </div>
+
+              </div>
+
+                {/* Queue-another-video bar, only while a job is actually
+                    running. Once the job is finished or failed the work on this
+                    screen is reviewing the result, and a persistent "generate"
+                    field at the bottom just competes with that — New Project in
+                    the sidebar is the real entry point for the next run. */}
+                {status === 'processing' && (
+                  <FloatingInputBar onProcess={handleProcess} isProcessing />
+                )}
+              </div>
+              <HomeRail
+                onViewAll={() => setActiveTab("history")}
+                search={historySearch}
+                onOpenProject={openProject}
+                activeJob={jobId ? {
+                  id: jobId,
+                  status,
+                  pct: progress?.overall_pct ?? null,
+                  title: processingMedia?.type === 'file'
+                    ? (processingMedia.payload?.name || 'New project')
+                    : processingMedia?.type === 'url'
+                      ? processingMedia.payload
+                      : 'New project',
+                } : null}
+              />
             </div>
           )}
 
@@ -1451,11 +2095,7 @@ function App() {
         isOpen={showKeyModal}
         onClose={() => setShowKeyModal(false)}
         eyebrow="SETUP"
-        title={!apiKey && !uploadPostKey
-          ? 'Required API Keys Missing'
-          : !apiKey
-            ? 'Gemini API Key Required'
-            : 'Upload-Post API Key Required'}
+        title="Gemini API Key Required"
         footer={
           <div className="flex gap-3">
             <button

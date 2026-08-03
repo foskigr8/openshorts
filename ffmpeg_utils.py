@@ -71,8 +71,18 @@ LOUDNORM_FILTER = "loudnorm=I=-14:TP=-1.5:LRA=11"
 
 
 def audio_encode_args():
-    """AAC encode args for a delivered clip, with loudness normalisation."""
-    args = ["-c:a", "aac"]
+    """AAC encode args for a delivered clip, with loudness normalisation.
+
+    Every delivered clip has been shipping at 96kHz instead of the source's
+    44.1kHz (confirmed by reproduction, 31-jul-2026) — the loudnorm filter's
+    internal true-peak oversampling has no `-ar` pinning it back down
+    afterward, so the AAC encoder just runs with whatever rate the
+    filtergraph handed it. 96kHz stereo AAC is not a normal delivery format;
+    most decoders are tuned for 44.1/48kHz, and this is a real candidate for
+    the "sounds phasey/off" quality complaints on delivered audio. Pinned
+    to 48000 (a safe, universally-supported rate) regardless of source rate.
+    """
+    args = ["-ar", "48000", "-c:a", "aac"]
     if os.environ.get("AUDIO_NORMALIZE", "1").strip() != "0":
         args = ["-af", LOUDNORM_FILTER] + args
     return args

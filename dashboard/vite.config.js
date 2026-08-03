@@ -17,7 +17,8 @@ export default defineConfig({
   server: {
     allowedHosts: [
       'openshorts.app',
-      'www.openshorts.app'
+      'www.openshorts.app',
+      '.cloudspaces.litng.ai'
     ],
     proxy: {
       '/api': { target: backend, changeOrigin: true },

@@ -8,6 +8,7 @@ from ffmpeg_utils import (
     METADATA_SCRUB,
     QUALITY,
     QUALITY_FAST,
+    audio_encode_args,
     reset_encoder_cache,
     video_encode_args,
 )
@@ -96,3 +97,31 @@ def test_encode_args_stay_free_of_metadata_flags():
     # video_encode_args a pure codec/quality list.
     for tier in (QUALITY, QUALITY_FAST, DELIVERY):
         assert not any(a.startswith("-map_metadata") for a in video_encode_args(tier))
+
+
+class TestAudioEncodeArgs:
+    """Regression: every delivered clip was shipping at 96kHz instead of the
+    source's 44.1kHz (confirmed by reproduction, 31-jul-2026) — the loudnorm
+    filter's internal true-peak oversampling had nothing pinning the output
+    rate back down, so the AAC encoder ran with whatever rate the
+    filtergraph produced. `-ar 48000` must be explicit and come before the
+    codec so it isn't silently dropped by encoder/filter ordering."""
+
+    def test_pins_a_sane_output_sample_rate(self, monkeypatch):
+        monkeypatch.delenv("AUDIO_NORMALIZE", raising=False)
+        args = audio_encode_args()
+        assert "-ar" in args
+        assert args[args.index("-ar") + 1] == "48000"
+
+    def test_sample_rate_pinned_regardless_of_normalize_toggle(self, monkeypatch):
+        monkeypatch.setenv("AUDIO_NORMALIZE", "0")
+        args = audio_encode_args()
+        assert "-ar" in args
+        assert args[args.index("-ar") + 1] == "48000"
+        assert "-af" not in args  # loudnorm actually skipped when disabled
+
+    def test_still_encodes_to_aac(self, monkeypatch):
+        monkeypatch.delenv("AUDIO_NORMALIZE", raising=False)
+        args = audio_encode_args()
+        assert "-c:a" in args
+        assert args[args.index("-c:a") + 1] == "aac"

@@ -18,10 +18,15 @@ Invariants the consumers rely on (clip cutting, karaoke subtitles, Remotion):
   - all numerics are native Python floats (json.dump of the transcript).
   - words sorted by start, segments chronological, absolute file timestamps.
 
-TRANSCRIBE_BACKEND env: "whisper" (default) | "parakeet".
+TRANSCRIBE_BACKEND env: "whisper" (default) | "parakeet" | "assemblyai".
 The parakeet path falls back to whisper automatically when the model errors,
 produces no usable words, or the detected language is outside its 25
 supported European languages (e.g. Japanese/Chinese/Arabic uploads).
+The assemblyai path (a real external paid API, not just a different local
+model) falls back to whisper on ANY error — bad/missing key, timeout,
+network failure. It additionally requests speaker-label utterances and
+per-sentence sentiment analysis, which the narrative clip-selection stage
+(deepseek_worker.py) consumes as extra signal on top of the base contract.
 GPU whisper in turn falls back to CPU whisper on CUDA errors (VRAM is shared
 with other models on the host, so loads can OOM under load).
 """
@@ -30,6 +35,8 @@ import subprocess
 import tempfile
 import threading
 import time
+
+import httpx
 
 from subtitles import (
     get_whisper_config,
@@ -330,6 +337,226 @@ def _parakeet_fallback_reason(transcript, duration_hint=None):
     return None
 
 
+# --- assemblyai --------------------------------------------------------------
+
+_ASSEMBLYAI_API_BASE = "https://api.assemblyai.com"
+_ASSEMBLYAI_POLL_DEADLINE_S = 600  # a real network dependency — must not hang a job forever
+_ASSEMBLYAI_POLL_INTERVAL_S = 3
+
+
+def _word(w, speaker=None):
+    """AssemblyAI word -> the repo's word dict: seconds, whisper-style leading
+    space (AssemblyAI has no such convention on its own). `speaker` is a
+    transient tag (stripped before the word dict is returned to callers) used
+    only to derive each resulting segment's speaker after chunking — see
+    _assemblyai_words_to_segments."""
+    text = str(w.get("text", "")).strip()
+    d = {
+        "word": (" " + text) if text else "",
+        "start": float(w.get("start", 0)) / 1000.0,
+        "end": float(w.get("end", 0)) / 1000.0,
+    }
+    if speaker is not None:
+        d["_speaker"] = speaker
+    return d
+
+
+def _assemblyai_sentiment_lookup(sentiment_results):
+    """Returns a fast (seg_start, seg_end) -> "+"/"0"/"-" lookup function.
+
+    Sentiment analysis is per-*sentence*, not per-segment, so segments are
+    tagged by whichever sentiment span covers their midpoint — good enough
+    for "is this an emotional beat" without needing exact overlap logic.
+    """
+    spans = []
+    for s in (sentiment_results or []):
+        label = str(s.get("sentiment", "NEUTRAL")).upper()
+        tag = "+" if label == "POSITIVE" else "-" if label == "NEGATIVE" else "0"
+        spans.append((float(s.get("start", 0)) / 1000.0, float(s.get("end", 0)) / 1000.0, tag))
+
+    def lookup(seg_start, seg_end):
+        mid = (seg_start + seg_end) / 2.0
+        for s, e, tag in spans:
+            if s <= mid <= e:
+                return tag
+        return "0"
+
+    return lookup
+
+
+_MAX_SEGMENT_GAP_S = 1.2
+_MAX_SEGMENT_WORDS = 20
+
+
+def _chunk_words_into_segments(word_dicts, force_boundary_after=None):
+    """Groups a flat, chronological list of {'word','start','end'} dicts into
+    segments, splitting on whichever comes first: a >1.2s silence gap, a
+    20-word ceiling, or an explicit forced boundary (an AssemblyAI
+    speaker/utterance change, when known). force_boundary_after: a set of
+    indices into word_dicts after which a split is forced regardless of
+    gap/word-count — this is what lets continuous single-speaker narration
+    (one giant AssemblyAI utterance spanning an entire short video) still get
+    proper internal structure instead of collapsing into one segment.
+    """
+    force_boundary_after = force_boundary_after or set()
+    segments = []
+    current = []
+
+    def _flush():
+        if not current:
+            return
+        segments.append({
+            "start": current[0]["start"],
+            "end": current[-1]["end"],
+            "text": "".join(w["word"] for w in current).strip(),
+            "words": merge_continuation_words(list(current)),
+        })
+
+    for i, word in enumerate(word_dicts):
+        if current:
+            gap = word["start"] - current[-1]["end"]
+            if gap > _MAX_SEGMENT_GAP_S or len(current) >= _MAX_SEGMENT_WORDS or (i - 1) in force_boundary_after:
+                _flush()
+                current = []
+        current.append(word)
+    _flush()
+    return segments
+
+
+def _assemblyai_highlight_lookup(highlights_result):
+    """Returns a (seg_start, seg_end) -> bool function: True if any
+    AssemblyAI Auto-Highlights key-phrase occurrence overlaps the segment.
+    Auto Highlights is AssemblyAI's own algorithmic salience detection
+    (statistically/linguistically standout phrases, not sentiment) — a
+    second, independent signal for where the "important" moments are."""
+    spans = []
+    for h in (highlights_result or []):
+        for ts in (h.get("timestamps") or []):
+            spans.append((float(ts.get("start", 0)) / 1000.0, float(ts.get("end", 0)) / 1000.0))
+
+    def overlaps(seg_start, seg_end):
+        return any(s < seg_end and e > seg_start for s, e in spans)
+
+    return overlaps
+
+
+def _assemblyai_words_to_segments(words, utterances=None, sentiment_results=None, highlights_result=None):
+    """Group AssemblyAI's flat word list into the repo's segment contract.
+
+    Utterance (speaker-turn) boundaries, when available, are treated as
+    FORCED splits — not as the sole segmentation unit. A single continuous
+    narrator with no speaker changes can otherwise come back as ONE
+    AssemblyAI utterance spanning an entire video, which leaves nothing for
+    the narrative-selection stage to reason about (confirmed in prod,
+    30-jul-2026: a 208s solo-narration video produced exactly one utterance,
+    and the clip-selection pipeline downstream had no internal structure to
+    find a tighter span, so it just handed back almost the whole video).
+    The same pause-gap/word-count chunker now runs regardless of whether
+    utterances are present, so long stretches always get real internal
+    structure; utterance boundaries just add extra forced splits on top.
+
+    Each segment additionally carries a compact "sentiment" tag ("+"/"0"/"-")
+    and a "highlight" bool (AssemblyAI's own Auto-Highlights salience
+    detection) — extra metadata beyond the base transcript contract,
+    consumed by the narrative clip-selection stage as free signal instead of
+    having to re-derive tone/importance from raw text.
+    """
+    sentiment_at = _assemblyai_sentiment_lookup(sentiment_results)
+    highlight_at = _assemblyai_highlight_lookup(highlights_result)
+
+    if utterances:
+        flat = []
+        force_boundary_after = set()
+        for utt in utterances:
+            speaker = utt.get("speaker")
+            utt_words = [_word(w, speaker) for w in (utt.get("words") or []) if str(w.get("text", "")).strip()]
+            flat.extend(utt_words)
+            if utt_words:
+                force_boundary_after.add(len(flat) - 1)
+    else:
+        flat = [_word(w) for w in (words or []) if str(w.get("text", "")).strip()]
+        force_boundary_after = set()
+
+    segments = _chunk_words_into_segments(flat, force_boundary_after)
+    for seg in segments:
+        seg["sentiment"] = sentiment_at(seg["start"], seg["end"])
+        seg["highlight"] = highlight_at(seg["start"], seg["end"])
+        # Speaker (AssemblyAI diarization, when available): every word in a
+        # chunked segment shares one speaker, since an utterance/speaker
+        # change is always a forced segmentation boundary above. Derive from
+        # the first word's transient tag, then strip it — word dicts must
+        # keep the documented {'word','start','end'} contract everywhere else
+        # in the pipeline (subtitles.py, Remotion) that reads them.
+        seg_words = seg.get("words") or []
+        seg["speaker"] = seg_words[0].get("_speaker") if seg_words else None
+        for w in seg_words:
+            w.pop("_speaker", None)
+    return segments
+
+
+def _transcribe_with_assemblyai(media_path):
+    api_key = os.environ.get("ASSEMBLYAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("ASSEMBLYAI_API_KEY not set")
+    headers = {"authorization": api_key}
+
+    with open(media_path, "rb") as f:
+        with httpx.Client(timeout=300.0) as client:
+            upload_resp = client.post(
+                f"{_ASSEMBLYAI_API_BASE}/v2/upload", headers=headers, content=f.read())
+    upload_resp.raise_for_status()
+    upload_url = upload_resp.json()["upload_url"]
+
+    submit_body = {
+        "audio_url": upload_url,
+        "speaker_labels": True,
+        "sentiment_analysis": True,
+        "language_detection": True,
+        # Auto Highlights: AssemblyAI's own algorithmic detection of
+        # standout key phrases (statistical/linguistic salience, not an
+        # LLM call — unlike Auto Chapters, this is a plain flag on the same
+        # job, no extra cost). Extra editorial signal for DeepSeek on top of
+        # sentiment: "these specific phrases stood out" vs. just "this
+        # segment's overall tone."
+        "auto_highlights": True,
+    }
+    with httpx.Client(timeout=30.0) as client:
+        submit_resp = client.post(
+            f"{_ASSEMBLYAI_API_BASE}/v2/transcript",
+            headers={**headers, "content-type": "application/json"},
+            json=submit_body,
+        )
+    submit_resp.raise_for_status()
+    transcript_id = submit_resp.json()["id"]
+
+    deadline = time.time() + _ASSEMBLYAI_POLL_DEADLINE_S
+    data = None
+    with httpx.Client(timeout=30.0) as client:
+        while True:
+            poll_resp = client.get(
+                f"{_ASSEMBLYAI_API_BASE}/v2/transcript/{transcript_id}", headers=headers)
+            poll_resp.raise_for_status()
+            data = poll_resp.json()
+            status = data.get("status")
+            if status == "completed":
+                break
+            if status == "error":
+                raise RuntimeError(f"AssemblyAI transcription error: {data.get('error')}")
+            if time.time() > deadline:
+                raise TimeoutError("AssemblyAI transcription timed out after 10 minutes")
+            time.sleep(_ASSEMBLYAI_POLL_INTERVAL_S)
+
+    segments = _assemblyai_words_to_segments(
+        data.get("words") or [], data.get("utterances"), data.get("sentiment_analysis_results"),
+        (data.get("auto_highlights_result") or {}).get("results"))
+
+    return {
+        "text": str(data.get("text", "")).strip(),
+        "language": data.get("language_code") or "en",
+        "segments": segments,
+    }
+
+
 # --- public entry point -----------------------------------------------------
 
 class NoAudioError(Exception):
@@ -375,6 +602,16 @@ def transcribe_media(media_path):
                   f"falling back to whisper")
         except Exception as e:
             print(f"⚠️ [ASR] parakeet failed ({type(e).__name__}: {e}) — "
+                  f"falling back to whisper")
+
+    if backend == "assemblyai":
+        try:
+            transcript = _transcribe_with_assemblyai(media_path)
+            print(f"🎙️ [ASR] assemblyai ok: lang={transcript['language']} "
+                  f"segments={len(transcript['segments'])}")
+            return transcript
+        except Exception as e:
+            print(f"⚠️ [ASR] assemblyai failed ({type(e).__name__}: {e}) — "
                   f"falling back to whisper")
 
     return _transcribe_with_whisper(media_path)

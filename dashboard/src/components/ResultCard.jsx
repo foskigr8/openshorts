@@ -10,6 +10,7 @@ import SegmentedControl from './ui/SegmentedControl';
 import WatermarkModal, { watermarkNoticeDismissed } from './WatermarkModal';
 import { useAuth } from '../contexts/AuthContext';
 import { renderInBrowser } from '../lib/renderInBrowser';
+import { pauseAllOtherPlayers, registerPlayer } from '../lib/playerSync';
 
 const QUIET_BTN = 'group flex flex-col items-center justify-center gap-1 py-2 px-1 rounded-input border border-rule hover:bg-paper3 text-[11px] lowercase text-ink2 whitespace-nowrap transition-colors disabled:opacity-45 disabled:cursor-not-allowed';
 
@@ -32,6 +33,16 @@ export default function ResultCard({ clip, index, jobId, durableUrl, uploadPostK
     const [showWatermarkModal, setShowWatermarkModal] = useState(false);
     const { plan } = useAuth();
     const videoRef = React.useRef(null);
+    // Register this clip's <video> so any other card's play() can pause it
+    // (singleton audio across the grid). Deregisters on unmount.
+    React.useEffect(() => registerPlayer(videoRef.current), []);
+    // Claim exclusive playback: pausing every OTHER mounted result clip first
+    // is what stops two unmuted videos playing at once (item 2).
+    const handlePlay = () => {
+        pauseAllOtherPlayers(videoRef.current);
+        const currentTime = videoRef.current ? videoRef.current.currentTime : 0;
+        onPlay && onPlay(clip.start + currentTime);
+    };
     // Pristine base clip (no burned subtitles/hook), stable regardless of how
     // clip.video_url mutates after server edits. Used as the compositing base
     // for the Remotion preview so it never stacks subtitles over an already-
@@ -364,6 +375,12 @@ export default function ResultCard({ clip, index, jobId, durableUrl, uploadPostK
                     effect: options.effect || 'none',
                     base_opacity: options.baseOpacity ?? 1.0,
                     uppercase: options.uppercase || false,
+                    // Edited word list (see SubtitleModal's handleTextEdit) —
+                    // must ride along here too, not just the Remotion branch
+                    // above, so a correction (mis-transcribed word) actually
+                    // reaches the server-burned karaoke/legacy path instead
+                    // of silently being discarded (ground-truthed 1-aug-2026).
+                    captions: options.captions || null,
                     input_filename: serverVideoFile
                 })
             });
@@ -620,15 +637,15 @@ export default function ResultCard({ clip, index, jobId, durableUrl, uploadPostK
                         else setVideoErrored(true);
                     }}
                     onPlay={() => {
-                        const currentTime = videoRef.current ? videoRef.current.currentTime : 0;
-                        onPlay && onPlay(clip.start + currentTime);
+                        handlePlay();
                     }}
-                    onPause={() => onPause && onPause()}
+                    onPause={() => {
+                        onPause && onPause();
+                    }}
                     onEnded={() => {
-                        if (videoRef.current) {
-                            videoRef.current.currentTime = 0;
-                            videoRef.current.play();
-                        }
+                        // Clean stop: no silent infinite loop. Ending a clip
+                        // also stops the synced source-preview playback.
+                        onPause && onPause();
                     }}
                 />
                 <div className="absolute top-3 left-3 flex gap-2">
@@ -714,7 +731,7 @@ export default function ResultCard({ clip, index, jobId, durableUrl, uploadPostK
                         disabled={isEditing}
                         className={QUIET_BTN}
                     >
-                        {isEditing ? <Loader2 size={16} className="animate-spin text-brass shrink-0" /> : <Wand2 size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />}
+                        {isEditing ? <Loader2 size={16} className="animate-spin text-brass shrink-0" /> : <span className="icon-chip-muted !w-7 !h-7 shrink-0"><Wand2 size={15} /></span>}
                         {isEditing ? 'editing…' : 'auto edit'}
                     </button>
 
@@ -723,7 +740,7 @@ export default function ResultCard({ clip, index, jobId, durableUrl, uploadPostK
                         disabled={isSubtitling}
                         className={QUIET_BTN}
                     >
-                        {isSubtitling ? <Loader2 size={16} className="animate-spin text-brass shrink-0" /> : <Type size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />}
+                        {isSubtitling ? <Loader2 size={16} className="animate-spin text-brass shrink-0" /> : <span className="icon-chip-muted !w-7 !h-7 shrink-0"><Type size={15} /></span>}
                         {isSubtitling ? 'adding…' : 'subtitles'}
                     </button>
 
@@ -732,7 +749,7 @@ export default function ResultCard({ clip, index, jobId, durableUrl, uploadPostK
                         disabled={isHooking}
                         className={QUIET_BTN}
                     >
-                        {isHooking ? <Loader2 size={16} className="animate-spin text-brass shrink-0" /> : <Wand2 size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />}
+                        {isHooking ? <Loader2 size={16} className="animate-spin text-brass shrink-0" /> : <span className="icon-chip-muted !w-7 !h-7 shrink-0"><Wand2 size={15} /></span>}
                         {isHooking ? 'adding…' : 'viral hook'}
                     </button>
 
@@ -741,7 +758,7 @@ export default function ResultCard({ clip, index, jobId, durableUrl, uploadPostK
                         disabled={isTranslating}
                         className={QUIET_BTN}
                     >
-                        {isTranslating ? <Loader2 size={16} className="animate-spin text-brass shrink-0" /> : <Languages size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />}
+                        {isTranslating ? <Loader2 size={16} className="animate-spin text-brass shrink-0" /> : <span className="icon-chip-muted !w-7 !h-7 shrink-0"><Languages size={15} /></span>}
                         {isTranslating ? 'translating…' : 'dub voice'}
                     </button>
 
@@ -749,7 +766,13 @@ export default function ResultCard({ clip, index, jobId, durableUrl, uploadPostK
                         onClick={() => setShowModal(true)}
                         className="btn-primary flex-col gap-1 py-2 px-1 text-[11px] rounded-input whitespace-nowrap"
                     >
-                        <Share2 size={16} className="shrink-0" /> post
+                        <span
+                            className="!w-7 !h-7 shrink-0 rounded-[9px] flex items-center justify-center"
+                            style={{ background: 'rgba(255,255,255,0.14)', border: '1px solid rgba(255,255,255,0.30)', color: '#fff' }}
+                        >
+                            <Share2 size={15} />
+                        </span>
+                        post
                     </button>
                     <button
                         onClick={(e) => {
@@ -764,7 +787,7 @@ export default function ResultCard({ clip, index, jobId, durableUrl, uploadPostK
                         }}
                         className={QUIET_BTN}
                     >
-                        <Download size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" /> download
+                        <span className="icon-chip-muted !w-7 !h-7 shrink-0"><Download size={15} /></span> download
                     </button>
                 </div>
             </div>

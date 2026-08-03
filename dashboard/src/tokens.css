@@ -1,40 +1,44 @@
-/* Hallmark · genre: atmospheric · theme: lumen (night foundry) · design-system: design.md · designed-as-app
- * macrostructure: Marquee Hero (marketing) / Workbench (app) / Long Document (content)
- * nav: N9 edge-aligned · footer: Ft5 statement · enrichment: filament apparatus (landing only)
- * pre-emit critique: P5 H4 E4 S5 R5 V4
+/* OpenShorts dashboard theme — dark + red accent, matched to the user's
+ * reference UI (2-aug-2026): near-black page, #101010 panels, #FF0F0F accent
+ * with a red-to-maroon gradient on primary actions, #00FF7F success.
+ * Hex values so Tailwind alpha modifiers compile against the same colors.
  */
 
 :root {
-  /* paper */
-  --color-paper: oklch(13% 0.014 265);
-  --color-paper-2: oklch(16.5% 0.015 265);
-  --color-paper-3: oklch(20% 0.016 265);
+  /* paper — pitch black page, with panels lifted just enough to separate.
+   * The page itself is true #000; every surface above it steps up by a few
+   * points of luminance so cards/inputs still read as distinct layers rather
+   * than dissolving into the background. */
+  --color-paper: #000000;
+  --color-paper-2: #070707;
+  --color-paper-3: #131313;
 
   /* ink */
-  --color-ink: oklch(96% 0.006 262);
-  --color-ink-2: oklch(86% 0.01 262);
-  --color-muted: oklch(64% 0.012 262);
+  --color-ink: #fafafa;
+  --color-ink-2: #e4e4e4;
+  --color-muted: #a3a3a3;
 
   /* rules */
-  --color-rule: oklch(96% 0.006 262 / 0.08);
-  --color-rule-2: oklch(96% 0.006 262 / 0.14);
-  --rule-blueprint: oklch(96% 0.006 262 / 0.04);
+  --color-rule: #262626;
+  --color-rule-2: #333333;
+  --rule-blueprint: rgba(255, 255, 255, 0.04);
 
   /* accents */
-  --color-accent: oklch(76% 0.17 50);
-  --color-accent-ink: oklch(17% 0.03 50);
-  --color-accent-2: oklch(68% 0.16 18);
-  --color-glow: oklch(80% 0.16 50 / 0.42);
-  --color-paper-emit: oklch(76% 0.17 50 / 0.04);
-  --color-focus: oklch(76% 0.17 50);
+  --color-accent: #ef4444;
+  --color-accent-ink: #ffffff;
+  --color-accent-2: #7f1d1d;
+  --color-glow: rgba(239, 68, 68, 0.35);
+  --color-paper-emit: rgba(239, 68, 68, 0.04);
+  --color-focus: #ef4444;
 
   /* states */
-  --color-ok: oklch(75% 0.11 150);
-  --color-danger: oklch(66% 0.18 25);
-  --color-warn: oklch(78% 0.14 75);
+  --color-ok: #22c55e;
+  --color-danger: #dc2626;
+  --color-warn: #f59e0b;
+  --color-idle: #525252;
 
   /* type */
-  --font-display: "Instrument Serif", ui-serif, Georgia, serif;
+  --font-display: "Outfit", "Inter", ui-sans-serif, system-ui, sans-serif;
   --font-body: "Geist", ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
   --text-display: clamp(3rem, 6vw + 1rem, 6rem);
@@ -42,8 +46,18 @@
   --tracking-micro: 0.10em;
 
   /* geometry */
-  --radius-card: 10px;
+  --radius-card: 12px;
   --radius-input: 8px;
+
+  /* Depth & light. Every value here is a static gradient or box-shadow —
+   * painted once by the compositor, no backdrop-filter and no animated blur,
+   * so the "lit" look costs nothing at runtime. */
+  --grad-accent: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+  --grad-accent-soft: linear-gradient(180deg, rgba(239, 68, 68, 0.16) 0%, rgba(239, 68, 68, 0.04) 100%);
+  --grad-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.05) 0%, transparent 45%);
+  --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 10px 30px -12px rgba(0, 0, 0, 0.9);
+  --shadow-glow: 0 6px 22px -8px var(--color-glow);
+  --shadow-glow-strong: 0 8px 30px -6px rgba(239, 68, 68, 0.55);
 
   /* motion */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);

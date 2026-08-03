@@ -450,6 +450,13 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                                 style, effect, baseOpacity, uppercase, highlightColor,
                                 // Remotion data
                                 remotion: useRemotionPreview ? subtitleConfig : null,
+                                // User-edited word list (see handleTextEdit), at top level (not just
+                                // nested in `remotion`) so the SERVER-BURN path can use it too —
+                                // previously a text edit only ever reached the in-browser Remotion
+                                // preview; a karaoke/legacy burn request silently discarded it
+                                // (ground-truthed 1-aug-2026). Only sent when captions actually
+                                // loaded, so a clip with no transcript doesn't send an empty edit.
+                                captions: useRemotionPreview && captions.length > 0 ? captions : null,
                             };
                             const bulkRunning = bulkProgress?.running;
                             return (

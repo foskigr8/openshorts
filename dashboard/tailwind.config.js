@@ -7,25 +7,34 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Lumen · Night Foundry — values mirror tokens.css (kept literal so
-        // Tailwind alpha modifiers like bg-brass/10 compile)
-        paper: "oklch(13% 0.014 265 / <alpha-value>)",
-        paper2: "oklch(16.5% 0.015 265 / <alpha-value>)",
-        paper3: "oklch(20% 0.016 265 / <alpha-value>)",
-        ink: "oklch(96% 0.006 262 / <alpha-value>)",
-        ink2: "oklch(86% 0.01 262 / <alpha-value>)",
-        muted: "oklch(64% 0.012 262 / <alpha-value>)",
-        brass: "oklch(76% 0.17 50 / <alpha-value>)",
-        brassink: "oklch(17% 0.03 50 / <alpha-value>)",
-        coral: "oklch(68% 0.16 18 / <alpha-value>)",
-        ok: "oklch(75% 0.11 150 / <alpha-value>)",
-        warn: "oklch(78% 0.14 75 / <alpha-value>)",
-        danger: "oklch(66% 0.18 25 / <alpha-value>)",
+        // OpenShorts dark/red theme — values MUST mirror tokens.css. They are
+        // kept literal (not var()) so Tailwind alpha modifiers like bg-brass/10
+        // still compile. That duplication is a trap: changing only tokens.css
+        // leaves every `bg-paper*` utility on the old colour, which is exactly
+        // how the "pitch black" theme shipped still rendering #101010 grey.
+        // Touch both files together.
+        paper: "rgb(0 0 0 / <alpha-value>)",
+        paper2: "rgb(7 7 7 / <alpha-value>)",
+        paper3: "rgb(19 19 19 / <alpha-value>)",
+        ink: "rgb(250 250 250 / <alpha-value>)",
+        ink2: "rgb(228 228 228 / <alpha-value>)",
+        muted: "rgb(163 163 163 / <alpha-value>)",
+        // Semantic colours were drifting from tokens.css: `ok` was a neon
+        // #00FF7F here while every SVG used var(--color-ok) = #22c55e, and
+        // `brass` was #FF0F0F against accent #ef4444. Two palettes rendering
+        // side by side in the same view is most of what read as "cheap".
+        // These now mirror tokens.css exactly — change both together.
+        brass: "rgb(239 68 68 / <alpha-value>)",     // --color-accent
+        brassink: "rgb(255 255 255 / <alpha-value>)",
+        coral: "rgb(248 113 113 / <alpha-value>)",
+        ok: "rgb(34 197 94 / <alpha-value>)",        // --color-ok
+        warn: "rgb(245 158 11 / <alpha-value>)",     // --color-warn
+        danger: "rgb(220 38 38 / <alpha-value>)",    // --color-danger
         // legacy aliases so untouched files degrade gracefully
-        background: "oklch(13% 0.014 265 / <alpha-value>)",
-        surface: "oklch(16.5% 0.015 265 / <alpha-value>)",
-        primary: "oklch(76% 0.17 50 / <alpha-value>)",
-        accent: "oklch(68% 0.16 18 / <alpha-value>)",
+        background: "rgb(0 0 0 / <alpha-value>)",
+        surface: "rgb(7 7 7 / <alpha-value>)",
+        primary: "rgb(239 68 68 / <alpha-value>)",
+        accent: "rgb(239 68 68 / <alpha-value>)",
       },
       fontFamily: {
         display: "var(--font-display)",
@@ -56,6 +65,12 @@ export default {
         fadeIn: {
           from: { opacity: '0' },
           to: { opacity: '1' },
+        },
+        // Travelling sheen used to mark the pipeline stage that is running
+        // right now (see TelemetryGrid's per-stage bars).
+        shimmer: {
+          '0%': { transform: 'translateX(-120%)' },
+          '100%': { transform: 'translateX(420%)' },
         },
       },
     },

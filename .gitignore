@@ -7,6 +7,9 @@
 # YOLO model
 *.pt
 
+# YouTube cookies (written by main.py from YOUTUBE_COOKIES env var)
+cookies.txt
+
 # Python virtual environment
 .venv/
 __pycache__/
@@ -43,3 +46,12 @@ skills-lock.json
 
 # Cloud env example kept local only (avoid leaking infra hints)
 .env.cloud.example
+
+# Local scratch / credential backups — never publish.
+.codex/
+scratch_*/
+rerender_*.py
+debug_rerender.py
+analyze_frames.py
+download_research.py
+yolo_check.py

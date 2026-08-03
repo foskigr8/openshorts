@@ -125,3 +125,325 @@ class TestJumpConfirmation:
         cam = self._cam()
         cam.update_target(None)
         assert cam.target_center_x == 500
+
+
+class TestSpeakerChangeFrames:
+    """speaker_change_frames() — AssemblyAI diarization -> clip-relative
+    unlock-frame windows for SpeakerTracker."""
+
+    def test_empty_without_speaker_labels(self):
+        transcript = {"segments": [{"start": 0, "end": 5, "text": "hi"}]}  # no 'speaker' key
+        assert main.speaker_change_frames(transcript, 0.0, 10.0, fps=30.0) == set()
+
+    def test_empty_transcript(self):
+        assert main.speaker_change_frames(None, 0.0, 10.0, fps=30.0) == set()
+        assert main.speaker_change_frames({}, 0.0, 10.0, fps=30.0) == set()
+
+    def test_no_changes_when_single_speaker_throughout(self):
+        transcript = {"segments": [
+            {"start": 0, "end": 3, "speaker": "A"},
+            {"start": 3, "end": 6, "speaker": "A"},
+        ]}
+        assert main.speaker_change_frames(transcript, 0.0, 10.0, fps=30.0) == set()
+
+    def test_detects_a_change_and_windows_around_it(self):
+        transcript = {"segments": [
+            {"start": 0, "end": 3, "speaker": "A"},
+            {"start": 3, "end": 6, "speaker": "B"},  # change at clip-relative t=3s
+        ]}
+        frames = main.speaker_change_frames(transcript, 0.0, 10.0, fps=10.0, unlock_window_s=0.5)
+        # change at 3s * 10fps = frame 30, +/- 5 frames (0.5s * 10fps) window
+        assert frames == set(range(25, 36))
+
+    def test_offsets_by_clip_start(self):
+        transcript = {"segments": [
+            {"start": 100.0, "end": 103.0, "speaker": "A"},
+            {"start": 103.0, "end": 106.0, "speaker": "B"},
+        ]}
+        # clip starts at absolute 100s, change at absolute 103s -> clip-relative 3s
+        frames = main.speaker_change_frames(transcript, 100.0, 110.0, fps=10.0, unlock_window_s=0.5)
+        assert frames == set(range(25, 36))
+
+    def test_filters_segments_outside_clip_range(self):
+        transcript = {"segments": [
+            {"start": 0, "end": 3, "speaker": "A"},       # before clip
+            {"start": 100, "end": 103, "speaker": "A"},   # in clip
+            {"start": 103, "end": 106, "speaker": "B"},   # in clip -> change
+            {"start": 500, "end": 503, "speaker": "C"},   # after clip
+        ]}
+        frames = main.speaker_change_frames(transcript, 100.0, 110.0, fps=10.0, unlock_window_s=0.5)
+        assert frames == set(range(25, 36))
+
+    def test_multiple_changes_produce_multiple_windows(self):
+        transcript = {"segments": [
+            {"start": 0, "end": 1, "speaker": "A"},
+            {"start": 1, "end": 2, "speaker": "B"},  # change at t=1s -> frame 10
+            {"start": 2, "end": 3, "speaker": "A"},  # change at t=2s -> frame 20
+        ]}
+        frames = main.speaker_change_frames(transcript, 0.0, 5.0, fps=10.0, unlock_window_s=0.2)
+        assert 10 in frames and 20 in frames
+        assert 5 not in frames  # well outside either window
+
+
+class TestAudioInformedUnlock:
+    """SpeakerTracker.unlock_frames: suppresses the sticky bonus only at
+    known audio speaker-turn changes, without touching switch_cooldown."""
+
+    def test_stays_on_active_speaker_without_unlock(self):
+        t = _tracker()
+        a = _lock_onto(t, 300, frame=0)
+        # B is slightly bigger (higher raw score) but not 3x bigger — normal
+        # sticky hysteresis should keep A active throughout.
+        for f in range(5, COOLDOWN + 40):
+            t.get_target([_face(300, size=100), _face(1000, size=110)], f, WIDTH)
+        assert t.active_speaker_id == a
+
+    def test_switches_at_an_unlock_frame_when_visual_evidence_favors_the_other(self):
+        unlock_at = COOLDOWN + 39
+        t = main.SpeakerTracker(cooldown_frames=COOLDOWN, unlock_frames={unlock_at})
+        a = _lock_onto(t, 300, frame=0)
+        for f in range(5, unlock_at):
+            t.get_target([_face(300, size=100), _face(1000, size=110)], f, WIDTH)
+        assert t.active_speaker_id == a, "must still be sticky before the unlock frame"
+        t.get_target([_face(300, size=100), _face(1000, size=110)], unlock_at, WIDTH)
+        assert t.active_speaker_id != a, "unlock frame must let real visual evidence win"
+
+    def test_unlock_does_not_bypass_the_switch_cooldown(self):
+        # An unlock frame still inside the cooldown window must NOT force a
+        # switch — only the artificial sticky bonus is suppressed, the
+        # separate anti-jitter cooldown guard stays fully intact.
+        t = main.SpeakerTracker(cooldown_frames=COOLDOWN, unlock_frames={6})
+        a = _lock_onto(t, 300, frame=0)
+        box = t.get_target([_face(1000, size=200)], 6, WIDTH)  # only B visible, well within cooldown
+        assert box is None, "cooldown hold must still apply even at an unlock frame"
+        assert t.active_speaker_id == a
+
+
+class TestSpeakerTurnFrameRanges:
+    """speaker_turn_frame_ranges() — the audio half of dynamic reaction-
+    camera switching: which single speaker (if any) is active at each
+    frame, covering the whole clip with no gaps."""
+
+    def test_single_speaker_covers_whole_range(self):
+        transcript = {"segments": [{"start": 0, "end": 10, "speaker": "A"}]}
+        ranges = main.speaker_turn_frame_ranges(transcript, 0.0, 10.0, fps=10.0, total_frames=100)
+        assert ranges == [(0, 100, "A")]
+
+    def test_two_speakers_produce_two_ranges(self):
+        transcript = {"segments": [
+            {"start": 0, "end": 5, "speaker": "A"},
+            {"start": 5, "end": 10, "speaker": "B"},
+        ]}
+        ranges = main.speaker_turn_frame_ranges(transcript, 0.0, 10.0, fps=10.0, total_frames=100)
+        assert ranges == [(0, 50, "A"), (50, 100, "B")]
+
+    def test_gap_between_segments_is_marked_none(self):
+        transcript = {"segments": [
+            {"start": 0, "end": 3, "speaker": "A"},
+            {"start": 7, "end": 10, "speaker": "B"},
+        ]}
+        ranges = main.speaker_turn_frame_ranges(transcript, 0.0, 10.0, fps=10.0, total_frames=100)
+        assert ranges == [(0, 30, "A"), (30, 70, None), (70, 100, "B")]
+
+    def test_leading_and_trailing_silence_marked_none(self):
+        transcript = {"segments": [{"start": 3, "end": 7, "speaker": "A"}]}
+        ranges = main.speaker_turn_frame_ranges(transcript, 0.0, 10.0, fps=10.0, total_frames=100)
+        assert ranges == [(0, 30, None), (30, 70, "A"), (70, 100, None)]
+
+    def test_no_transcript_yields_one_none_range_for_whole_clip(self):
+        ranges = main.speaker_turn_frame_ranges(None, 0.0, 10.0, fps=10.0, total_frames=100)
+        assert ranges == [(0, 100, None)]
+
+    def test_whisper_transcript_without_speaker_labels_is_all_none(self):
+        transcript = {"segments": [{"start": 0, "end": 10, "text": "no speaker key"}]}
+        ranges = main.speaker_turn_frame_ranges(transcript, 0.0, 10.0, fps=10.0, total_frames=100)
+        assert ranges == [(0, 100, None)]
+
+    def test_offsets_by_clip_start(self):
+        transcript = {"segments": [{"start": 100.0, "end": 105.0, "speaker": "A"}]}
+        ranges = main.speaker_turn_frame_ranges(transcript, 100.0, 105.0, fps=10.0, total_frames=50)
+        assert ranges == [(0, 50, "A")]
+
+    def test_segments_outside_clip_range_are_ignored(self):
+        transcript = {"segments": [
+            {"start": -100, "end": -50, "speaker": "A"},  # before clip
+            {"start": 0, "end": 10, "speaker": "B"},
+            {"start": 500, "end": 600, "speaker": "C"},   # after clip
+        ]}
+        ranges = main.speaker_turn_frame_ranges(transcript, 0.0, 10.0, fps=10.0, total_frames=100)
+        assert ranges == [(0, 100, "B")]
+
+
+class TestSmoothedCameramanEasing:
+    """Problem 1: motion must be eased (ramp-up/cruise/ease-in) with NO
+    overshoot and monotonic convergence — the old constant-speed + hard
+    overshoot-snap read as mechanical."""
+
+    def _cam(self, video_w=1920, video_h=1080, aspect=9 / 16):
+        cam = main.SmoothedCameraman(1080, 1920, video_w, video_h,
+                                     aspect_ratio=aspect)
+        return cam
+
+    def test_converges_to_target_without_overshoot(self):
+        cam = self._cam()
+        cam.force_next_update = True
+        cam.update_target([1400, 400, 40, 40])  # target centre 1420 (in-range)
+        target = cam.target_center_x
+        prev = cam.current_center_x
+        crossed = False
+        for _ in range(600):
+            x1, _, x2, _ = cam.get_crop_box()
+            center = (x1 + x2) / 2
+            assert center <= target + 0.6, "must never overshoot the target"
+            assert center >= prev - 0.6, "must move monotonically toward target"
+            prev = center
+            if abs(center - target) <= 0.6:
+                crossed = True
+                break
+        assert crossed, "camera must actually reach the target"
+
+    def test_small_moves_apply_without_a_frozen_dead_zone(self):
+        # The old dead-zone froze the camera inside 25% of the crop width;
+        # an eased chase should start compensating immediately (but gently).
+        cam = self._cam()
+        cam.force_next_update = True
+        cam.update_target([cam.video_width / 2 + 10, 400, 40, 40])
+        x1, _, x2, _ = cam.get_crop_box()
+        assert x1 != cam.video_width / 2 - cam.crop_width / 2
+
+    def test_velocity_ramps_up_not_instant(self, monkeypatch):
+        # Eased travel is no longer the default (see CAMERA_STYLE — the genre
+        # cuts, it does not pan), but the pan path is still supported and must
+        # still ramp rather than starting at full speed.
+        monkeypatch.setattr(main, "CAMERA_STYLE", "pan")
+        cam = self._cam()
+        cam.force_next_update = True
+        cam.update_target([1400, 400, 40, 40])
+        steps = []
+        for _ in range(8):
+            before = cam.current_center_x
+            cam.get_crop_box()
+            steps.append(cam.current_center_x - before)
+        # First frame's step is small (acceleration-limited ramp-up), and
+        # steps grow for a while before the exponential tail takes over.
+        assert steps[0] < 4.0, "must not start at full cruise speed"
+        assert any(b > a + 0.01 for a, b in zip(steps, steps[1:])), (
+            "velocity should ramp up, not stay constant")
+
+    def test_scene_snap_still_snaps_immediately(self):
+        cam = self._cam()
+        cam.force_next_update = True
+        cam.update_target([1400, 400, 40, 40])
+        x1, _, x2, _ = cam.get_crop_box(force_snap=True)
+        assert (x1 + x2) / 2 == pytest.approx(cam.target_center_x, abs=1)
+
+
+class TestSmoothedCameramanZoom:
+    """Problem 2: an eased zoom state (crop-size scale) + dynamic y so a
+    push-in stays framed on the subject's face instead of cropping heads."""
+
+    def _cam(self, video_w=1920, video_h=1080, aspect=3 / 4):
+        return main.SmoothedCameraman(1080, 1920, video_w, video_h,
+                                      aspect_ratio=aspect)
+
+    def test_zoom_target_is_clamped_and_accepted(self):
+        cam = self._cam()
+        cam.force_next_update = True
+        cam.update_target([100, 100, 40, 40], zoom_target=0.85)
+        assert cam.target_zoom == pytest.approx(0.85)
+        cam.update_target([100, 100, 40, 40], zoom_target=0.1)
+        assert cam.target_zoom >= cam.min_zoom
+
+    def test_zoom_contracts_the_crop_window(self):
+        cam = self._cam()
+        base_w = cam.crop_width
+        cam.force_next_update = True
+        cam.update_target([960, 400, 40, 40], zoom_target=0.85)
+        # Focal length changes ride along with a cut (see CAMERA_STYLE); the
+        # reference edits never zoom continuously inside a held shot.
+        x1, y1, x2, y2 = cam.get_crop_box(force_snap=True)
+        assert x2 - x1 < base_w, "zoomed-in crop must be narrower than base"
+
+    def test_zoomed_crop_is_centered_on_the_face_y(self):
+        cam = self._cam()
+        cam.force_next_update = True
+        # Face mid-frame; a zoomed crop must follow its vertical centre
+        # (y=500 box -> centre 520; clamp range is [459, 621] for 0.85 zoom).
+        cam.update_target([960, 500, 40, 40], zoom_target=0.85)
+        x1, y1, x2, y2 = cam.get_crop_box(force_snap=True)
+        assert y1 > 0, "zoomed-in crop must leave the top of the frame"
+        assert cam.current_center_y == pytest.approx(520, abs=2)
+
+    def test_full_height_crop_keeps_y_at_zero(self):
+        cam = self._cam()
+        cam.force_next_update = True
+        cam.update_target([960, 100, 40, 40])  # zoom stays 1.0
+        x1, y1, x2, y2 = cam.get_crop_box()
+        assert y1 == 0 and y2 == cam.video_height
+
+    def test_zoom_never_exceeds_source_bounds(self):
+        cam = self._cam()
+        cam.force_next_update = True
+        cam.update_target([960, 100, 40, 40], zoom_target=0.85)
+        for _ in range(400):
+            x1, y1, x2, y2 = cam.get_crop_box()
+            assert x1 >= 0 and y1 >= 0
+            assert x2 <= cam.video_width and y2 <= cam.video_height
+
+
+class TestKenBurnsAntiStaticDrift:
+    """The anti-static sinusoidal drift is OFF by default. At a subtle
+    amplitude it advances far less than the whole pixel the crop is cut at,
+    so it renders not as gentle motion but as a locked frame that twitches a
+    pixel every couple of seconds — it caused the "freezing" complaint it was
+    added to cure. A held shot should be genuinely held; the tunable stays so
+    it can be dialled back in deliberately."""
+
+    def _cam(self, amplitude=None):
+        cam = main.SmoothedCameraman(1080, 1920, 1920, 1080,
+                                     aspect_ratio=3 / 4, fps=30.0)
+        if amplitude is not None:
+            cam._test_amplitude = amplitude
+        return cam
+
+    def test_held_crop_is_perfectly_locked_by_default(self):
+        cam = self._cam()
+        xs = {cam.get_crop_box()[0] for _ in range(400)}
+        assert len(xs) == 1, "a held crop must not twitch sub-pixel"
+
+    def test_drift_is_disabled_by_default(self):
+        assert main.STATIC_DRIFT_AMPLITUDE == 0.0
+
+    def test_drift_still_applies_when_deliberately_enabled(self, monkeypatch):
+        monkeypatch.setattr(main, "STATIC_DRIFT_AMPLITUDE", 0.05)
+        cam = self._cam()
+        xs = set()
+        for _ in range(main.STATIC_DRIFT_FRAMES):
+            xs.add(cam.get_crop_box()[0])
+        assert len(xs) == 1, "no drift before the static threshold"
+        for _ in range(400):
+            xs.add(cam.get_crop_box()[0])
+        assert len(xs) > 1, "enabled drift must actually move the crop"
+        amplitude = int(cam.crop_width * 0.05)
+        assert max(xs) - min(xs) <= 2 * amplitude + 2, "drift must stay bounded"
+
+    def test_moving_camera_resets_static_counter(self):
+        cam = self._cam()
+        for _ in range(60):
+            cam.get_crop_box()
+        assert cam._static_frames > main.STATIC_DRIFT_FRAMES
+        cam.force_next_update = True
+        cam.update_target([1400, 100, 40, 40])  # far jump, accepted (forced)
+        cam.get_crop_box()
+        assert cam._static_frames == 0
+
+    def test_drift_never_escapes_the_source_bounds(self):
+        # Park the camera at the extreme right edge; drift must stay in-frame.
+        cam = self._cam()
+        cam.force_next_update = True
+        cam.update_target([1800, 100, 40, 40])
+        for _ in range(600):
+            cam.get_crop_box()
+        for _ in range(400):
+            x1, _, x2, _ = cam.get_crop_box()
+            assert 0 <= x1 < x2 <= cam.video_width

@@ -1,0 +1,41 @@
+# GPU override for hosts with the NVIDIA container toolkit (e.g. the T4
+# deployment). Add explicitly with:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+# start_studio.sh applies this automatically when `docker info` advertises
+# the nvidia runtime, so a plain `docker compose up` still works on CPU-only
+# hosts (the base compose must never hard-require a GPU).
+#
+# Verified live on the T4 (1-aug-2026): nvidia-smi inside the container,
+# torch CUDA, faster-whisper on cuda, and h264_nvenc at 100% encoder util.
+services:
+  backend:
+    build:
+      context: .
+      args:
+        # NVIDIA stack in the image (cuBLAS/cuDNN/onnx-gpu for faster-whisper
+        # + Parakeet). The runtime driver comes from the reservation below.
+        GPU: "1"
+    # Give the container the NVIDIA device via the modern compose reservations
+    # syntax. Driver capabilities come from the Dockerfile env
+    # (compute,video,utility) so NVENC + CUDA both work.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      # T4 GPU defaults: NVENC h264 encode + CUDA Whisper. ASR concurrency
+      # stays 1 until real VRAM/throughput data says otherwise (item 10).
+      - FFMPEG_ENCODER=nvenc
+      - WHISPER_DEVICE=cuda
+      - ASR_GPU_CONCURRENCY=1
+      # Explicit YOLO device so CUDA init failures fail loud (main.py guard).
+      - YOLO_DEVICE=0
+      # LR-ASD active-speaker detection. Off by default in the base compose
+      # because on CPU it runs ~4x realtime; on this T4 the model itself is
+      # 19x realtime (0.5s per 10s clip), so it is worth having on wherever a
+      # GPU exists. Adds ~7s to a 10s clip end-to-end, most of which is the
+      # 25fps MediaPipe pass, not the network.
+      - USE_ASD=1

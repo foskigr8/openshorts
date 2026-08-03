@@ -1,15 +1,22 @@
 """Tests for subtitle word merging, SRT generation and style sanitizing."""
+import re
 from subtitles import (
     merge_continuation_words,
     generate_srt,
     hex_to_ass_color,
     _sanitize_font_name,
     _clamp_number,
+    _clean_caption_word,
+    _caption_width_compaction,
+    CAPTION_MAX_WIDTH_EM,
 )
 
 
-def _w(text, start, end):
-    return {"word": text, "start": start, "end": end}
+def _w(text, start, end, speaker=None):
+    word = {"word": text, "start": start, "end": end}
+    if speaker is not None:
+        word["speaker"] = speaker
+    return word
 
 
 class TestMergeContinuationWords:
@@ -45,6 +52,80 @@ class TestMergeContinuationWords:
         assert words[1]["word"] == "-b"
 
 
+class TestCaptionPunctuation:
+    def test_commas_and_semicolons_always_stripped(self):
+        assert _clean_caption_word("right,", sentence_final=False) == "right"
+        assert _clean_caption_word("wait;", sentence_final=True) == "wait"
+        assert _clean_caption_word("a,b,c", sentence_final=False) == "abc"
+
+    def test_sentence_final_punctuation_kept_on_last_word(self):
+        assert _clean_caption_word("really.", sentence_final=True) == "really."
+        assert _clean_caption_word("why?", sentence_final=True) == "why?"
+        assert _clean_caption_word("wow!", sentence_final=True) == "wow!"
+
+    def test_mid_sentence_trailing_punctuation_stripped(self):
+        # Token happened to carry a period, but the word is not the end of a
+        # segment -> drop it (one-word-at-a-time captions shouldn't end every
+        # word with a period).
+        assert _clean_caption_word("yes.", sentence_final=False) == "yes"
+        assert _clean_caption_word("stop!", sentence_final=False) == "stop"
+
+    def test_punctuation_runs_collapse_to_one(self):
+        assert _clean_caption_word("wait!!", sentence_final=True) == "wait!"
+        assert _clean_caption_word("no...", sentence_final=True) == "no."
+
+    def test_apostrophes_and_hyphens_survive(self):
+        assert _clean_caption_word("don't", sentence_final=False) == "don't"
+        assert _clean_caption_word("well-known", sentence_final=True) == "well-known"
+
+    def test_generate_srt_strips_mid_sentence_period(self, tmp_path):
+        from subtitles import generate_srt
+        out = tmp_path / "subs.srt"
+        # Two segments: "yes." is the ONLY word of its segment -> keeps the
+        # period; "wait." is followed by more words in its segment -> stripped.
+        transcript = {
+            "segments": [
+                {"start": 0, "end": 99, "text": "", "words": [_w(" yes.", 0.0, 0.5)]},
+                {"start": 0, "end": 99, "text": "", "words": [
+                    _w(" wait.", 0.6, 1.0), _w(" more", 1.0, 1.4)]},
+            ]
+        }
+        assert generate_srt(transcript, 0, 10, str(out)) is True
+        srt = out.read_text(encoding="utf-8-sig")
+        assert "yes." in srt
+        assert "wait." not in srt
+        assert "wait more" in srt
+
+
+class TestPerWordWidthSizing:
+    def test_narrow_word_gets_no_compaction(self):
+        assert _caption_width_compaction("NO", "Montserrat ExtraBold", 27) == (None, None)
+
+    def test_wide_word_squeezes_horizontally_only(self):
+        # "REALLY" is ~4.1em at Montserrat ExtraBold -> well over the 3.3em
+        # envelope, so the word gets a horizontal \fscx < 100 — but NO height
+        # change (round-2: per-word height shrink made words look like a
+        # different caption style).
+        fscx, fsp = _caption_width_compaction("REALLY", "Montserrat ExtraBold", 27)
+        assert fscx is not None and fscx < 100 and fscx >= 70
+        # Very wide words additionally tighten letter-spacing before the
+        # squeeze reaches its floor.
+        assert fsp is not None and fsp < 0
+
+    def test_unknown_font_falls_back_to_generic_metrics(self):
+        fscx, _fsp = _caption_width_compaction("SUPERCALIFRAGILISTIC", "NotARealFont", 27)
+        assert fscx is not None and 70 <= fscx <= 100
+
+    def test_compaction_never_reaches_below_70_percent(self):
+        fscx, _fsp = _caption_width_compaction("INTERNATIONALE", "Montserrat ExtraBold", 27)
+        assert fscx == 70
+
+    def test_max_width_envelope_constant_is_sane(self):
+        # Must be wide enough that normal short words stay full-size but small
+        # enough to keep long words inside the frame (9:16 -> PlayResX=162).
+        assert 2.5 <= CAPTION_MAX_WIDTH_EM <= 4.5
+
+
 class TestGenerateSrt:
     def _transcript(self, words):
         return {"segments": [{"start": 0, "end": 99, "text": "", "words": words}]}
@@ -60,7 +141,10 @@ class TestGenerateSrt:
         ]
         assert generate_srt(self._transcript(words), 0, 10, str(out)) is True
         srt = out.read_text(encoding="utf-8-sig")
-        assert "YouTube-Kanal." in srt
+        # Mid-segment token "YouTube-Kanal." loses its trailing period under
+        # the punctuation rule (only sentence-final words keep ./?/!) but the
+        # fragment must still be merged into one word.
+        assert "YouTube-Kanal" in srt
         assert " -Kanal" not in srt
         assert "ich habe" in srt
         assert "ichhabe" not in srt
@@ -125,6 +209,41 @@ class TestGenerateAss:
         assert content.count("{\\r}") == 3          # reset to dimmed base style
         assert "Style: Default,Verdana," in content
 
+    def test_general_range_gets_a_bigger_margin_v(self, tmp_path):
+        # Regression: captions used a fixed MarginV regardless of reframe
+        # mode, so during a GENERAL-layout scene (content shrunk and
+        # vertically centered, blurred fill above/below — see
+        # reframe_v2.general_filtergraph) the caption floated in the blur
+        # band well below the actual content, disconnected from it, reading
+        # as a second stacked panel (confirmed on real delivered clips,
+        # 31-jul-2026). A word inside a general_ranges window must get a
+        # per-line MarginV override pulling it up into the content box;
+        # a word outside any range must keep the default line MarginV of 0
+        # (inherits the Style's margin).
+        from subtitles import generate_ass
+        out = tmp_path / "subs.ass"
+        words = [_w(" track", 0.0, 0.5), _w(" general", 5.0, 5.5)]
+        assert generate_ass(self._transcript(words), 0, 10, str(out),
+                            general_ranges=[(4.0, 6.0)]) is True
+        content = out.read_text(encoding="utf-8-sig")
+        lines = [l for l in content.splitlines() if l.startswith("Dialogue:")]
+        assert len(lines) == 2
+        track_line, general_line = lines
+        # Format: Dialogue: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
+        track_margin_v = track_line.split(",")[7]
+        general_margin_v = general_line.split(",")[7]
+        assert track_margin_v == "0"
+        assert general_margin_v != "0" and int(general_margin_v) > 0
+
+    def test_general_ranges_defaults_to_no_override(self, tmp_path):
+        from subtitles import generate_ass
+        out = tmp_path / "subs.ass"
+        words = [_w(" hello", 0.0, 0.5)]
+        assert generate_ass(self._transcript(words), 0, 10, str(out)) is True
+        content = out.read_text(encoding="utf-8-sig")
+        line = [l for l in content.splitlines() if l.startswith("Dialogue:")][0]
+        assert line.split(",")[7] == "0"
+
     def test_karaoke_merges_fragments_too(self, tmp_path):
         from subtitles import generate_ass
         out = tmp_path / "subs.ass"
@@ -133,6 +252,90 @@ class TestGenerateAss:
         content = out.read_text(encoding="utf-8-sig")
         assert "YouTube-Kanal." in content
         assert content.count("Dialogue:") == 1
+
+    def test_letter_spacing_ratio_reaches_the_style_line(self, tmp_path):
+        from subtitles import generate_ass
+        out = tmp_path / "subs.ass"
+        words = [_w(" hi", 0.0, 0.5)]
+        assert generate_ass(self._transcript(words), 0, 10, str(out),
+                            fontsize=100, letter_spacing_ratio=-0.03) is True
+        content = out.read_text(encoding="utf-8-sig")
+        style_line = [l for l in content.splitlines() if l.startswith("Style:")][0]
+        fields = style_line.split(",")
+        # Format: Name,Fontname,Fontsize,Primary,Secondary,Outline,Back,
+        # Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,...
+        spacing = float(fields[13])
+        assert spacing < 0  # tighter than normal, per the negative ratio
+
+    def test_zero_letter_spacing_is_the_default(self, tmp_path):
+        from subtitles import generate_ass
+        out = tmp_path / "subs.ass"
+        words = [_w(" hi", 0.0, 0.5)]
+        assert generate_ass(self._transcript(words), 0, 10, str(out)) is True
+        content = out.read_text(encoding="utf-8-sig")
+        style_line = [l for l in content.splitlines() if l.startswith("Style:")][0]
+        assert float(style_line.split(",")[13]) == 0.0
+
+
+class TestSpeakerColors:
+    """Each diarized speaker gets their own caption colour (SPEAKER_CAPTION_
+    PALETTE, first-seen order) so a viewer can track who's talking from
+    captions alone — opt-in via speaker_colors=True (see AUTO_CAPTION_STYLE)."""
+
+    def _transcript_two_speakers(self):
+        return {"segments": [
+            {"start": 0, "end": 1, "text": "", "speaker": "A",
+             "words": [_w(" hi", 0.0, 0.5)]},
+            {"start": 1, "end": 2, "text": "", "speaker": "B",
+             "words": [_w(" yo", 1.0, 1.5)]},
+        ]}
+
+    def test_disabled_uses_single_highlight_color(self, tmp_path):
+        from subtitles import generate_ass
+        out = tmp_path / "subs.ass"
+        assert generate_ass(self._transcript_two_speakers(), 0, 10, str(out),
+                            highlight_color="#22C55E",
+                            speaker_colors=False) is True
+        content = out.read_text(encoding="utf-8-sig")
+        # Both words use the same (highlight_color) inline colour tag.
+        assert content.count("\\c&H5EC522&") == 2
+
+    def test_enabled_gives_each_speaker_a_distinct_color(self, tmp_path):
+        from subtitles import generate_ass, SPEAKER_CAPTION_PALETTE, _hex_to_ass_inline_color
+        out = tmp_path / "subs.ass"
+        assert generate_ass(self._transcript_two_speakers(), 0, 10, str(out),
+                            speaker_colors=True) is True
+        content = out.read_text(encoding="utf-8-sig")
+        first = _hex_to_ass_inline_color(SPEAKER_CAPTION_PALETTE[0])
+        second = _hex_to_ass_inline_color(SPEAKER_CAPTION_PALETTE[1])
+        assert f"\\c{first}" in content
+        assert f"\\c{second}" in content
+
+    def test_same_speaker_always_gets_the_same_color(self, tmp_path):
+        from subtitles import generate_ass, SPEAKER_CAPTION_PALETTE, _hex_to_ass_inline_color
+        out = tmp_path / "subs.ass"
+        transcript = {"segments": [
+            {"start": 0, "end": 1, "text": "", "speaker": "A",
+             "words": [_w(" one", 0.0, 0.5), _w(" two", 1.0, 1.5)]},
+        ]}
+        assert generate_ass(transcript, 0, 10, str(out), max_chars=1,
+                            speaker_colors=True) is True
+        content = out.read_text(encoding="utf-8-sig")
+        first = _hex_to_ass_inline_color(SPEAKER_CAPTION_PALETTE[0])
+        assert content.count(f"\\c{first}") == 2
+
+    def test_word_with_no_speaker_falls_back_to_highlight_color(self, tmp_path):
+        from subtitles import generate_ass
+        out = tmp_path / "subs.ass"
+        words = [_w(" hello", 0.0, 0.5)]  # no speaker at all
+        assert generate_ass(self._transcript(words), 0, 10, str(out),
+                            highlight_color="#22C55E",
+                            speaker_colors=True) is True
+        content = out.read_text(encoding="utf-8-sig")
+        assert content.count("\\c&H5EC522&") == 1
+
+    def _transcript(self, words):
+        return {"segments": [{"start": 0, "end": 99, "text": "", "words": words}]}
 
     def test_invalid_highlight_falls_back(self, tmp_path):
         from subtitles import generate_ass
@@ -176,7 +379,60 @@ class TestGenerateAss:
         # Gentle range: the old 75->112 pop was so wide that a frame caught
         # mid-animation read as a sizing bug rather than a beat.
         assert "\\fscx90\\fscy90" in content
-        assert "\\t(0,110,\\fscx108\\fscy108)" in content
+        assert "\\t(0,110,\\fscx108\\fscy108" in content
+
+    def test_pop_effect_animates_stroke_with_glyph(self, tmp_path):
+        # The stroke must scale WITH the glyph so round-letter counters don't
+        # over-fill with outline mid-pop (plan item 4).
+        from subtitles import generate_ass
+        out = tmp_path / "subs.ass"
+        words = [_w(" o", 0.0, 0.5)]
+        assert generate_ass(self._transcript(words), 0, 10, str(out),
+                            effect="pop", border_width=4) is True
+        content = out.read_text(encoding="utf-8-sig")
+        # 4 * 0.9 = 3.60 -> 4 * 1.08 = 4.32: the stroke tracks the glyph scale
+        # exactly instead of staying fixed.
+        assert "\\fscx90\\fscy90\\bord3.60" in content
+        assert "\\fscx108\\fscy108\\bord4.32" in content
+
+    def test_wide_word_gets_horizontal_fscx_not_fs(self, tmp_path):
+        from subtitles import generate_ass
+        out = tmp_path / "subs.ass"
+        words = [_w(" really", 0.0, 0.5)]
+        assert generate_ass(self._transcript(words), 0, 10, str(out),
+                            uppercase=True) is True
+        content = out.read_text(encoding="utf-8-sig")
+        events = content.split("[Events]")[1]
+        assert "\\fscx" in events
+        # Height override tag \fs<digit> must never appear — \fscx/\fscy/\fsp
+        # legitimately contain the "fs" letters, so match the digit form.
+        assert not re.search(r"\\fs\d", events)
+        assert "REALLY" in events
+
+    def test_short_word_has_no_compaction(self, tmp_path):
+        from subtitles import generate_ass
+        out = tmp_path / "subs.ass"
+        words = [_w(" no", 0.0, 0.5)]
+        assert generate_ass(self._transcript(words), 0, 10, str(out),
+                            uppercase=True) is True
+        content = out.read_text(encoding="utf-8-sig")
+        events = content.split("[Events]")[1]
+        assert "\\fscx" not in events
+
+    def test_pop_compaction_multiplies_not_overwrites(self, tmp_path):
+        from subtitles import generate_ass
+        out = tmp_path / "subs.ass"
+        words = [_w(" really", 0.0, 0.5)]
+        assert generate_ass(self._transcript(words), 0, 10, str(out),
+                            uppercase=True, effect="pop") is True
+        content = out.read_text(encoding="utf-8-sig")
+        events = content.split("[Events]")[1]
+        # The compaction \fscx must be multiplied into the pop's animation
+        # range (start ~70-80, end ~80-90) — never a plain 90/108 that would
+        # overwrite the squeeze, and never a \fs height change.
+        assert "\\fscx7" in events or "\\fscx8" in events
+        assert "\\fscy90" in events and "\\fscy108" in events
+        assert not re.search(r"\\fs\d", events)
 
     def test_uppercase_transform(self, tmp_path):
         from subtitles import generate_ass
@@ -249,23 +505,65 @@ class TestAutoCaptionDefaults:
 
     def test_style_is_complete(self):
         from subtitles import AUTO_CAPTION_STYLE, generate_ass
+        # border_width is deliberately NOT here — it's derived from
+        # font_size at call time (see auto_stroke_width /
+        # CAPTION_STROKE_RATIO), not a fixed field, so it stays proportional
+        # if font_size ever changes.
         required = {"alignment", "font_name", "font_size", "font_color",
-                    "highlight_color", "border_color", "border_width",
+                    "highlight_color", "border_color",
                     "effect", "base_opacity", "uppercase",
                     "max_chars", "max_duration"}
         assert required <= set(AUTO_CAPTION_STYLE)
 
     def test_font_is_one_the_image_actually_ships(self):
         # libass falls back to DejaVu SILENTLY when the font is missing (#57),
-        # so the default must be a family baked into the image.
+        # so the default must be a family baked into the image (see
+        # fonts/*.ttf + Dockerfile's fc-cache step).
         from subtitles import AUTO_CAPTION_STYLE
         assert AUTO_CAPTION_STYLE["font_name"] in {
-            "Anton", "Liberation Sans", "Liberation Serif", "DejaVu Sans"}
+            "Anton", "Poppins Black", "Poppins ExtraBold",
+            "Montserrat Bold", "Montserrat ExtraBold",
+            "Liberation Sans", "Liberation Serif", "DejaVu Sans"}
 
-    def test_highlight_differs_from_body_text(self):
-        # The whole point of the karaoke look: the active word must stand out.
+    def test_single_word_at_a_time(self):
+        # Matches research_clips/ptb_4.mp4 (user reference, 1-aug-2026): one
+        # word on screen at a time, not a multi-word block with a
+        # highlighted active word — max_chars=1 forces this via
+        # _collect_word_blocks (any second word always exceeds it).
         from subtitles import AUTO_CAPTION_STYLE as s
-        assert s["highlight_color"].lower() != s["font_color"].lower()
+        assert s["max_chars"] == 1
+        # No distinct highlight FIELD -- speaker_colors is off (see
+        # test_pop_effect_and_no_speaker_colors), so highlight and body
+        # color must be the same or the "active" word would visibly change
+        # color for no reason.
+        assert s["highlight_color"].lower() == s["font_color"].lower()
+
+    def test_pop_effect_and_no_speaker_colors(self):
+        # Refined twice same day per direct user feedback against rendered
+        # samples: (1) the reference's flat/no-animation look read as
+        # missing a beat, and its 6px outline read as too heavy — pop
+        # restored, outline reduced (now derived, see
+        # test_stroke_width_is_proportional). (2) per-speaker colour was
+        # tried and explicitly rejected ("i aint look good") — back to one
+        # colour for everyone.
+        from subtitles import AUTO_CAPTION_STYLE as s
+        assert s["effect"] == "pop"
+        assert s["speaker_colors"] is False
+
+    def test_stroke_width_is_proportional(self):
+        # User spec (1-aug-2026): "8%-12% of font size," then "increase the
+        # thickness a bit" the same day -> pinned to the top of that range.
+        from subtitles import auto_stroke_width, CAPTION_STROKE_RATIO
+        assert 0.10 <= CAPTION_STROKE_RATIO <= 0.16
+        for font_size in (16, 32, 64):
+            ratio = auto_stroke_width(font_size) / font_size
+            assert 0.08 <= ratio <= 0.18  # allow for rounding at small sizes
+
+    def test_letter_spacing_is_tight_and_negative(self):
+        # User spec (1-aug-2026): "-2% to -4%," then "feel too apart" the
+        # same day -> pulled tighter than that original range.
+        from subtitles import CAPTION_LETTER_SPACING_RATIO
+        assert -0.10 <= CAPTION_LETTER_SPACING_RATIO <= -0.04
 
     def test_captions_clear_the_platform_ui(self, tmp_path):
         from subtitles import SAFE_MARGIN_V, generate_ass
