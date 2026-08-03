@@ -1970,7 +1970,33 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
                 # a secondary subject that overstays gets nudged back to the
                 # primary BEFORE selection — one-shot, re-arms only if the
                 # switch doesn't take.
-                if return_bias_armed and effective_primary_id is not None:
+                # THE SPEAKER OUTRANKS THE PRIMARY. The "primary" is whoever
+                # has the most cumulative talk time, which on a hosted format
+                # (game show, dating show, interview) is the HOST — the person
+                # holding the mic, and usually the least interesting person to
+                # frame. Measured on the Blind Dating source: the host has
+                # 33.8% of all speech, so he became primary, and this 3x return
+                # bias dragged the camera off whoever was actually answering
+                # after only MAX_CUTAWAY_SECONDS (2.5s). That is the "it keeps
+                # cutting back to the guy with the mic" failure.
+                #
+                # The rule was written for a single-protagonist clip (a podcast
+                # guest, a monologue) where "return to the subject" is right. It
+                # inverts on a conversation. So: never pull off a candidate we
+                # have positively identified as the speaker — the whole point of
+                # diarization + lip-sync ASD is that this signal is better than
+                # a talk-time heuristic.
+                # last_target_id is the subject currently on screen (set after
+                # each committed switch). target_id is not assigned until the
+                # selection block BELOW this point, so using it here would be a
+                # NameError on the first detection frame.
+                speaker_is_framed = (
+                    bound_id is not None and last_target_id == bound_id)
+                if speaker_is_framed:
+                    cutaway_frames = 0
+                    return_bias_armed = False
+                if (return_bias_armed and effective_primary_id is not None
+                        and not speaker_is_framed):
                     if _apply_primary_return_bias(candidates, effective_primary_id):
                         return_bias_armed = False
 
