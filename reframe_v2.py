@@ -646,6 +646,9 @@ def _update_mouth_activity(candidates, prev_candidates):
 ASD_MATCH_TOLERANCE = float(os.environ.get("ASD_MATCH_TOLERANCE", "0.10"))
 # Score multiplier for the face LR-ASD says is speaking.
 ASD_SPEAKER_BOOST = float(os.environ.get("ASD_SPEAKER_BOOST", "4.0"))
+# How much closer the nearest face must be than the runner-up for an LR-ASD
+# position match to count as an identification rather than a coin toss.
+ASD_MATCH_MARGIN = float(os.environ.get("ASD_MATCH_MARGIN", "1.6"))
 
 
 def _apply_asd_speaker_boost(candidates, asd_box, orig_w, boosted=None):
@@ -667,14 +670,27 @@ def _apply_asd_speaker_boost(candidates, asd_box, orig_w, boosted=None):
     ax, ay, aw, ah = asd_box
     acx, acy = ax + aw / 2.0, ay + ah / 2.0
     tol = ASD_MATCH_TOLERANCE * orig_w
-    best, best_d = None, None
+    dists = []
     for c in candidates:
         bx, by, bw, bh = c["box"]
-        d = math.hypot((bx + bw / 2.0) - acx, (by + bh / 2.0) - acy)
-        if best_d is None or d < best_d:
-            best, best_d = c, d
+        dists.append((math.hypot((bx + bw / 2.0) - acx,
+                                 (by + bh / 2.0) - acy), c))
+    dists.sort(key=lambda t: t[0])
+    best_d, best = dists[0]
     if best is None or best_d > tol:
         return None
+    # The match must be DECISIVE. In a lineup the ASD box sits roughly
+    # equidistant from several faces, and ordinary detection jitter then
+    # flips which one is nearest from sample to sample. Traced 3-aug-2026 on
+    # a 7-person shot: the ASD box was constant for a whole second while the
+    # matched face hopped across five different people at 0.17s intervals,
+    # and because lip-sync is the policy's strongest evidence, every hop
+    # became a cut. An ambiguous match is not evidence — reporting nothing
+    # lets the policy hold the current subject instead.
+    if len(dists) > 1:
+        runner_up = dists[1][0]
+        if runner_up < best_d * ASD_MATCH_MARGIN:
+            return None
     best["score"] = best.get("score", 0) * ASD_SPEAKER_BOOST
     if boosted is not None:
         boosted.add(id(best["box"]))
@@ -798,9 +814,20 @@ SWITCH_COOLDOWN_FRAMES = max(int(os.environ.get("SWITCH_COOLDOWN_FRAMES", "30"))
 # package already used for YOLO. Set USE_TRACKER_IDENTITY=0 to fall back to the
 # legacy x-position matcher.
 USE_TRACKER_IDENTITY = os.environ.get("USE_TRACKER_IDENTITY", "1").strip() not in ("0", "false", "no")
-# LR-ASD active-speaker detection. Costs roughly 2x realtime per clip on CPU
-# (much less on a GPU), so it is opt-in per deployment rather than assumed.
-USE_ASD = os.environ.get("USE_ASD", "0").strip() not in ("0", "false", "no")
+# LR-ASD active-speaker detection — ON by default since 3-aug-2026.
+#
+# It is the single most valuable signal in the pipeline and it was shipping
+# switched off. Measured on the Blind Dating source: LR-ASD locates the
+# speaking face in 19 of 20 seconds (81% of detection frames), where the
+# next-best chain — diarization label -> scene anchor -> candidate id —
+# resolved on far fewer and mis-resolved often. Selecting by face size
+# instead agrees with it only 44.9% of the time, which is the "it's
+# focusing on the host and the host is the one holding the mic" complaint.
+#
+# Costs roughly 1.3x realtime per clip on CPU and far less on a GPU (batched
+# on CUDA, 48.5x realtime). Set USE_ASD=0 to trade framing accuracy for that
+# time on a CPU-only deployment; the policy degrades to diarization cleanly.
+USE_ASD = os.environ.get("USE_ASD", "1").strip() not in ("0", "false", "no")
 TRACKER_IDENTITY_BACKEND = os.environ.get("TRACKER_IDENTITY_BACKEND", "botsort").strip()
 
 # A directive-driven target switch (see _apply_directive_boost's use in
@@ -1685,6 +1712,9 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
     # for one detection sample to land with force_next_update set (see
     # SmoothedCameraman) so the snap lands on the REAL new target.
     cut_grace_frames = 0
+    # Eased framing box for the current subject (see subject_policy.
+    # stabilize_box). Reset on every real cut so a new shot lands exactly.
+    stable_box = None
     id_seen_counts = {}
     # Whoever the camera is currently on. A change here is a hard cut.
     last_target_id = None
@@ -1692,6 +1722,10 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
     # switch, or scene change) — see MIN_SHOT_HOLD_SECONDS.
     last_hard_cut_frame = -10 ** 9
     min_shot_hold_frames = max(1, int(MIN_SHOT_HOLD_SECONDS * fps))
+    # Who is on screen is decided here, from tiered evidence, instead of by
+    # an accumulating size score (see subject_policy).
+    import subject_policy
+    policy = subject_policy.SubjectPolicy(fps)
     # Split-screen reaction-cam state (see SPLIT_* constants): per-frame
     # flags + the two subject cell rects, with carry-forward so a hidden or
     # undetected subject keeps their cell (never flickers out mid-beat).
@@ -1841,6 +1875,12 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
                 bound_id = _resolve_speaker_binding(
                     candidates, active_speaker, current_scene_index,
                     speaker_anchors, speaker_to_id, orig_w) if active_speaker else None
+                # Kept separate from bound_id for the policy: these are two
+                # different tiers of evidence (lip-sync names a face on
+                # screen; diarization names an audio label that still has to
+                # be bound to one), and collapsing them hides which one
+                # actually drove a decision.
+                diarized_id = bound_id
                 # A confident ASD identification is a better binding than the
                 # anchor/position chain that would otherwise resolve it.
                 if asd_id is not None:
@@ -1943,7 +1983,10 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
                                 directed_box = None
                 if directed_box is not None:
                     boosted.add(id(directed_box))
-                no_boost = not boosted
+                # (The old `no_boost` flag fed SpeakerTracker's continuity
+                # bias — "no signal this frame, so raise stickiness". The
+                # policy expresses that directly as tier 5 "hold", so the
+                # flag has no remaining consumer.)
                 prev_candidates = candidates
 
                 # Re-stamp + snapshot BOOSTED scores into the tracker's
@@ -2029,33 +2072,41 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
                     directive_target_id = next(
                         (c['id'] for c in candidates if c['box'] is directed_box),
                         None)
-                directive_would_cut = (directed_box is not None
-                                       and directive_target_id != last_target_id)
-                directive_on_cooldown = (
-                    directive_would_cut and not scene_changed
-                    and directive_target_id != bound_id
-                    and frame_number - last_hard_cut_frame < min_shot_hold_frames)
-                if directed_box is not None and not directive_on_cooldown:
-                    # A directive is authoritative, not a vote — it must not
-                    # go through the accumulating size-based selection below.
-                    # Measured 31-jul-2026: that accumulator ties score to a
-                    # POSITION-matched id (assign_ids, 0.15*width radius); in
-                    # a crowded lineup shot people get reassigned ids as they
-                    # shift, so a directive's boost lands on a different
-                    # transient id most frames and never accumulates enough
-                    # to beat a speaker who's held one stable id for seconds.
-                    # Traced end-to-end: only 4 of 12 directed shots actually
-                    # won selection, and both "causing_reaction" beats lost —
-                    # the exact "grunting guy never shown" complaint. Taking
-                    # the directed candidate directly is what the "outranks
-                    # every heuristic" comment above always claimed to do.
-                    target_box = directed_box
-                    target_id = directive_target_id
+                # Mouth motion: the weakest speaker signal we have. Recovered
+                # from the speech boost's own pick so the policy can rank it
+                # explicitly instead of it arriving as an anonymous multiplier.
+                mouth_id = next((c.get('id') for c in candidates
+                                 if id(c['box']) in speech_boosted), None)
+                # THE DECISION (see subject_policy). Everything above this
+                # point now PRODUCES evidence; this is the single place that
+                # consumes it. The boosts still run because the split-screen,
+                # zoom and coverage bookkeeping below read the `boosted` set —
+                # but they no longer decide who is on screen, because a
+                # multiplicative score could not: measured on this source,
+                # raising the lip-sync boost 250x moved framing accuracy only
+                # 61% -> 70%, while removing the hysteresis that was damping
+                # it took the same clip to 97%.
+                shot_before = policy.shot_started
+                target_box, target_id, decision_tier = policy.decide(
+                    candidates,
+                    subject_policy.Evidence(
+                        asd_id=asd_id,
+                        diarized_id=diarized_id,
+                        directive_id=directive_target_id,
+                        directive_reason=(directive or {}).get('reason'),
+                        mouth_id=mouth_id,
+                        scene_changed=scene_changed),
+                    frame_number, orig_w)
+                # A genuinely new shot, as judged by the policy — the signal
+                # the hard cut below keys off.
+                subject_changed = (policy.shot_started != shot_before
+                                   and target_box is not None)
+                # Keep tracker state coherent for the consumers that still
+                # read it — the speech boost's identity gate
+                # (current_target_id) and the cooldown bookkeeping.
+                if target_id is not None and target_id != tracker.active_speaker_id:
                     tracker.active_speaker_id = target_id
                     tracker.last_switch_frame = frame_number
-                else:
-                    target_box, target_id = tracker.get_target_id(
-                        candidates, frame_number, orig_w, continuity_bias=no_boost)
                 # Hook two-shot: for the first ~2s frame BOTH people in the
                 # single 3:4 crop (they fit — that's the point; no split
                 # screen on the open). Centered between the key subject and
@@ -2148,19 +2199,38 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
                         zoom_decision, zoom_confirm_frames, ZOOM_CONFIRM_CYCLES)
                     zoom_target, zoom_hold_frames = _zoom_hold_decision(
                         zoom_target, zoom_hold_frames, ZOOM_HOLD_CYCLES)
+                    # What the CAMERA is aimed at is an eased version of the
+                    # detection, not the raw box (see stabilize_box): the same
+                    # person alternates between a MediaPipe face box and a
+                    # YOLO head-and-chest box, and snapping between the two
+                    # moves the crop every detection. `target_box` itself is
+                    # left untouched — the boosted set, split cells and the
+                    # directive check all match on its identity.
+                    aim_box = subject_policy.stabilize_box(
+                        target_box, None if subject_changed else stable_box)
+                    stable_box = aim_box
                     # None = confirming/holding: keep the current zoom target.
                     if zoom_target is not None:
-                        cameraman.update_target(target_box,
+                        cameraman.update_target(aim_box,
                                                 zoom_target=zoom_target)
                     else:
-                        cameraman.update_target(target_box)
+                        cameraman.update_target(aim_box)
 
                     # A change of subject is a CUT, not a journey. Reference
                     # edits in this genre are 100% hard cuts between people
                     # (camera-movement research, 31-jul-2026), so bypass the
                     # jump-confirm gate and land the new framing on this very
                     # frame instead of easing across the room to reach it.
-                    if target_id != last_target_id:
+                    #
+                    # "Changed subject" is the POLICY's judgement, not an id
+                    # comparison. Ids churn constantly (a face and the body it
+                    # belongs to, a confirmed track and its provisional
+                    # replacement), and the policy already recognises those as
+                    # the same person. Keying the hard cut off the raw id
+                    # re-snapped the camera on every relabel — the same
+                    # sub-0.2s flicker the policy exists to prevent, injected
+                    # after the decision was correctly made.
+                    if subject_changed:
                         cameraman.force_next_update = True
                         cameraman.update_target(target_box)
                         cut_grace_frames = max(cut_grace_frames, 1)
@@ -2342,6 +2412,11 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
         if proc is not None:
             proc.stdout.close()
             proc.wait()
+
+    # What actually decided the framing. A regression here (e.g. "size 60%")
+    # is visible in the render log without bisecting anything.
+    if policy.tier_counts:
+        print(f"   🎯 Framing evidence: {policy.summary()}")
 
     split_info = None
     if SPLIT_SCREEN and any(split_flags):

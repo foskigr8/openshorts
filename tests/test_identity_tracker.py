@@ -189,3 +189,49 @@ def test_delegated_ids_survive_an_occlusion_legacy_would_lose():
             l_after = cands[1]["id"]
     # Documents WHY this change exists: legacy loses the identity here.
     assert l_after != l_before
+
+
+def test_provisional_ids_are_stable_across_frames():
+    """An unconfirmed detection that has not moved keeps its id. Minting a
+    fresh negative every frame made one motionless person read as a stream
+    of different people to every id-keyed consumer downstream."""
+    import identity_tracker as it
+
+    class _Stub(it.IdentityTracker):
+        def __init__(self):
+            # Bypass the ultralytics backend: this behaviour is in the
+            # provisional-id path, which runs regardless of the backend.
+            self._provisional = -1
+            self._prev_provisional = []
+            self._ids = {}
+            self._next_id = 0
+            self._memo_frame = None
+            self._memo = {}
+            self.backend = None
+
+        def _step(self, boxes):
+            cands = [{"box": list(b), "score": 1.0} for b in boxes]
+            taken = set()
+            unclaimed = cands
+            for c in unclaimed:
+                inherited, best = None, it.PROVISIONAL_MATCH_IOU
+                for pb, pid in self._prev_provisional:
+                    if pid in taken:
+                        continue
+                    v = it._iou(c["box"], pb)
+                    if v >= best:
+                        inherited, best = pid, v
+                if inherited is None:
+                    inherited = self._provisional
+                    self._provisional -= 1
+                c["id"] = inherited
+                taken.add(inherited)
+            self._prev_provisional = [(tuple(c["box"]), c["id"]) for c in cands]
+            return cands
+
+    t = _Stub()
+    a = t._step([(100, 100, 50, 50)])
+    b = t._step([(102, 101, 50, 50)])   # same person, barely moved
+    assert a[0]["id"] == b[0]["id"]
+    c = t._step([(800, 400, 50, 50)])   # somewhere else entirely
+    assert c[0]["id"] != b[0]["id"]

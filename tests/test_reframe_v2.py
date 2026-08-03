@@ -1427,3 +1427,21 @@ class TestSplitCellAspectFollowsOutput:
             cw, ch = reframe_v2.split_cell_size(640, 360, aspect=aspect)
             assert cw <= 640 and ch <= 360
             assert cw % 2 == 0 and ch % 2 == 0
+
+
+def test_asd_match_requires_a_decisive_nearest_face():
+    """In a lineup the ASD box sits between several faces and detection
+    jitter flips the nearest one from sample to sample. An ambiguous match
+    must report nothing rather than become a cut."""
+    asd_box = (1000, 200, 200, 200)
+    ambiguous = [{"id": 1, "box": [900, 200, 200, 200], "score": 1.0},
+                 {"id": 2, "box": [1100, 200, 200, 200], "score": 1.0}]
+    assert reframe_v2._apply_asd_speaker_boost(ambiguous, asd_box, 1920) is None
+    assert ambiguous[0]["score"] == 1.0, "no boost on an ambiguous match"
+
+
+def test_asd_match_is_accepted_when_one_face_is_clearly_nearest():
+    asd_box = (1000, 200, 200, 200)
+    clear = [{"id": 1, "box": [1005, 205, 200, 200], "score": 1.0},
+             {"id": 2, "box": [1700, 600, 200, 200], "score": 1.0}]
+    assert reframe_v2._apply_asd_speaker_boost(clear, asd_box, 1920) == 1

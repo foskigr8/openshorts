@@ -69,6 +69,22 @@ DEFAULTS = dict(
 )
 
 
+# Overlap at which an unconfirmed detection inherits last frame's provisional
+# id instead of being minted a new one.
+PROVISIONAL_MATCH_IOU = 0.4
+
+
+def _iou(a, b):
+    """Intersection-over-union of two (x, y, w, h) boxes."""
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    ix = max(0, min(ax + aw, bx + bw) - max(ax, bx))
+    iy = max(0, min(ay + ah, by + bh) - max(ay, by))
+    inter = ix * iy
+    union = aw * ah + bw * bh - inter
+    return inter / union if union > 0 else 0.0
+
+
 class _Detections:
     """Duck-typed stand-in for an ultralytics ``Results`` boxes object.
 
@@ -111,6 +127,10 @@ class IdentityTracker:
         cfg.update(overrides)
         self.cfg = cfg
         self._provisional = -1
+        # [(box, provisional_id)] from the last stepped frame, so an
+        # unconfirmed detection keeps its id instead of getting a new one
+        # every frame (see the note in update).
+        self._prev_provisional = []
         # Maps the backend's track_id -> the id we hand to callers. Kept
         # separate so ids stay small, dense and stable even if the backend
         # renumbers internally.
@@ -195,10 +215,34 @@ class IdentityTracker:
         # A detection the tracker hasn't confirmed yet still needs an id —
         # callers key policy decisions off it. Provisional ids are negative so
         # they can never collide with a confirmed track.
-        for c in candidates:
-            if "id" not in c:
-                c["id"] = self._provisional
-                self._provisional -= 1
+        #
+        # They must also be STABLE. Minting a fresh negative id per frame made
+        # one motionless person read as id 0, -1, 0, -3, 0, -4 across seven
+        # consecutive detections (traced 3-aug-2026), because BoT-SORT
+        # alternated between confirming and declining the same face. Every
+        # id-keyed consumer — the camera's subject choice, split-cell
+        # assignment, speaker anchors, id_seen_counts — saw that as a stream of
+        # different people. So an unconfirmed detection first tries to inherit
+        # the provisional id of the overlapping detection from last frame.
+        unclaimed = [c for c in candidates if "id" not in c]
+        if unclaimed:
+            taken = {c["id"] for c in candidates if "id" in c}
+            for c in unclaimed:
+                inherited = None
+                best_iou = PROVISIONAL_MATCH_IOU
+                for prev_box, prev_id in self._prev_provisional:
+                    if prev_id in taken:
+                        continue
+                    v = _iou(c["box"], prev_box)
+                    if v >= best_iou:
+                        inherited, best_iou = prev_id, v
+                if inherited is None:
+                    inherited = self._provisional
+                    self._provisional -= 1
+                c["id"] = inherited
+                taken.add(inherited)
+        self._prev_provisional = [(tuple(c["box"]), c["id"])
+                                  for c in candidates if c["id"] < 0]
 
         if frame_number is not None:
             self._memo_frame = frame_number
