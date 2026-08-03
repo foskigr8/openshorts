@@ -885,7 +885,7 @@ ZOOM_HOLD_CYCLES = max(int(os.environ.get("ZOOM_HOLD_CYCLES", "3")), 1)
 # plain two-shot would defeat the purpose). Split intervals come from
 # scene-context "causing_reaction"/"reacting" beats and strong motion
 # reactions detected against the non-target subject.
-SPLIT_SCREEN = os.environ.get("SPLIT_SCREEN", "1").strip().lower() not in (
+SPLIT_SCREEN = os.environ.get("SPLIT_SCREEN", "0").strip().lower() not in (
     "0", "false", "no", "off")
 SPLIT_MIN_SECONDS = float(os.environ.get("SPLIT_MIN_SECONDS", "0.35"))
 SPLIT_MERGE_GAP_SECONDS = float(os.environ.get("SPLIT_MERGE_GAP_SECONDS", "0.5"))
@@ -2294,18 +2294,22 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
                                            else fallback_rect)
                     split_bottom_rects.append(cur_bot if cur_bot is not None
                                               else fallback_rect)
-                    # Round-5 spec 2.2: a reaction/acted-upon beat with no
-                    # rendered split should WIDEN to a two-shot (cause + actor
-                    # in one frame) instead of cropping to whoever won the
-                    # boost — but only when both subjects can share the fixed
-                    # crop; far-apart pairs fall back to the tracker target.
-                    if (reaction_beat or directive_active) and not want:
-                        two_shot = _reaction_two_shot_boxes(
-                            primary_raw_box, secondary_raw_box,
-                            cameraman.crop_width, orig_w, orig_h)
-                        if two_shot is not None:
-                            cameraman.update_target(two_shot)
-                            cameraman.force_next_update = True
+                    # NOTE: a two-shot "widen instead of cut" pass used to run
+                    # here (round-5 spec 2.2). REMOVED — measured as the source
+                    # of severe camera shake. This block sits outside the
+                    # detection-frame guard, and both `reaction_beat` and
+                    # `directive_active` persist between detections, so it
+                    # re-targeted the camera and set force_next_update on EVERY
+                    # frame of a reaction/directive window. force_snap is an
+                    # unconditional hard jump (main.SmoothedCameraman.
+                    # get_crop_box), so this produced 23 forced snaps in a 20s
+                    # clip — more than one per second, on top of the source's
+                    # own cuts. It was harmless only while reaction_beat was
+                    # permanently False; fixing that bug made it fire.
+                    #
+                    # If re-introduced: gate it to detection frames only, skip
+                    # it when the two-shot target hasn't meaningfully moved,
+                    # and never set force_next_update from it.
 
             frame_number += 1
     finally:
