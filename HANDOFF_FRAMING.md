@@ -333,6 +333,41 @@ Still imperfect, from that same review — these are the next items:
 4. Four short non-speaker moments remain (0:00-0:01, 0:02.2-0:04, 0:25-0:26.5,
    0:28.8-0:29.2) — residual LR-ASD error at turn boundaries.
 
+## 2g. CENTRING IS VERIFIED END-TO-END — and the vision review was wrong here
+
+Run `tools_centrecheck.py` (copy of scratch_ptb/centrecheck.py). It measures the
+FINISHED crop against the subject box the policy chose, per frame, through
+easing + clamping + stabilize_box — the thing a unit test on `_place_frac`
+cannot prove.
+
+Result on the Pop The Balloon span after f049153 (960 frames):
+
+    centred within 10% of middle : 92%
+    near the crop edge (<0.2/>0.8):  0%
+    worst: pos=0.27 (subj 452,  crop 235..1045)
+           pos=0.67 (subj 1650, crop 1110..1920 — clamped, unavoidable)
+
+**Two corrections to the record.**
+
+1. v5 was reported as a framing regression on the strength of a vision review
+   saying "subject is shoved to the right edge, significant dead space on the
+   left". The geometry says the opposite — the worst frame has the subject
+   LEFT of centre. Centring works. The "no" verdict is driven by the
+   non-speaker moments (0:00-0:03.9, 0:24-0:26.4) and the drift at 0:11.5,
+   which are speaker-selection and follow problems, not framing.
+
+2. **The vision review is not ground truth either.** It caught real defects the
+   metrics missed, which led to over-trusting it; here it made a checkable
+   claim about frame geometry and got the direction wrong. Use arithmetic for
+   questions arithmetic can answer; keep the review for judgement calls it is
+   genuinely good at (is this watchable, did the cut land, is the speaker the
+   person on screen).
+
+Residual 8% off-centre has two causes: clamping near a source edge
+(unavoidable), and `stabilize_box` blending a face box toward a body box,
+which lags the aim behind the policy's chosen target. The second is fixable
+if it ever matters — aim at the face box and use the blend only for size.
+
 ## 3. Known-open problems (in priority order)
 
 ### 3.1 Printed/photo faces are framed as if they were people — HIGHEST VALUE
