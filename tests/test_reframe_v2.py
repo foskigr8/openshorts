@@ -1475,7 +1475,10 @@ def test_banter_two_shot_fires_when_the_floor_blocks_a_strong_switch():
     from subject_policy import Evidence, TIER_HOLD
     assert _banter_two_shot_eligible(TIER_HOLD, Evidence(asd_id=2), 1)
     assert _banter_two_shot_eligible(TIER_HOLD, Evidence(diarized_id=2), 1)
-    assert _banter_two_shot_eligible(TIER_HOLD, Evidence(jcut_id=2), 1)
+    # A j-cut alone no longer proposes anyone: the pre-roll is off by
+    # default (it was pulling the camera off the live speaker), so there is
+    # no incoming speaker to pair with.
+    assert not _banter_two_shot_eligible(TIER_HOLD, Evidence(jcut_id=2), 1)
 
 
 def test_banter_two_shot_does_not_fire_when_the_switch_landed():

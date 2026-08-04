@@ -147,6 +147,7 @@ FATIGUE_CUT_SECONDS = float(
 # they take the frame away from the person talking, which is the one thing the
 # clip exists to show. Turn them on per-deployment only after the speaker
 # framing itself is judged good.
+JCUT_ENABLED = os.environ.get("JCUT_PREROLL", "0").strip() not in ("0", "false", "no")
 REACTION_ENABLED = os.environ.get("REACTION_CUTS", "0").strip() not in ("0", "false", "no")
 FATIGUE_ENABLED = os.environ.get("FATIGUE_CUTS", "0").strip() not in ("0", "false", "no")
 
@@ -275,7 +276,15 @@ class Evidence:
         # seconds before their audio waveform actually begins"). It outranks
         # lip-sync for the pre-roll window, otherwise the current speaker's
         # mouth would win and the anticipation would never reach the screen.
-        if self.jcut_id is not None:
+        # DISABLED BY DEFAULT (4-aug-2026). Verified on the Pop The Balloon
+        # sample: because this outranks lip-sync, the j-cut lookahead pulled
+        # the camera off Solomon mid-sentence onto the listener eight separate
+        # times in 32s ("Camera on woman with red hair while Solomon speaks",
+        # harsh-editor review). A pre-roll is a real technique, but only when
+        # the outgoing speaker has actually finished; ranking it above live
+        # lip-sync makes it a cutaway generator. Owner spec is unambiguous:
+        # "just make sure whoever's talking gets framed."
+        if JCUT_ENABLED and self.jcut_id is not None:
             return self.jcut_id, TIER_JCUT
         if self.asd_id is not None:
             return self.asd_id, TIER_ASD

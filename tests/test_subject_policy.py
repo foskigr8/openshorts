@@ -465,16 +465,23 @@ def test_reaction_ignores_the_identified_speaker():
 # --- J-cut pre-roll -------------------------------------------------------
 
 
-def test_jcut_outranks_lip_sync_for_the_pre_roll():
-    """The J-cut names the next speaker 0.5s before their audio starts; it
-    must beat the current speaker's lip-sync for that window, otherwise the
-    anticipation never reaches the screen (owner spec, 4-aug-2026)."""
-    p = SubjectPolicy(FPS, absolute_min_shot_seconds=0.0)
+def test_jcut_preroll_is_off_by_default_and_never_steals_a_live_line():
+    """VERIFIED ON VIDEO, 4-aug-2026. The pre-roll ranked ABOVE lip-sync, so
+    it pulled the camera off the man mid-sentence onto the listener eight
+    times in 32s ("Camera on woman with red hair while Solomon speaks").
+    A pre-roll is only legitimate once the outgoing speaker has finished."""
+    p = SubjectPolicy(FPS)
     c = cands(HOST, GUEST)
-    _, cid, tier = p.decide(c, Evidence(jcut_id=2, asd_id=1), 0)
+    _, cid, tier = p.decide(c, Evidence(asd_id=1, jcut_id=2), 0)
+    assert (cid, tier) == (1, TIER_ASD), "the person TALKING keeps the frame"
+
+
+def test_jcut_can_be_enabled_explicitly(monkeypatch):
+    import subject_policy as _sp
+    monkeypatch.setattr(_sp, "JCUT_ENABLED", True)
+    p = SubjectPolicy(FPS)
+    _, cid, tier = p.decide(cands(HOST, GUEST), Evidence(asd_id=1, jcut_id=2), 0)
     assert (cid, tier) == (2, TIER_JCUT)
-
-
 def test_jcut_still_waits_out_the_minimum_shot_floor():
     p = SubjectPolicy(FPS)  # default absolute floor 1.5s = 37 frames @25fps
     c = cands(HOST, GUEST)
