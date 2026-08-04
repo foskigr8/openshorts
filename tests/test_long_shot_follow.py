@@ -64,3 +64,58 @@ def test_the_follow_eventually_arrives():
         c.get_crop_box()
     x1, _, x2, _ = c.get_crop_box()
     assert x1 <= 1800 <= x2, "the follow must end with the subject framed"
+
+
+def test_a_long_held_shot_stays_pixel_locked_while_the_subject_is_inside():
+    """Owner spec, 4-aug-2026 (§2h(2a)): a held shot is visually still. The
+    follow may only correct when the subject approaches the crop edge — a
+    subject who is merely off-centre but comfortably inside the crop must not
+    pull the camera at all (the old continuous correction after 3s is the
+    drift the review called 'robotic')."""
+    c = cam()
+    for _ in range(c.long_shot_follow_frames + 5):   # hold the shot
+        c.get_crop_box()
+    start = c.current_center_x
+    # Box centre 250px right of the crop centre (drifted past the 25% safe
+    # zone) but still well inside the 810px-wide crop with margin: crop is
+    # [595, 1405] at centre 1000, edge margin is 81px, so a centre at 1250
+    # is neither near the edge nor outside it.
+    feed(c, [start - 100 + 250, 400, 200, 200])
+    c.get_crop_box()
+    assert c.current_center_x == start, \
+        "an off-centre-but-visible subject must NOT pull a long-held shot"
+
+
+def test_a_long_held_shot_follows_when_the_subject_reaches_the_edge():
+    """The flip side of the edge gate: once the subject actually approaches
+    the crop edge, the long-held shot eases them back inside instead of
+    snapping."""
+    c = cam()
+    for _ in range(c.long_shot_follow_frames + 5):
+        c.get_crop_box()
+    start = c.current_center_x
+    # Near the crop edge (crop is [595, 1405] at centre 1000; centre 1390 is
+    # within the 81px edge margin).
+    feed(c, [start - 100 + 390, 400, 200, 200])
+    c.get_crop_box()
+    moved = abs(c.current_center_x - start)
+    assert moved > 0, "an edge-approaching subject must be followed"
+    assert moved < abs(c.target_center_x - start), "it must EASE, not teleport"
+
+
+def test_y_head_anchor_does_not_re_frame_a_full_height_crop():
+    """Regression, 4-aug-2026 (§2h(2a)): at zoom 1.0 the crop is full-height
+    and y is clamped to the middle, so the head-anchor y-offset (~350px above
+    the clamped centre) is permanent and uncorrectable. Counting it made
+    `drifted` true on EVERY frame, which re-snapped every fresh shot on the
+    first small target change — the mid-shot jolts measured on Pop The
+    Balloon. y must not count as drift when it cannot move the crop."""
+    c = cam()
+    start = c.current_center_x
+    # A target move beyond the x dead zone but INSIDE the x safe zone must
+    # not re-frame a fresh shot: the subject is still fully framed.
+    c.force_next_update = True
+    c.update_target([1000, 100, 200, 200])  # centre 1100, head anchor y=132
+    c.get_crop_box()
+    assert c.current_center_x == start, \
+        "a full-height crop must not re-frame on the uncorrectable y offset"

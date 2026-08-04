@@ -150,6 +150,17 @@ FATIGUE_CUT_SECONDS = float(
 JCUT_ENABLED = os.environ.get("JCUT_PREROLL", "1").strip() not in ("0", "false", "no")
 REACTION_ENABLED = os.environ.get("REACTION_CUTS", "0").strip() not in ("0", "false", "no")
 FATIGUE_ENABLED = os.environ.get("FATIGUE_CUTS", "0").strip() not in ("0", "false", "no")
+# SEMANTIC reactions (owner spec, 4-aug-2026, §2h(3)): a cutaway to someone
+# the DIALOGUE deliberately draws attention to — the speaker names them,
+# comments on how they acted, points at them, or a scene-context directive
+# says they are referenced / causing a reaction. This is a TRANSCRIPT trigger
+# (via gemini_worker's referenced/causing_reaction directives), NOT the
+# mouth-motion heuristic — the mouth gate stays OFF (REACTION_CUTS=0) and is
+# deliberately never consulted here. ON by default; with no referenced
+# evidence it never fires, so a clip without scene context degrades to
+# current behaviour (fail open).
+SEMANTIC_REACTION_ENABLED = os.environ.get(
+    "SEMANTIC_REACTION_CUTS", "1").strip() not in ("0", "false", "no")
 
 # Box overlap at which two detections are considered THE SAME PERSON,
 # regardless of what id they carry.
@@ -178,6 +189,13 @@ SAME_SUBJECT_CX_FRAC = float(os.environ.get("SAME_SUBJECT_CX_FRAC", "0.05"))
 # per detection sample. 1.0 reproduces the old snap-to-detection behaviour.
 BOX_BLEND = float(os.environ.get("POLICY_BOX_BLEND", "0.35"))
 
+# How close a candidate's centre must be to the opening speaker's learned
+# anchor position (fraction of source width) for the position fallback to
+# accept it as the opening subject. Only used when the anchor's tracker id is
+# absent from the very first detection frame — ids churn, positions do not.
+OPENING_ANCHOR_TOLERANCE = float(
+    os.environ.get("OPENING_ANCHOR_TOLERANCE", "0.10"))
+
 
 def iou(a, b):
     """Intersection-over-union of two (x, y, w, h) boxes."""
@@ -198,7 +216,8 @@ def _contains_centre(outer, inner):
     return ox <= cx <= ox + ow and oy <= cy <= oy + oh
 
 
-def stabilize_box(new_box, prev_box, blend=None):
+def stabilize_box(new_box, prev_box, blend=None, new_kind=None,
+                  prev_kind=None):
     """Ease a subject's framing box toward a new detection instead of
     snapping to it.
 
@@ -210,12 +229,29 @@ def stabilize_box(new_box, prev_box, blend=None):
     the crop centre and changes the zoom on every alternation, which reads
     as jitter even though nothing was mis-framed.
 
+    When the alternation is face<->body (``new_kind``/``prev_kind`` given as
+    "face"/"body"), the AIM is the FACE box — measured on Pop The Balloon
+    (4-aug-2026, §2h): blending the whole box dragged the aim between the
+    face centre and the body's lower centre on every alternation, so the
+    crop wandered inside a held shot. Only the SIZE (w/h) is eased in that
+    case, so a zoom change still lands smoothly while the aim stays put.
+    Face->face, body->body and unknown-kind pairs keep the full-box blend.
+
     Applies only while the subject is unchanged; a real cut passes
     prev_box=None and lands exactly on the new detection.
     """
     if prev_box is None:
         return tuple(new_box)
     k = BOX_BLEND if blend is None else blend
+    if (new_kind in ("face", "body") and prev_kind in ("face", "body")
+            and new_kind != prev_kind):
+        if new_kind == "face":
+            aim_x, aim_y = new_box[0], new_box[1]
+        else:
+            aim_x, aim_y = prev_box[0], prev_box[1]
+        w = prev_box[2] + (new_box[2] - prev_box[2]) * k
+        h = prev_box[3] + (new_box[3] - prev_box[3]) * k
+        return (aim_x, aim_y, w, h)
     return tuple(p + (n - p) * k for p, n in zip(prev_box, new_box))
 
 
@@ -247,11 +283,12 @@ class Evidence:
     """
 
     __slots__ = ("asd_id", "diarized_id", "directive_id", "directive_reason",
-                 "mouth_id", "scene_changed", "jcut_id", "in_hook")
+                 "mouth_id", "scene_changed", "jcut_id", "in_hook",
+                 "referenced_id")
 
     def __init__(self, asd_id=None, diarized_id=None, directive_id=None,
                  directive_reason=None, mouth_id=None, scene_changed=False,
-                 jcut_id=None, in_hook=False):
+                 jcut_id=None, in_hook=False, referenced_id=None):
         self.asd_id = asd_id
         self.diarized_id = diarized_id
         self.directive_id = directive_id
@@ -259,6 +296,10 @@ class Evidence:
         self.mouth_id = mouth_id
         self.scene_changed = scene_changed
         self.jcut_id = jcut_id
+        # A candidate the DIALOGUE deliberately draws attention to (a
+        # referenced/causing_reaction scene-context directive) — the
+        # semantic reaction trigger. None when nothing is being referenced.
+        self.referenced_id = referenced_id
         # True during the clip's opening hook. A j-cut pre-roll must never
         # fire here (owner spec, 4-aug-2026: "j-cuts should not be applied in
         # the starting convos"). The hook is the one moment where the viewer
@@ -306,28 +347,24 @@ class Evidence:
         if (JCUT_ENABLED and self.jcut_id is not None
                 and not self.in_hook and self.asd_id is None):
             return self.jcut_id, TIER_JCUT
-        # THE TRANSCRIPT OUTRANKS LIP-SYNC (measured 4-aug-2026 — this is a
-        # REVERSAL of the original tier order, which was reasoned rather than
-        # measured).
+        # LIP-SYNC OUTRANKS THE DIARIZED BINDING (MEASURED 4-aug-2026 —
+        # restored after the full-render verification of the reversal).
         #
-        # The reasoning was: LR-ASD names a face ON SCREEN, while diarization
-        # only names an audio label that still has to be bound to one. True,
-        # but it assumed ASD is right about WHICH face. Traced on the Pop The
-        # Balloon opening: ASD named x~490 (a silent listener) for four
-        # straight seconds while diarization pointed at x~1000-1026, and the
-        # camera sat on the wrong person the whole time. ASD was not jumping
-        # around — it was steadily, confidently wrong, which is exactly what
-        # the turn-continuity gate cannot catch.
-        #
-        # Diarization is deterministic; LR-ASD is a guess. When both name a
-        # visible candidate, the transcript wins. ASD still leads whenever
-        # diarization has no binding this frame (its real strength: locating
-        # a speaker among faces when the label chain fails), which on this
-        # source is most frames.
-        if self.diarized_id is not None:
-            return self.diarized_id, TIER_DIARIZED
+        # The reversal (d234098) made the transcript outrank lip-sync,
+        # reasoning that diarization is deterministic while LR-ASD is a
+        # guess. It was verified ONLY on the opening. The full Pop The
+        # Balloon render (this session) disproved it: the diarized label has
+        # to be BOUND to a face, and that binding (the anchor chain) is the
+        # actual weak link — on this clip it collapsed BOTH speakers onto
+        # the host's candidate, so the transcript-led build stared at the
+        # host for ~20s of Solomon's answer. LR-ASD names a face on screen
+        # directly (its real strength), and the turn-continuity gate holds
+        # one face per transcript turn. The transcript still leads whenever
+        # ASD has no binding this frame.
         if self.asd_id is not None:
             return self.asd_id, TIER_ASD
+        if self.diarized_id is not None:
+            return self.diarized_id, TIER_DIARIZED
         if self.directive_id is not None:
             return self.directive_id, TIER_DIRECTIVE
         if self.mouth_id is not None:
@@ -373,7 +410,9 @@ class SubjectPolicy:
     def __init__(self, fps, min_shot_hold_seconds=None,
                  mouth_confirm=None, size_confirm=None,
                  absolute_min_shot_seconds=None,
-                 reaction_enabled=None, fatigue_enabled=None):
+                 reaction_enabled=None, fatigue_enabled=None,
+                 opening_target_id=None, opening_target_cx=None,
+                 semantic_reaction_enabled=None):
         self.fps = float(fps) or 25.0
         hold = (MIN_SHOT_HOLD_SECONDS if min_shot_hold_seconds is None
                 else min_shot_hold_seconds)
@@ -394,8 +433,23 @@ class SubjectPolicy:
         self.fatigue_frames = max(1, int(FATIGUE_CUT_SECONDS * self.fps))
         self.reaction_enabled = (REACTION_ENABLED if reaction_enabled is None
                                  else reaction_enabled)
+        self.semantic_reaction_enabled = (
+            SEMANTIC_REACTION_ENABLED if semantic_reaction_enabled is None
+            else semantic_reaction_enabled)
         self.fatigue_enabled = (FATIGUE_ENABLED if fatigue_enabled is None
                                 else fatigue_enabled)
+        # The opening shot's subject, resolved in advance from the FIRST
+        # TURN's aggregate evidence (see reframe_v2._resolve_opening_target):
+        # the transcript picks the first turn long enough to anchor the open,
+        # and the scene anchor is the candidate the calm camera held across
+        # that speaker's samples. Frame 0 commits to this instead of the
+        # instantaneous evidence, which was measured wrong on Pop The Balloon
+        # (both lip-sync and the diarized binding landed on a silent listener
+        # at t=0, and the 1.5s absolute floor then protected the mistake).
+        # None when there is no transcript/anchor -> per-frame evidence leads
+        # exactly as before (fail open).
+        self.opening_target_id = opening_target_id
+        self.opening_target_cx = opening_target_cx
         self.target_id = None
         self.target_tier = None
         # Where the framed subject was last seen. Identity of a SUBJECT is
@@ -590,15 +644,22 @@ class SubjectPolicy:
         """The "show the shocked face" edit. Returns (cand, tier) when the
         camera should cut to a reactor this frame, else (None, None).
 
-        Trigger (measured, not assumed): the framed person is quiet (mouth
-        below REACTION_SPEAKER_QUIET — a beat after a line) while another
-        face spikes at or above REACTION_MOUTH_ACTIVITY. The reactor gets a
-        bounded shot (REACTION_MIN..MAX_HOLD), then the normal evidence flow
-        reclaims — a strong speaker proposal switches back immediately.
+        Two independent triggers, both bounded by the same
+        REACTION_MIN/MAX_HOLD + COOLDOWN guard rails:
 
-        Disabled unless explicitly enabled — see REACTION_ENABLED.
+          1. SEMANTIC (owner spec, 4-aug-2026, §2h(3)): the dialogue
+             deliberately draws attention to someone — a scene-context
+             directive says they are referenced / causing a reaction (which
+             gemini_worker derives FROM the transcript). This is a transcript
+             trigger; mouth data is never consulted. Cut to the referenced
+             person for a bounded beat, then the speaker reclaims. ON by
+             default (SEMANTIC_REACTION_CUTS); no referenced evidence ->
+             nothing fires.
+          2. MOUTH (measured, 4-aug-2026): the framed person is quiet while
+             another face's mouth spikes. OFF by default (REACTION_CUTS=0) —
+             it was the wrong gate and is never re-enabled as the trigger.
         """
-        if not self.reaction_enabled:
+        if not self.reaction_enabled and not self.semantic_reaction_enabled:
             return None, None
         if not candidates:
             return None, None
@@ -627,6 +688,36 @@ class SubjectPolicy:
                 self._refresh(held, TIER_REACTION)
                 return held, TIER_REACTION
             self._reaction_cooldown_until = frame_number + self.reaction_cooldown_frames
+            return None, None
+
+        # SEMANTIC TRIGGER — the transcript/semantic path. The speaker is
+        # deliberately drawing attention to someone else (naming them,
+        # commenting on how they acted, pointing at them — gemini_worker's
+        # referenced/causing_reaction directives). Cut to that person now,
+        # even mid-line: the owner's rule is that the referenced face must
+        # show while the line lands ("he popped the balloon" -> show the
+        # balloon-popper). The bounded beat is held below; the strong speaker
+        # evidence reclaims when it ends.
+        if (self.semantic_reaction_enabled and evidence is not None
+                and evidence.referenced_id is not None):
+            ref = _by_id(candidates, evidence.referenced_id)
+            if ref is not None and not self._same_subject(ref):
+                if frame_number - self.shot_started < self.reaction_min_frames:
+                    return None, None  # shot too fresh to interrupt
+                if frame_number < self._reaction_cooldown_until:
+                    return None, None  # just had a reaction — no chaining
+                self._reaction_during_speech = True  # the speaker may keep
+                # talking while the referenced face shows — the beat is held
+                # for its full bounded window, then the speaker reclaims.
+                self._reaction_start = frame_number
+                self._commit(ref, TIER_REACTION, frame_number)
+                return ref, TIER_REACTION
+
+        # The mouth-motion heuristic stays OFF unless REACTION_CUTS is
+        # explicitly enabled — the semantic path above must not act as a
+        # backdoor that re-enables it (owner spec, 4-aug-2026: the mouth
+        # gate is wrong and is not the trigger).
+        if not self.reaction_enabled:
             return None, None
 
         # Track the speaker's quiet beat. "Speaker" = the evidence-named
@@ -689,6 +780,36 @@ class SubjectPolicy:
         """
         if not candidates:
             return None, None, None
+
+        # THE OPENING SHOT (owner spec, 4-aug-2026): the clip must open on
+        # whoever is speaking. The old code committed frame 0's instantaneous
+        # evidence, which was unanimously wrong on Pop The Balloon, and the
+        # 1.5s absolute-min floor then protected that mistake for the whole
+        # open. The opening target below IS the aggregate — the transcript's
+        # first real turn, bound through the anchor chain that itself averages
+        # that speaker's samples. Committing it at frame 0 starts the shot
+        # clock at the clip start, so ABSOLUTE_MIN_SHOT_SECONDS is untouched:
+        # the floor still protects a correct choice instead of a wrong one.
+        if (frame_number == 0 and self.target_id is None
+                and (self.opening_target_id is not None
+                     or self.opening_target_cx is not None)):
+            opener = (_by_id(candidates, self.opening_target_id)
+                      if self.opening_target_id is not None else None)
+            if (opener is None and self.opening_target_cx is not None
+                    and frame_width):
+                opener = min(
+                    candidates,
+                    key=lambda c: abs(c["box"][0] + c["box"][2] / 2.0
+                                      - self.opening_target_cx))
+                if (abs(opener["box"][0] + opener["box"][2] / 2.0
+                        - self.opening_target_cx)
+                        > OPENING_ANCHOR_TOLERANCE * frame_width):
+                    opener = None
+            if opener is not None:
+                self._commit(opener, TIER_DIARIZED, frame_number)
+                self.tier_counts[TIER_DIARIZED] = (
+                    self.tier_counts.get(TIER_DIARIZED, 0) + 1)
+                return opener["box"], opener.get("id"), TIER_DIARIZED
 
         # A source cut is the director's own decision to change subject.
         # Re-deciding here is free: there is no shot to protect.

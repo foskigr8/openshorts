@@ -161,6 +161,15 @@ COMPOSE_EDGE_MARGIN = float(os.environ.get("COMPOSE_EDGE_MARGIN", "0.14"))
 LONG_FOLLOW_RATE = float(os.environ.get("LONG_FOLLOW_RATE", "0.04"))
 LONG_FOLLOW_MAX_STEP = float(os.environ.get("LONG_FOLLOW_MAX_STEP", "3.0"))
 LONG_FOLLOW_ACCEL = float(os.environ.get("LONG_FOLLOW_ACCEL", "0.35"))
+# How close to the crop edge (fraction of crop width/height) a subject must
+# be before a long-held shot is allowed to follow them. A subject who is
+# merely off-centre but comfortably inside the crop stays PIXEL-LOCKED —
+# measured on Pop The Balloon (4-aug-2026): the old follow engaged at 25%
+# off-centre and then eased continuously after 3s, which the harsh-editor
+# review read as "drifting... feels robotic" at 0:11-0:25. The follow's job
+# is to stop a subject leaving the frame, not to re-centre every shot.
+LONG_FOLLOW_EDGE_MARGIN = float(
+    os.environ.get("LONG_FOLLOW_EDGE_MARGIN", "0.10"))
 
 # Where the crop's vertical centre sits inside the detection box, as a
 # fraction DOWN the box (0.5 = box centre). Detection hands back either a
@@ -451,6 +460,28 @@ class SmoothedCameraman:
             return 1.0 - COMPOSE_THIRD    # right of frame -> right third
         return 0.5
 
+    def _subject_at_crop_edge(self):
+        """Is the target subject near (or beyond) an edge of the CURRENT crop?
+
+        The long-shot follow is gated on this (owner spec, 4-aug-2026):
+        a held shot stays visually still while the subject is comfortably
+        inside the crop, and only starts tracking once the subject actually
+        approaches the edge — otherwise the camera's continuous correction is
+        itself the jitter ("drifting... feels robotic", harsh-editor review of
+        the 0:11-0:25 long shot on Pop The Balloon).
+        """
+        eff_w = self.crop_width * self.current_zoom
+        eff_h = self.crop_height * self.current_zoom
+        x1 = self.current_center_x - eff_w / 2.0
+        x2 = self.current_center_x + eff_w / 2.0
+        y1 = self.current_center_y - eff_h / 2.0
+        y2 = self.current_center_y + eff_h / 2.0
+        mx = self.crop_width * LONG_FOLLOW_EDGE_MARGIN
+        my = self.crop_height * LONG_FOLLOW_EDGE_MARGIN
+        tx, ty = self.target_center_x, self.target_center_y
+        return (tx <= x1 + mx or tx >= x2 - mx
+                or ty <= y1 + my or ty >= y2 - my)
+
     def get_crop_box(self, force_snap=False):
         """
         Returns the (x1, y1, x2, y2) of the current crop window.
@@ -473,31 +504,60 @@ class SmoothedCameraman:
             # to frame and literally cannot stutter. When the subject has
             # genuinely left the safe zone we re-frame instantly rather than
             # travelling, because travelling is the artefact.
+            # Y-drift only counts when a y correction is geometrically
+            # possible — the crop is PUSHED IN (smaller than the source
+            # height). At zoom 1.0 the crop is full-height and y is clamped
+            # to the middle, so the head-anchor offset (target_center_y sits
+            # ~35% up the frame by design) is a permanent ~350px "drift"
+            # that can never be corrected. Counting it made `drifted` true on
+            # EVERY frame, which re-snapped every fresh shot on the first
+            # small target change and ran the long-shot follow continuously
+            # — the mid-shot jolts and robotic drift measured on Pop The
+            # Balloon, 4-aug-2026 (§2h(2a)).
+            eff_h = self.crop_height * self.current_zoom
+            y_drifted = (eff_h < self.video_height - 1
+                         and abs(self.target_center_y - self.current_center_y)
+                         > eff_h * 0.25)
             drifted = (abs(self.target_center_x - self.current_center_x) > self.safe_zone_radius
-                       or abs(self.target_center_y - self.current_center_y) > self.crop_height * 0.25)
+                       or y_drifted)
             if drifted and self._static_frames >= self.long_shot_follow_frames:
-                # LONG-SHOT FOLLOW (owner spec, 4-aug-2026: "instead of
-                # constant jittering that distracts the eyes, we can use
-                # tracking if the camera doesn't change for long").
-                #
-                # A held shot normally moves NOTHING — that is what makes it
-                # impossible to stutter, and the reference edits in this genre
-                # are 100% hard cuts. But when a shot runs long and the subject
-                # walks out of the safe zone, the old behaviour TELEPORTED the
-                # crop mid-shot, which reads as a jolt with no cut to justify
-                # it. Once a shot has held this long, follow the subject
-                # gently instead: slow enough to be invisible, and it only
-                # ever engages on shots that have already earned it.
-                self.current_center_x, self._vx = self._eased_step(
-                    self.current_center_x, self.target_center_x,
-                    LONG_FOLLOW_RATE, LONG_FOLLOW_MAX_STEP, LONG_FOLLOW_ACCEL,
-                    self._vx, EASE_SNAP_EPSILON, min_step=0.0)
-                self.current_center_y, self._vy = self._eased_step(
-                    self.current_center_y, self.target_center_y,
-                    LONG_FOLLOW_RATE, LONG_FOLLOW_MAX_STEP, LONG_FOLLOW_ACCEL,
-                    self._vy, EASE_SNAP_EPSILON, min_step=0.0)
-                self.current_zoom = self.target_zoom
-                self._vz = 0.0
+                if not self._subject_at_crop_edge():
+                    # The subject has drifted off-centre but is comfortably
+                    # inside the crop — stay PIXEL-LOCKED. Correcting here is
+                    # the drift the review called robotic, and a snap is a
+                    # jolt with no cut to justify it. The follow exists to
+                    # stop a subject leaving the frame, not to re-centre.
+                    self._static_frames += 1
+                    self._vx = self._vy = self._vz = 0.0
+                    self.current_zoom = self.target_zoom
+                else:
+                    # LONG-SHOT FOLLOW (owner spec, 4-aug-2026: "instead of
+                    # constant jittering that distracts the eyes, we can use
+                    # tracking if the camera doesn't change for long").
+                    #
+                    # A held shot normally moves NOTHING — that is what makes
+                    # it impossible to stutter, and the reference edits in
+                    # this genre are 100% hard cuts. But when a shot runs long
+                    # and the subject walks OUT of the frame, the old
+                    # behaviour either TELEPORTED the crop mid-shot or eased
+                    # continuously toward a subject who was still perfectly
+                    # visible — the first reads as a jolt, the second as
+                    # robotic drift. Once a shot has held this long AND the
+                    # subject approaches the crop edge, follow gently: slow
+                    # enough to be invisible, and it stops as soon as the
+                    # subject is back inside the frame with margin.
+                    self.current_center_x, self._vx = self._eased_step(
+                        self.current_center_x, self.target_center_x,
+                        LONG_FOLLOW_RATE, LONG_FOLLOW_MAX_STEP,
+                        LONG_FOLLOW_ACCEL, self._vx, EASE_SNAP_EPSILON,
+                        min_step=0.0)
+                    self.current_center_y, self._vy = self._eased_step(
+                        self.current_center_y, self.target_center_y,
+                        LONG_FOLLOW_RATE, LONG_FOLLOW_MAX_STEP,
+                        LONG_FOLLOW_ACCEL, self._vy, EASE_SNAP_EPSILON,
+                        min_step=0.0)
+                    self.current_zoom = self.target_zoom
+                    self._vz = 0.0
             elif drifted:
                 self.current_center_x = self.target_center_x
                 self.current_center_y = self.target_center_y
@@ -1029,6 +1089,10 @@ def detect_face_candidates(frame):
             'box': [x, y, w, h],
             'score': w * h, # Area as score
             'mouth_frac': mouth_frac,
+            # MediaPipe face box — the subject's actual head. Downstream
+            # framing (subject_policy.stabilize_box) aims at this box and
+            # never lets a body box drag the aim away from it.
+            'kind': 'face',
         })
             
     return candidates
@@ -1111,6 +1175,10 @@ def detect_person_candidates_yolo(frame):
                 'box': [x1, y1, w, face_h],
                 'score': w * face_h,
                 'mouth_frac': 0.5,  # no mouth keypoint from a body box
+                # YOLO head-and-chest approximation. Used only when MediaPipe
+                # misses the face (masked/turned away); the aim must stay on
+                # the last known FACE position, never the chest centre.
+                'kind': 'body',
             })
     return candidates
 

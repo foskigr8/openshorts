@@ -65,15 +65,27 @@ def test_diarization_is_used_when_lip_sync_is_absent():
     assert (cid, tier) == (2, TIER_DIARIZED)
 
 
-def test_the_transcript_outranks_lip_sync_when_they_disagree():
-    """REVERSED 4-aug-2026 on measurement. LR-ASD named a silent listener for
-    four straight seconds on the Pop The Balloon opening while diarization
-    pointed at the real speaker. ASD was not flickering — it was steadily
-    wrong, which no continuity gate can catch. Diarization is deterministic;
-    lip-sync is a guess."""
+def test_lip_sync_outranks_the_diarized_binding_when_they_disagree():
+    """MEASURED on the full Pop The Balloon render, 4-aug-2026: the tier
+    reversal that made the transcript outrank lip-sync was verified only on
+    the opening, and the full render disproved it — the diarized LABEL is
+    deterministic, but its BINDING to a face (the anchor chain) is not, and
+    on this clip it collapsed both speakers onto the host's face, so the
+    transcript-led build stared at the host for ~20s of the guest's answer.
+    LR-ASD names a face on screen directly and the turn-continuity gate
+    holds one face per transcript turn; it leads. The transcript still wins
+    whenever lip-sync has no binding this frame."""
     p = SubjectPolicy(FPS)
     _, cid, tier = p.decide(cands(HOST, GUEST),
                             Evidence(asd_id=1, diarized_id=2), 0)
+    assert (cid, tier) == (1, TIER_ASD)
+
+
+def test_the_transcript_leads_when_lip_sync_has_no_binding():
+    """ASD's genuine gap: when it names no face, the diarized binding — the
+    transcript — decides."""
+    p = SubjectPolicy(FPS)
+    _, cid, tier = p.decide(cands(HOST, GUEST), Evidence(diarized_id=2), 0)
     assert (cid, tier) == (2, TIER_DIARIZED)
 
 
@@ -648,3 +660,186 @@ def test_jcut_outranks_a_stale_diarized_label_in_the_gap():
     _, cid, tier = p.decide(cands(HOST, GUEST),
                             Evidence(diarized_id=1, jcut_id=2), 0)
     assert (cid, tier) == (2, TIER_JCUT)
+
+
+# --- the opening shot resolves from the first turn's AGGREGATE evidence ----
+#
+# Owner spec, 4-aug-2026 (§2h(1)): the clip must open on whoever is speaking.
+# The old open committed frame 0's instantaneous evidence, which on Pop The
+# Balloon was unanimously wrong (lip-sync AND the diarized binding both named
+# a silent listener), and the 1.5s absolute-min floor then protected the
+# mistake for the whole open. The opening target is resolved in advance from
+# the transcript's first real turn through its learned anchor (itself an
+# aggregate of that speaker's samples) — frame 0 commits to it, shot clock
+# still starts at 0, and the floor is untouched.
+
+
+def test_the_opening_shot_resolves_from_the_first_turns_aggregate():
+    p = SubjectPolicy(FPS, opening_target_id=2)
+    # Frame 0's instantaneous evidence is unanimously WRONG (names HOST).
+    _, cid, tier = p.decide(cands(HOST, GUEST),
+                            Evidence(diarized_id=1, asd_id=1), 0)
+    assert (cid, tier) == (2, TIER_DIARIZED), \
+        "the open must commit to the aggregate target, not frame 0's signals"
+    # The transcript then confirms the same person: a refresh, not a cut.
+    _, cid, tier = p.decide(cands(HOST, GUEST),
+                            Evidence(diarized_id=2), 10)
+    assert (cid, tier) == (2, TIER_DIARIZED)
+
+
+def test_the_opening_shot_floor_still_protects_the_aggregate_choice():
+    """The 1.5s absolute floor is NOT weakened: a strong switch inside it
+    must wait, exactly as it would for any other opening commit."""
+    p = SubjectPolicy(FPS, opening_target_id=2)
+    _, cid, _ = p.decide(cands(HOST, GUEST),
+                         Evidence(diarized_id=1, asd_id=1), 0)
+    assert cid == 2
+    # 0.5s later the instantaneous evidence is right for once — but the
+    # floor protects the opening shot until ABSOLUTE_MIN_SHOT_SECONDS.
+    _, cid, _ = p.decide(cands(HOST, GUEST), Evidence(diarized_id=1), 12)
+    assert cid == 2, "the 1.5s floor must still hold the opening shot"
+
+
+def test_opening_aggregate_falls_back_when_the_target_is_not_visible():
+    p = SubjectPolicy(FPS, opening_target_id=99)
+    _, cid, tier = p.decide(cands(HOST, GUEST), Evidence(asd_id=2), 0)
+    assert (cid, tier) == (2, TIER_ASD), \
+        "no visible aggregate target -> per-frame evidence leads (fail open)"
+
+
+def test_opening_aggregate_uses_the_anchor_position_when_the_id_churns():
+    """Ids churn constantly on this pipeline; the anchor's mean centre is the
+    stable part. The position fallback must land on the opening speaker even
+    when their tracker id differs from the anchor's."""
+    p = SubjectPolicy(FPS, opening_target_id=99, opening_target_cx=905)
+    _, cid, tier = p.decide(cands(HOST, GUEST), Evidence(asd_id=1), 0, 1920)
+    assert (cid, tier) == (2, TIER_DIARIZED), \
+        "the anchor centre should resolve the opening speaker by position"
+
+
+# --- stabilize_box aims at the FACE box, blends only the size --------------
+#
+# Owner spec, 4-aug-2026 (§2h(2b)): the same subject alternates between a
+# MediaPipe face box and a YOLO head-and-chest box; blending the whole box
+# dragged the aim between the face centre and the body's lower centre on
+# every alternation, so the crop wandered inside a held shot.
+
+
+def test_stabilize_box_aims_at_the_face_when_the_body_box_arrives():
+    from subject_policy import stabilize_box
+    face = (855, 156, 135, 135)
+    body = (669, 99, 624, 384)
+    eased = stabilize_box(body, face, blend=0.35,
+                          new_kind="body", prev_kind="face")
+    assert (eased[0], eased[1]) == (face[0], face[1]), \
+        "a body box must not drag the aim off the face's position"
+    assert face[2] < eased[2] < body[2], "only the SIZE blends"
+    assert face[3] < eased[3] < body[3]
+
+
+def test_stabilize_box_stays_on_the_face_when_the_face_returns():
+    from subject_policy import stabilize_box
+    face = (855, 156, 135, 135)
+    body = (669, 99, 624, 384)
+    eased = stabilize_box(face, body, blend=0.35,
+                          new_kind="face", prev_kind="body")
+    assert (eased[0], eased[1]) == (face[0], face[1]), \
+        "the aim snaps back to the face box, not a blend toward the body"
+
+
+def test_stabilize_box_face_to_face_keeps_the_full_blend():
+    """Two face detections are the same signal shape — easing the whole box
+    is what damps detector noise there, and must not change."""
+    from subject_policy import stabilize_box
+    a = (800, 100, 150, 150)
+    b = (850, 110, 160, 160)
+    eased = stabilize_box(b, a, blend=0.35,
+                          new_kind="face", prev_kind="face")
+    for i in range(4):
+        assert min(a[i], b[i]) <= eased[i] <= max(a[i], b[i])
+    assert (eased[0], eased[1]) != (a[0], a[1]), "centre still eases face->face"
+
+
+# --- semantic reactions: transcript/semantic trigger, not motion -----------
+#
+# Owner spec, 4-aug-2026 (§2h(3)): reactions only when the dialogue
+# deliberately draws attention to someone — the speaker names them, comments
+# on how they acted, points at them, or a scene-context directive says they
+# are referenced / causing a reaction. This is a TRANSCRIPT trigger; the
+# mouth heuristic stays off and is never consulted. Cut for a bounded beat,
+# then return to the speaker.
+
+
+def test_semantic_reaction_cuts_to_the_referenced_person_and_returns():
+    p = SubjectPolicy(FPS)  # semantic reactions ON by default
+    c = cands(HOST, GUEST)
+    _, cid, tier = p.decide(c, Evidence(asd_id=1), 0)
+    assert (cid, tier) == (1, TIER_ASD)
+    # The speaker names the guest while still talking -> bounded cut to them.
+    _, cid, tier = p.decide(c, Evidence(asd_id=1, referenced_id=2), 15)
+    assert (cid, tier) == (2, TIER_REACTION)
+    # The beat holds (no per-frame switching).
+    _, cid, tier = p.decide(c, Evidence(asd_id=1, referenced_id=2), 30)
+    assert (cid, tier) == (2, TIER_REACTION)
+    # Bounded: after REACTION_MAX_HOLD (2.0s = 50 frames from frame 15) the
+    # strong speaker reclaims.
+    _, cid, tier = p.decide(c, Evidence(asd_id=1), 66)
+    assert (cid, tier) == (1, TIER_ASD), \
+        "the speaker must reclaim the frame after the bounded beat"
+
+
+def test_semantic_reaction_does_not_need_any_mouth_data():
+    """The gate is the transcript/reference, not mouth activity — candidates
+    carry no mouth_activity at all and the cut still fires."""
+    p = SubjectPolicy(FPS)
+    c = cands(HOST, GUEST)
+    p.decide(c, Evidence(asd_id=1), 0)
+    _, cid, tier = p.decide(c, Evidence(asd_id=1, referenced_id=2), 15)
+    assert (cid, tier) == (2, TIER_REACTION)
+
+
+def test_semantic_reaction_fires_mid_speech():
+    """'He popped the balloon' is said WHILE the speaker is talking — the
+    referenced face must show then, not after a quiet beat."""
+    p = SubjectPolicy(FPS)
+    c = cands_mouth(HOST + (0.3,), GUEST + (0.05,))
+    p.decide(c, Evidence(asd_id=1), 0)
+    _, cid, tier = p.decide(c, Evidence(asd_id=1, referenced_id=2), 15)
+    assert (cid, tier) == (2, TIER_REACTION), \
+        "a semantic reference interrupts even a live line"
+
+
+def test_semantic_reaction_ignores_a_reference_to_the_framed_subject():
+    p = SubjectPolicy(FPS)
+    c = cands(HOST, GUEST)
+    p.decide(c, Evidence(asd_id=1), 0)
+    _, cid, tier = p.decide(c, Evidence(asd_id=1, referenced_id=1), 15)
+    assert (cid, tier) == (1, TIER_ASD), \
+        "a reference to the person already framed is not a cutaway"
+
+
+def test_semantic_reaction_does_not_chain_within_the_cooldown():
+    p = SubjectPolicy(FPS)
+    c = cands(HOST, GUEST)
+    p.decide(c, Evidence(asd_id=1), 0)
+    _, cid, tier = p.decide(c, Evidence(asd_id=1, referenced_id=2), 15)
+    assert (cid, tier) == (2, TIER_REACTION)
+    # Hold to the end of the window (2.0s from frame 15 -> ends ~65), then a
+    # fresh reference inside REACTION_COOLDOWN (2.2s = 55 frames) is blocked.
+    for fn in range(30, 66, 5):
+        p.decide(c, Evidence(asd_id=1, referenced_id=2), fn)
+    # Window expired at 65 (speaker reclaimed, shot_started=65); frame 80 is
+    # past the anti-flicker floor but still inside the cooldown.
+    _, cid, tier = p.decide(c, Evidence(asd_id=1, referenced_id=2), 80)
+    assert (cid, tier) == (1, TIER_ASD), "the cooldown must block re-triggering"
+    # After the cooldown expires a fresh reference fires again.
+    _, cid, tier = p.decide(c, Evidence(asd_id=1, referenced_id=2), 126)
+    assert (cid, tier) == (2, TIER_REACTION)
+
+
+def test_semantic_reaction_stays_off_when_disabled():
+    p = SubjectPolicy(FPS, semantic_reaction_enabled=False)
+    c = cands(HOST, GUEST)
+    p.decide(c, Evidence(asd_id=1), 0)
+    _, cid, tier = p.decide(c, Evidence(asd_id=1, referenced_id=2), 15)
+    assert (cid, tier) == (1, TIER_ASD)

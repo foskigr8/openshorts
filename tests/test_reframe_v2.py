@@ -1513,3 +1513,66 @@ def test_asd_match_ignores_a_face_in_a_different_vertical_band():
     asd_box = (1500, 150, 140, 140)
     cands = [{"id": 9, "box": [1500, 900, 140, 140], "score": 1.0}]
     assert reframe_v2._apply_asd_speaker_boost(cands, asd_box, 1920) is None
+
+
+# --- the opening shot resolves from the first turn's AGGREGATE evidence ----
+#
+# Owner spec, 4-aug-2026 (§2h(1)): the open commits on the first turn's
+# evidence in aggregate before frame 0, not frame 0's instantaneous signals
+# (which were unanimously wrong on Pop The Balloon). The transcript decides
+# WHO the opening speaker is (first turn long enough to anchor the open), and
+# the learned scene anchor — the candidate the calm camera held across that
+# speaker's samples — decides WHICH face.
+
+
+def test_opening_target_is_the_first_turn_long_enough_to_anchor_the_open():
+    turns = [(0, 5, "A"), (12, 60, "B")]   # A's 0.2s tail is not the open
+    anchors = {0: {"A": {"id": 1, "cx": 500.0},
+                   "B": {"id": 7, "cx": 900.0}}}
+    cid, cx, lock_until = reframe_v2._resolve_opening_target(
+        turns, anchors, fps=25.0)
+    assert (cid, cx) == (7, 900.0), \
+        "the open must commit to the first REAL turn's speaker, not the tail"
+    assert lock_until == 60, "the opening lock covers the whole opening turn"
+
+
+def test_opening_target_none_without_anchors_or_transcript():
+    assert reframe_v2._resolve_opening_target(None, {}, 25.0) == \
+        (None, None, None)
+    assert reframe_v2._resolve_opening_target([], None, 25.0) == \
+        (None, None, None)
+
+
+def test_opening_target_none_when_every_turn_is_too_short():
+    turns = [(0, 10, "A")]  # 0.4s < OPENING_TURN_MIN_SECONDS
+    assert reframe_v2._resolve_opening_target(turns, {}, 25.0) == \
+        (None, None, None)
+
+
+def test_opening_target_uses_the_aggregate_asd_face_when_decisive():
+    """The opening speaker's FACE is resolved from the aggregate of their
+    LR-ASD positions across ALL their turns (frame 0's instantaneous ASD was
+    measured wrong on Pop The Balloon; the majority over the turns is the
+    'first turn's evidence in aggregate'). Returns a POSITION, matched at
+    frame 0 by the policy."""
+    turns = [(0, 12, "A"), (12, 100, "B"), (100, 200, "B")]
+    # Speaker B's ASD positions: mostly right (~1560), a few wrong (~490).
+    boxes = [[1560, 300, 120, 120] if sec % 3 else [490, 300, 120, 120]
+             for sec in range(10)]
+    cid, cx, lock_until = reframe_v2._resolve_opening_target(
+        turns, {}, 25.0, boxes)
+    assert cid is None, "the ASD path matches by position, not scene-local id"
+    assert cx is not None and 1500 <= cx <= 1650, \
+        "the aggregate majority must land on the speaker's face band"
+    assert lock_until == 100, "the lock covers the opening turn only"
+
+
+def test_opening_target_falls_back_to_the_anchor_when_asd_is_indecisive():
+    turns = [(0, 12, "A"), (12, 100, "B")]
+    anchors = {0: {"B": {"id": 7, "cx": 900.0}}}
+    # ASD split evenly between two faces -> ambiguous -> diarized anchor.
+    boxes = [None] * 12 + [[500, 300, 120, 120], [1500, 300, 120, 120]] * 44
+    cid, cx, lock_until = reframe_v2._resolve_opening_target(
+        turns, anchors, 25.0, boxes)
+    assert (cid, cx) == (7, 900.0)
+    assert lock_until == 100

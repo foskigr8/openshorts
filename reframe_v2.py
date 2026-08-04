@@ -1069,6 +1069,90 @@ def _primary_speaker_label(speaker_turns):
     return max(durations, key=durations.get)
 
 
+OPENING_TURN_MIN_SECONDS = float(
+    os.environ.get("OPENING_TURN_MIN_SECONDS", "1.0"))
+
+
+def _resolve_opening_target(speaker_turns, speaker_anchors, fps,
+                            asd_speaking_boxes=None):
+    """Who the OPENING shot should commit to, resolved from the FIRST TURN's
+    evidence in AGGREGATE (owner spec, 4-aug-2026 — see §2h(1)).
+
+    The old open committed frame 0's instantaneous evidence, and on Pop The
+    Balloon that was unanimously wrong (lip-sync AND the diarized binding both
+    landed on a silent listener, and the 1.5s absolute-min floor then held
+    the mistake for the whole open). The transcript is deterministic where
+    the per-second signals are not, so the open is chosen here, before any
+    frame is rendered:
+
+      * the FIRST diarized turn long enough to anchor the open decides who
+        the opening speaker is (a 0.2s host tail before the guest speaks is
+        not the open — the guest is);
+      * that label's FACE is bound from the AGGREGATE of their LR-ASD
+        speaking positions across ALL their turns (the clip's whole ASD
+        evidence, not just the first second — measured 4-aug-2026: LR-ASD
+        was steadily wrong for the first ~2s, and the diarized anchor chain
+        collapsed both speakers onto the biggest face). Majority by 50px
+        band; the diarized scene anchor is the fail-open fallback when ASD
+        is absent or the majority is not decisive.
+
+    Returns (candidate_id, centre_x, lock_until_frame) or (None, None, None)
+    when there is no transcript, no anchor, or the open cannot be resolved —
+    the policy then falls back to per-frame evidence exactly as before (fail
+    open). The candidate id is scene-local, so the ASD path returns
+    (None, centre_x, ...) and the policy matches the position at frame 0.
+    ``lock_until_frame`` is the end of the opening turn: the ASD continuity
+    gate holds the aggregate face for the whole opening turn, not just the
+    floor.
+    """
+    if not speaker_turns:
+        return None, None, None
+    min_frames = max(1, int(OPENING_TURN_MIN_SECONDS * fps))
+    opening_label = None
+    lock_until = None
+    for sf, ef, label in speaker_turns:
+        if label is None or ef - sf < min_frames:
+            continue
+        opening_label = label
+        lock_until = ef
+        break
+    if opening_label is None:
+        return None, None, None
+    # The opening speaker's face, from the aggregate of their LR-ASD
+    # positions across every one of their turns in the clip.
+    if asd_speaking_boxes:
+        positions = []
+        for sf, ef, label in speaker_turns:
+            if label != opening_label:
+                continue
+            for sec in range(int(sf / fps), int((ef - 1) / fps) + 1):
+                if 0 <= sec < len(asd_speaking_boxes):
+                    b = asd_speaking_boxes[sec]
+                    if b:
+                        positions.append(b[0] + b[2] / 2.0)
+        if positions:
+            bands = {}
+            for x in positions:
+                bands.setdefault(int(x // 50), []).append(x)
+            top = max(bands, key=lambda k: len(bands[k]))
+            n_top = len(bands[top])
+            second = max((len(v) for k, v in bands.items() if k != top),
+                         default=0)
+            # A decisive plurality: the top band holds a strict majority of
+            # the named samples, or doubles the runner-up while holding at
+            # least 40%. Anything weaker (a tie) is ambiguous — fall back to
+            # the diarized anchor.
+            if (n_top > len(positions) * 0.5
+                    or (n_top >= 2 * second
+                        and n_top >= len(positions) * 0.4)):
+                xs = bands[top]
+                return None, (sum(xs) / len(xs) if xs else None), lock_until
+    anchor = ((speaker_anchors or {}).get(0) or {}).get(opening_label)
+    if anchor is None:
+        return None, None, None
+    return anchor.get("id"), anchor.get("cx"), lock_until
+
+
 def _apply_primary_return_bias(candidates, primary_id):
     """Boost the primary subject's score so the tracker's next decision
     returns to them. No-op if the primary isn't on screen. Returns True if
@@ -1485,6 +1569,30 @@ def _apply_directive_boost(candidates, directive, orig_w):
     return best['box']
 
 
+def _directive_matched_candidate(candidates, directive, orig_w):
+    """The candidate a directive points at (by x_position), WITHOUT boosting
+    anything. Same nearest-centre match and tolerance as
+    _apply_directive_boost; returns the candidate dict or None.
+
+    Kept separate because a referenced/causing_reaction directive can be
+    demoted to split intent or dropped as an override further down while the
+    semantic reaction trigger (see referenced_id in _analyze_trajectory)
+    still needs to know WHO the dialogue pointed at."""
+    if not directive or not candidates:
+        return None
+    want_x = directive["x_position"] * orig_w
+    tol = DIRECTIVE_MATCH_TOLERANCE * orig_w
+    best, best_dist = None, None
+    for cand in candidates:
+        x, _y, w, _h = cand['box']
+        dist = abs((x + w / 2) - want_x)
+        if best_dist is None or dist < best_dist:
+            best, best_dist = cand, dist
+    if best is None or best_dist > tol:
+        return None
+    return best
+
+
 def _directive_zoom(directive):
     """Push-in level a directive asks for. Payoff beats (the cause of a
     reaction, or the person just referenced) commit harder than a plain
@@ -1754,6 +1862,14 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
     # landing on the girl because only the primary had an anchor.
     speaker_anchors, frame_detections = _learn_speaker_anchors(
         input_video, scenes_boundaries, fps, orig_w, orig_h, speaker_turns)
+    # The opening shot's subject, resolved from the first turn's aggregate
+    # evidence BEFORE the first frame commits (see _resolve_opening_target).
+    # Seeded into the policy so frame 0 lands on the actual opening speaker
+    # instead of whatever the instantaneous signals happened to say.
+    opening_target_id, opening_target_cx, opening_lock_until = \
+        _resolve_opening_target(
+            speaker_turns, speaker_anchors, fps,
+            asd_speaking_boxes=asd_speaking_boxes)
     # When the anchor pass ran (diarized speakers + learning on), its raw
     # pre-boost detection cache REPLACES this pass's own decode+detect —
     # the whole clip was already decoded and detected once at the same
@@ -1794,6 +1910,11 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
     # Eased framing box for the current subject (see subject_policy.
     # stabilize_box). Reset on every real cut so a new shot lands exactly.
     stable_box = None
+    # What detection shape (face/body) the eased box was last derived from —
+    # lets stabilize_box aim at the FACE box when a subject alternates
+    # between a MediaPipe face and a YOLO head-and-chest box (see
+    # stabilize_box / §2h(2b)).
+    last_target_kind = None
     id_seen_counts = {}
     # Whoever the camera is currently on. A change here is a hard cut.
     last_target_id = None
@@ -1804,7 +1925,9 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
     # Who is on screen is decided here, from tiered evidence, instead of by
     # an accumulating size score (see subject_policy).
     import subject_policy
-    policy = subject_policy.SubjectPolicy(fps)
+    policy = subject_policy.SubjectPolicy(
+        fps, opening_target_id=opening_target_id,
+        opening_target_cx=opening_target_cx)
     # Split-screen reaction-cam state (see SPLIT_* constants): per-frame
     # flags + the two subject cell rects, with carry-forward so a hidden or
     # undetected subject keeps their cell (never flickers out mid-beat).
@@ -1971,7 +2094,23 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
                 if active_speaker is not None:
                     if active_speaker != asd_turn_label:
                         asd_turn_label = active_speaker
-                        asd_turn_cx = None
+                        # THE OPENING TURN'S LOCK IS THE AGGREGATE (owner
+                        # spec, 4-aug-2026, §2h(1)): the first confident ASD
+                        # face of the clip's opening turn was measured wrong
+                        # (LR-ASD named a silent listener for the first ~2s),
+                        # and the frame-0 aggregate commit was then overridden
+                        # as soon as that wrong lock engaged. So during the
+                        # opening turn, the gate holds the AGGREGATE face
+                        # (resolved from the whole clip's evidence for that
+                        # speaker) instead of the first confident sample —
+                        # the same principle applied to clip start. Normal
+                        # first-confident behaviour resumes after the turn.
+                        if (opening_lock_until is not None
+                                and frame_number < opening_lock_until
+                                and opening_target_cx is not None):
+                            asd_turn_cx = opening_target_cx
+                        else:
+                            asd_turn_cx = None
                     if asd_id is not None:
                         _m = next((c for c in candidates
                                    if c.get("id") == asd_id), None)
@@ -2198,6 +2337,23 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
                     directive_target_id = next(
                         (c['id'] for c in candidates if c['box'] is directed_box),
                         None)
+                # SEMANTIC REACTION TRIGGER (owner spec, 4-aug-2026, §2h(3)):
+                # a referenced/causing_reaction directive IS the dialogue
+                # deliberately drawing attention to someone — a transcript
+                # signal, not motion. The match is computed independently of
+                # the directed_box gating above (a causing_reaction directive
+                # may be demoted to split intent or dropped as an override
+                # while the reaction beat still needs to know WHO was
+                # pointed at). The policy gives this candidate a bounded
+                # reaction shot, then the speaker reclaims. No directive ->
+                # None -> no semantic reaction (fail open).
+                referenced_id = None
+                if directive is not None and directive.get("reason") in (
+                        "referenced", "causing_reaction"):
+                    _ref_cand = _directive_matched_candidate(
+                        candidates, directive, orig_w)
+                    if _ref_cand is not None:
+                        referenced_id = _ref_cand.get("id")
                 # Mouth motion: the weakest speaker signal we have. Recovered
                 # from the speech boost's own pick so the policy can rank it
                 # explicitly instead of it arriving as an anonymous multiplier.
@@ -2222,6 +2378,7 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
                     in_hook=(frame_number < hook_jcut_frames),
                     directive_id=directive_target_id,
                     directive_reason=(directive or {}).get('reason'),
+                    referenced_id=referenced_id,
                     mouth_id=mouth_id,
                     scene_changed=scene_changed)
                 target_box, target_id, decision_tier = policy.decide(
@@ -2397,9 +2554,25 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
                     # moves the crop every detection. `target_box` itself is
                     # left untouched — the boosted set, split cells and the
                     # directive check all match on its identity.
+                    # AIM AT THE FACE BOX (owner spec, 4-aug-2026, §2h(2b)):
+                    # blending the whole box dragged the aim between the face
+                    # centre and the body's lower centre on every alternation,
+                    # so the crop wandered inside a held shot. The centre is
+                    # the face's position; only the size is eased.
+                    if hook_two_shot_active:
+                        # A union box is neither a face nor a body — do not
+                        # let a stale kind from before the two-shot pull the
+                        # aim somewhere the policy never chose.
+                        last_target_kind = None
+                    target_kind = next(
+                        (c.get("kind") for c in candidates
+                         if c["box"] is target_box), None)
                     aim_box = subject_policy.stabilize_box(
-                        target_box, None if subject_changed else stable_box)
+                        target_box, None if subject_changed else stable_box,
+                        new_kind=target_kind, prev_kind=last_target_kind)
                     stable_box = aim_box
+                    if target_kind is not None:
+                        last_target_kind = target_kind
                     # None = confirming/holding: keep the current zoom target.
                     if zoom_target is not None:
                         cameraman.update_target(aim_box,
