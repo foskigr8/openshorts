@@ -303,7 +303,31 @@ while removing its weakness (per-second instability on reactive listeners), and
 it matches the owner's long-standing instruction that the transcript is the
 basis.
 
-Verify by: tier mix (`held` should fall), then WATCH IT before publishing.
+**IMPLEMENTED AND VERIFIED (commit cf9117a).** Result on the same 32s span,
+with the success criterion stated before the render was seen:
+
+| | before gate | after gate |
+|---|---|---|
+| lip-sync | 74% | **90%** |
+| held | 24% | **9%** |
+| size | 1% | **0%** |
+| cuts | 13 | **7** |
+| vision verdict | no | **yes** |
+
+First render in the session to pass review. Published as job `ptb-v4-*`.
+
+Still imperfect, from that same review — these are the next items:
+1. **Looking room ignored in centred shots.** `_place_frac` only engages when
+   the subject is within COMPOSE_SIDE_BAND of a source edge, so a subject near
+   the middle is dead-centred even when they are clearly facing one way.
+   Consider driving placement from gaze/head-pose rather than frame position.
+2. **Headroom inconsistent** — hairline/forehead crops on tighter shots.
+   CAMERA_HEAD_ANCHOR/CAMERA_HEAD_Y need revisiting at zoom levels < 1.0.
+3. **Drifting reads as robotic** between 0:11-0:25 (the long-shot follow).
+   LONG_FOLLOW_RATE may be too high, or the follow should only correct when
+   the subject nears the crop edge rather than continuously.
+4. Four short non-speaker moments remain (0:00-0:01, 0:02.2-0:04, 0:25-0:26.5,
+   0:28.8-0:29.2) — residual LR-ASD error at turn boundaries.
 
 ## 3. Known-open problems (in priority order)
 
