@@ -368,6 +368,70 @@ Residual 8% off-centre has two causes: clamping near a source edge
 which lags the aim behind the policy's chosen target. The second is fixable
 if it ever matters — aim at the face box and use the blend only for size.
 
+## 2h. THE THREE THINGS TO FIX NEXT (owner spec, 4-aug-2026)
+
+All three causes are already isolated. Do not re-derive them; verify, fix, and
+prove with a render + `tools_centrecheck.py` + a vision review.
+
+### (1) The opening must start on whoever is SPEAKING, well centred
+
+Current behaviour: the first ~1.8s frames a silent listener. Traced decision
+by decision (`scratch_ptb/opencheck.py`):
+
+    t=0.00  diar=561  asd=561   -> both AGREE on the wrong person
+    t=0.67  diar=997  asd=517   -> diarization corrects, but...
+    t=1.67  HELD               -> ABSOLUTE_MIN_SHOT_SECONDS=1.5 holds the shot
+    t=1.84  diarized=1026      -> finally lands on the speaker
+
+Two compounding causes:
+  a. the opening shot commits on frame 0's INSTANTANEOUS evidence, which was
+     unanimous but wrong;
+  b. the 1.5s minimum-shot floor (a deliberate owner rule) then protects it.
+
+**Fix:** resolve the OPENING shot from the first turn's evidence in AGGREGATE
+(majority over the first turn / first ~1s of samples) before committing frame
+0 — the same principle as the ASD turn-continuity gate, applied to clip start.
+Do NOT weaken ABSOLUTE_MIN_SHOT_SECONDS; the floor is correct, the initial
+choice is what is wrong.
+
+Centring itself is verified good (92%, see 2g) — do not "fix" it again.
+
+### (2) No jittering WITHIN a cut
+
+Held shots must be visually still. Two known sources:
+  a. **long-shot follow** (`main.SmoothedCameraman.get_crop_box`,
+     LONG_FOLLOW_RATE/LONG_SHOT_FOLLOW_SECONDS). After 3s a held shot starts
+     easing toward the subject continuously; the vision review called it
+     "drifting... feels robotic" at 0:11.5-0:13 and 0:11-0:25. Continuous
+     correction is inherently visible. **Prefer: only correct when the subject
+     approaches the crop edge, otherwise stay pixel-locked.**
+  b. **stabilize_box** (`subject_policy.stabilize_box`, POLICY_BOX_BLEND=0.35)
+     blends a MediaPipe face box toward a YOLO body box for the same person,
+     which lags the aim and wanders. Consider aiming at the FACE box and using
+     the blend only for size.
+
+Measure with the rendered rects, not by eye: consecutive-frame crop-x deltas
+inside a single shot should be zero (or monotonic and tiny) — any oscillation
+is the bug.
+
+### (3) Reactions only on DELIBERATE attention
+
+Reaction cutaways are currently OFF (REACTION_CUTS=0) because they fired on
+mouth-motion spikes and stole the frame from the speaker. The owner does want
+them — but only when the dialogue deliberately draws attention to someone:
+
+  * a speaker says another person DID something ("he popped the balloon")
+  * a speaker comments on how someone ACTED / their behaviour
+  * a speaker POINTS AT or addresses someone directly
+  * a speaker names someone
+
+**This is a TRANSCRIPT/semantic trigger, not a motion trigger.** The existing
+mouth-activity heuristic is the wrong signal and must not be the gate. Use the
+transcript (and the scene-context directives from `gemini_worker`, which
+already emit `referenced` / `causing_reaction` reasons) to detect the moment,
+then cut to the referenced person for a bounded beat and return to the
+speaker. Keep REACTION_MAX_HOLD / COOLDOWN as the guard rails.
+
 ## 3. Known-open problems (in priority order)
 
 ### 3.1 Printed/photo faces are framed as if they were people — HIGHEST VALUE
