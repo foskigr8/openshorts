@@ -678,11 +678,28 @@ def _apply_asd_speaker_boost(candidates, asd_box, orig_w, boosted=None):
     ax, ay, aw, ah = asd_box
     acx, acy = ax + aw / 2.0, ay + ah / 2.0
     tol = ASD_MATCH_TOLERANCE * orig_w
+    # HORIZONTAL distance decides, with a vertical-overlap sanity check.
+    #
+    # Euclidean centre distance was wrong here and it was the binding bug
+    # (traced 4-aug-2026 on Pop The Balloon): LR-ASD emits a FACE box, while
+    # candidates are a mix of MediaPipe face boxes and YOLO head-and-chest
+    # boxes whose centres sit far lower. So dy dominated dx, and a
+    # vertically-closer WRONG person beat the horizontally-correct right one.
+    # Measured at second 14: ASD box at x=1572, candidates at 450 / 1197 /
+    # 1566, and the match returned 1197 — 375px away — over 1566, 6px away.
+    # That single mismatch is what put the camera on the co-host all clip.
+    #
+    # People in this format sit side by side, so x separates them cleanly and
+    # y does not. Vertical overlap is kept only as a sanity check, so a face
+    # in a picture-in-picture strip above/below cannot claim the match.
     dists = []
     for c in candidates:
         bx, by, bw, bh = c["box"]
-        dists.append((math.hypot((bx + bw / 2.0) - acx,
-                                 (by + bh / 2.0) - acy), c))
+        if by > ay + ah or by + bh < ay:
+            continue  # no vertical overlap at all — different band of frame
+        dists.append((abs((bx + bw / 2.0) - acx), c))
+    if not dists:
+        return None
     dists.sort(key=lambda t: t[0])
     best_d, best = dists[0]
     if best is None or best_d > tol:

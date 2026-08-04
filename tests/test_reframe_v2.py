@@ -1490,3 +1490,26 @@ def test_banter_two_shot_does_not_fire_when_the_switch_landed():
     # camera must not widen on it.
     assert not _banter_two_shot_eligible(TIER_HOLD, Evidence(directive_id=2), 1)
     assert not _banter_two_shot_eligible(TIER_HOLD, Evidence(asd_id=1), 1)
+
+
+def test_asd_match_is_not_fooled_by_a_vertically_closer_wrong_person():
+    """LR-ASD emits a FACE box; candidates mix face boxes with YOLO
+    head-and-chest boxes whose centres sit much lower. Euclidean centre
+    distance let dy dominate dx, so a vertically-closer WRONG person could
+    beat the horizontally-correct one."""
+    asd_box = (1500, 150, 140, 140)            # face, upper frame, right side
+    cands = [
+        # the RIGHT person: same x, but a tall body box centred far lower
+        {"id": 1, "box": [1450, 140, 240, 700], "score": 1.0},
+        # the WRONG person: far to the left, but a face box at the same height
+        {"id": 2, "box": [1100, 150, 140, 140], "score": 1.0},
+    ]
+    assert reframe_v2._apply_asd_speaker_boost(cands, asd_box, 1920) == 1
+
+
+def test_asd_match_ignores_a_face_in_a_different_vertical_band():
+    """Vertical overlap is still required, so a face in a strip above or
+    below the speaker cannot claim the match on x alone."""
+    asd_box = (1500, 150, 140, 140)
+    cands = [{"id": 9, "box": [1500, 900, 140, 140], "score": 1.0}]
+    assert reframe_v2._apply_asd_speaker_boost(cands, asd_box, 1920) is None
