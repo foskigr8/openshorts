@@ -147,7 +147,7 @@ FATIGUE_CUT_SECONDS = float(
 # they take the frame away from the person talking, which is the one thing the
 # clip exists to show. Turn them on per-deployment only after the speaker
 # framing itself is judged good.
-JCUT_ENABLED = os.environ.get("JCUT_PREROLL", "0").strip() not in ("0", "false", "no")
+JCUT_ENABLED = os.environ.get("JCUT_PREROLL", "1").strip() not in ("0", "false", "no")
 REACTION_ENABLED = os.environ.get("REACTION_CUTS", "0").strip() not in ("0", "false", "no")
 FATIGUE_ENABLED = os.environ.get("FATIGUE_CUTS", "0").strip() not in ("0", "false", "no")
 
@@ -291,8 +291,20 @@ class Evidence:
         # the outgoing speaker has actually finished; ranking it above live
         # lip-sync makes it a cutaway generator. Owner spec is unambiguous:
         # "just make sure whoever's talking gets framed."
+        # J-CUT PRE-ROLL — only when it takes nothing away.
+        #
+        # Owner spec, 4-aug-2026: "I want the j-cut only in some cases, not
+        # every time; it should focus on the main subject and only focus on
+        # other people when necessary."
+        #
+        # So the pre-roll fires ONLY in the gap between turns: when lip-sync
+        # is not currently identifying anyone on screen as speaking. If ASD
+        # says someone is talking right now, that person keeps the frame and
+        # the pre-roll is dropped — which is exactly the case that made this
+        # a cutaway generator when it ranked above lip-sync (530a427).
+        # Never during the opening hook either (see in_hook).
         if (JCUT_ENABLED and self.jcut_id is not None
-                and not self.in_hook):
+                and not self.in_hook and self.asd_id is None):
             return self.jcut_id, TIER_JCUT
         if self.asd_id is not None:
             return self.asd_id, TIER_ASD

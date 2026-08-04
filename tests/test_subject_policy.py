@@ -480,7 +480,8 @@ def test_jcut_can_be_enabled_explicitly(monkeypatch):
     import subject_policy as _sp
     monkeypatch.setattr(_sp, "JCUT_ENABLED", True)
     p = SubjectPolicy(FPS)
-    _, cid, tier = p.decide(cands(HOST, GUEST), Evidence(asd_id=1, jcut_id=2), 0)
+    # No live lip-sync: this is the inter-turn gap the pre-roll exists for.
+    _, cid, tier = p.decide(cands(HOST, GUEST), Evidence(jcut_id=2), 0)
     assert (cid, tier) == (2, TIER_JCUT)
 def test_jcut_still_waits_out_the_minimum_shot_floor():
     p = SubjectPolicy(FPS)  # default absolute floor 1.5s = 37 frames @25fps
@@ -604,5 +605,33 @@ def test_jcut_pre_roll_is_allowed_after_the_hook(monkeypatch):
     monkeypatch.setattr(_sp, "JCUT_ENABLED", True)
     p = SubjectPolicy(FPS)
     _, cid, tier = p.decide(cands(HOST, GUEST),
-                            Evidence(asd_id=1, jcut_id=2, in_hook=False), 0)
+                            Evidence(jcut_id=2, in_hook=False), 0)
+    assert (cid, tier) == (2, TIER_JCUT)
+
+
+# --- the j-cut pre-roll fires only in the gap between turns ----------------
+
+def test_jcut_never_takes_the_frame_from_a_live_speaker():
+    """Owner spec: focus on the main subject; other people only when
+    necessary. If lip-sync says someone is talking, they keep the frame."""
+    p = SubjectPolicy(FPS)
+    _, cid, tier = p.decide(cands(HOST, GUEST),
+                            Evidence(asd_id=1, jcut_id=2), 0)
+    assert (cid, tier) == (1, TIER_ASD)
+
+
+def test_jcut_fires_in_the_gap_between_turns():
+    """Nobody is identified as speaking right now, and someone is about to —
+    that is the one case a pre-roll earns its cut."""
+    p = SubjectPolicy(FPS)
+    _, cid, tier = p.decide(cands(HOST, GUEST), Evidence(jcut_id=2), 0)
+    assert (cid, tier) == (2, TIER_JCUT)
+
+
+def test_jcut_outranks_a_stale_diarized_label_in_the_gap():
+    """Diarization is turn-level and lags at a boundary; the pre-roll is
+    specifically for that moment."""
+    p = SubjectPolicy(FPS)
+    _, cid, tier = p.decide(cands(HOST, GUEST),
+                            Evidence(diarized_id=1, jcut_id=2), 0)
     assert (cid, tier) == (2, TIER_JCUT)

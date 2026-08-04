@@ -12,15 +12,19 @@ new evidence.
 
 ## 0. How to run anything (get this right first)
 
-`/app` inside the container is **NOT a bind mount**. Editing a file on the host
-does nothing until you copy it in:
+**CORRECTION (4-aug-2026): `/app` IS a bind mount** — `docker-compose.yml`
+maps `.:/app`. An earlier version of this document claimed the opposite and it
+was wrong. Editing a file on the host takes effect immediately; the `docker cp`
+calls scattered through this session's history were redundant (harmless, they
+wrote through the mount to the same file).
 
 ```bash
-docker cp reframe_v2.py openshorts-backend:/app/
-docker cp subject_policy.py openshorts-backend:/app/
-docker cp tests/test_subject_policy.py openshorts-backend:/app/tests/
 docker exec openshorts-backend sh -c 'cd /app && python3 -m pytest tests/ -q'
 ```
+
+Code changes therefore survive `docker compose down/up`. What did NOT survive
+was `pytest`, which was installed ad hoc and vanished on rebuild; it is now in
+`requirements.txt`.
 
 Baseline: **650 tests pass.** Any drop is a regression you caused.
 

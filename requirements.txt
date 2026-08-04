@@ -26,3 +26,8 @@ demucs==4.1.0
 lap==0.5.13
 # MFCC features for LR-ASD active-speaker detection (asd_worker.py).
 python_speech_features==0.6
+# Test runner. In the image on purpose: the source tree is bind-mounted at
+# /app (see docker-compose.yml), so code changes survive a restart — but a
+# rebuilt container came up with no pytest, so `python3 -m pytest tests/`
+# failed and the suite silently stopped being runnable after a restart.
+pytest==8.3.4
