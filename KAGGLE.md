@@ -23,6 +23,7 @@ cloudflared tunnel exposes it.
 | secret | needed for |
 |---|---|
 | `GEMINI_API_KEY` | clip selection + scene context. Without it, no clips are chosen. |
+| `GEMINI_API_KEYS` | *optional but recommended* — extra keys, comma-separated. `gemini_pool.GeminiKeyPool` rotates to the next on 429/quota/503, which is what keeps a long job alive on free-tier keys. |
 | `ASSEMBLYAI_API_KEY` | transcription **with diarization**. Without it the pipeline falls back to faster-whisper, which has no diarization — and diarization is a framing input, so quality drops. |
 | `YOUTUBE_COOKIES` | paste the full contents of a working `cookies.txt` (Netscape format). |
 
@@ -33,7 +34,8 @@ import os, subprocess
 from kaggle_secrets import UserSecretsClient
 
 secrets = UserSecretsClient()
-for name in ("GEMINI_API_KEY", "ASSEMBLYAI_API_KEY", "YOUTUBE_COOKIES"):
+for name in ("GEMINI_API_KEY", "GEMINI_API_KEYS",
+             "ASSEMBLYAI_API_KEY", "YOUTUBE_COOKIES"):
     try:
         os.environ[name] = secrets.get_secret(name)
     except Exception:

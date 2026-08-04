@@ -72,6 +72,11 @@ fi
 # cookie jar, which yt-dlp needs as a file.
 say "Configuration"
 [ -n "${GEMINI_API_KEY:-}" ] && echo "    GEMINI_API_KEY: set" || echo "    GEMINI_API_KEY: MISSING (clip selection will fail)"
+if [ -n "${GEMINI_API_KEYS:-}" ]; then
+    echo "    GEMINI_API_KEYS: $(echo "$GEMINI_API_KEYS" | tr ',' '\n' | grep -c .) extra key(s) — pool rotates on 429/quota"
+else
+    echo "    GEMINI_API_KEYS: unset (single key; a quota hit stops the job)"
+fi
 [ -n "${ASSEMBLYAI_API_KEY:-}" ] && echo "    ASSEMBLYAI_API_KEY: set" || echo "    ASSEMBLYAI_API_KEY: unset (falls back to faster-whisper, no diarization)"
 if [ -n "${YOUTUBE_COOKIES:-}" ] && [ ! -s cookies.txt ]; then
     printf '%s' "$YOUTUBE_COOKIES" > cookies.txt
