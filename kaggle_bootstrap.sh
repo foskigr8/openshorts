@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# OpenShorts on Kaggle (or any Docker-less GPU host).
+#
+# Kaggle has no Docker, so the compose stack cannot be used. This brings up the
+# same application natively: one Python process serves BOTH the API and the
+# built dashboard (see the single-origin block at the end of app.py), and one
+# cloudflared tunnel exposes it.
+#
+#   bash kaggle_bootstrap.sh            # install, build, serve, tunnel
+#   SKIP_INSTALL=1 bash kaggle_bootstrap.sh   # re-run without reinstalling
+#
+# Expects to be run from the repo root.
+set -euo pipefail
+
+PORT="${PORT:-8000}"
+LOG_DIR="${LOG_DIR:-/tmp/openshorts-logs}"
+mkdir -p "$LOG_DIR"
+
+say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
+
+# --- 1. GPU sanity ---------------------------------------------------------
+say "GPU"
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
+    GPU_COUNT=$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l)
+else
+    echo "    no nvidia-smi — running CPU-only (much slower; LR-ASD ~2x realtime)"
+    GPU_COUNT=0
+fi
+
+# --- 2. Python deps --------------------------------------------------------
+# Kaggle's base image already carries torch/opencv/numpy built against its own
+# CUDA. Reinstalling those from requirements.txt is slow and can break CUDA, so
+# they are held back and only the packages Kaggle lacks are installed.
+if [ "${SKIP_INSTALL:-0}" != "1" ]; then
+    say "Python dependencies (2-5 min)"
+    grep -vE '^(torch|torchvision|torchaudio|opencv|numpy|scipy)([=<>~!]|$)' \
+        requirements.txt > /tmp/req-kaggle.txt || cp requirements.txt /tmp/req-kaggle.txt
+    pip install -q -r /tmp/req-kaggle.txt 2>&1 | tail -5 || {
+        echo "    pip install reported errors — continuing, but expect import failures"; }
+    python3 - <<'PY'
+import importlib
+for m in ("fastapi", "uvicorn", "yt_dlp", "mediapipe", "ultralytics", "torch"):
+    try:
+        importlib.import_module(m)
+        print(f"    ok   {m}")
+    except Exception as e:
+        print(f"    MISS {m}: {type(e).__name__}: {e}")
+PY
+fi
+
+# --- 3. Dashboard ----------------------------------------------------------
+# Built once into dashboard/dist and then served by app.py. No VITE_API_URL is
+# set on purpose: config.js falls back to a relative base, so the SPA talks to
+# whatever origin serves it — which is what makes one tunnel enough.
+if [ ! -d dashboard/dist ]; then
+    if command -v npm >/dev/null 2>&1; then
+        say "Building dashboard (2-4 min)"
+        (cd dashboard && npm ci --silent 2>/dev/null || npm install --silent) \
+            && (cd dashboard && npm run build --silent)
+    else
+        echo "    no npm — dashboard cannot be built here."
+        echo "    Commit dashboard/dist, or attach it as a Kaggle Dataset."
+    fi
+else
+    say "Dashboard already built (dashboard/dist)"
+fi
+
+# --- 4. Secrets ------------------------------------------------------------
+# On Kaggle these come from UserSecretsClient (see KAGGLE.md), exported into the
+# environment before this script runs. Nothing is written to disk except the
+# cookie jar, which yt-dlp needs as a file.
+say "Configuration"
+[ -n "${GEMINI_API_KEY:-}" ] && echo "    GEMINI_API_KEY: set" || echo "    GEMINI_API_KEY: MISSING (clip selection will fail)"
+[ -n "${ASSEMBLYAI_API_KEY:-}" ] && echo "    ASSEMBLYAI_API_KEY: set" || echo "    ASSEMBLYAI_API_KEY: unset (falls back to faster-whisper, no diarization)"
+if [ -n "${YOUTUBE_COOKIES:-}" ] && [ ! -s cookies.txt ]; then
+    printf '%s' "$YOUTUBE_COOKIES" > cookies.txt
+    echo "    cookies.txt: written from YOUTUBE_COOKIES ($(wc -c < cookies.txt) bytes)"
+elif [ -s cookies.txt ]; then
+    echo "    cookies.txt: present ($(wc -c < cookies.txt) bytes)"
+else
+    echo "    cookies.txt: MISSING — YouTube downloads will hit the bot wall"
+fi
+
+# GPU-appropriate defaults, mirroring docker-compose.gpu.yml.
+if [ "$GPU_COUNT" -gt 0 ]; then
+    export FFMPEG_ENCODER="${FFMPEG_ENCODER:-nvenc}"
+    export YOLO_DEVICE="${YOLO_DEVICE:-0}"
+    export USE_ASD="${USE_ASD:-1}"
+    echo "    encoder=nvenc  yolo_device=0  gpus=$GPU_COUNT"
+fi
+export OUTPUT_DIR="${OUTPUT_DIR:-$PWD/output}"
+mkdir -p "$OUTPUT_DIR" uploads
+
+# --- 5. API + dashboard ----------------------------------------------------
+say "Starting OpenShorts on :$PORT"
+pkill -f "uvicorn app:app" 2>/dev/null || true
+nohup python3 -m uvicorn app:app --host 0.0.0.0 --port "$PORT" \
+    > "$LOG_DIR/backend.log" 2>&1 &
+for _ in $(seq 1 60); do
+    curl -sf "http://localhost:$PORT/api/system" >/dev/null 2>&1 && break
+    sleep 2
+done
+if curl -sf "http://localhost:$PORT/api/system" >/dev/null 2>&1; then
+    echo "    backend: up"
+else
+    echo "    backend: FAILED — last log lines:"; tail -20 "$LOG_DIR/backend.log"; exit 1
+fi
+
+# --- 6. Tunnel -------------------------------------------------------------
+# Kaggle allows no inbound connections, so the UI is reached through an
+# outbound tunnel. The quick tunnel needs no account; its hostname changes
+# every session, which is the main ergonomic cost of this setup.
+say "Public URL"
+if ! command -v cloudflared >/dev/null 2>&1; then
+    curl -sL -o /tmp/cloudflared \
+        https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+    chmod +x /tmp/cloudflared
+    CF=/tmp/cloudflared
+else
+    CF=cloudflared
+fi
+pkill -f "cloudflared tunnel" 2>/dev/null || true
+nohup "$CF" tunnel --url "http://localhost:$PORT" --no-autoupdate \
+    > "$LOG_DIR/tunnel.log" 2>&1 &
+URL=""
+for _ in $(seq 1 45); do
+    URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$LOG_DIR/tunnel.log" 2>/dev/null | head -1) || true
+    [ -n "$URL" ] && break
+    sleep 2
+done
+if [ -n "$URL" ]; then
+    printf '\n    \033[1;32m%s\033[0m\n\n' "$URL"
+    echo "    Open that in a browser. Logs: $LOG_DIR/{backend,tunnel}.log"
+else
+    echo "    tunnel did not report a URL — check $LOG_DIR/tunnel.log"
+    tail -20 "$LOG_DIR/tunnel.log"
+fi

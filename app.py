@@ -4810,3 +4810,42 @@ async def saasshorts_voices(
         ],
         "source": "defaults",
     }
+
+
+# ---------------------------------------------------------------------------
+# Single-origin dashboard (Docker-less hosts: Kaggle, Colab, a bare VM)
+#
+# In the normal compose stack the dashboard is its own container (vite in dev,
+# nginx in prod) and this block does nothing. On a host with no Docker there is
+# nowhere to run that container, so the API process serves the built SPA too.
+#
+# Serving both from ONE origin is what makes the tunnel setup trivial:
+# dashboard/src/config.js falls back to a RELATIVE api base when VITE_API_URL
+# is unset, so a same-origin build needs no build-time URL and no CORS. One
+# tunnel exposes the whole app.
+#
+# Registered last on purpose: /api/*, /videos and /thumbnails are declared
+# above and therefore win the route match; only what they do not claim reaches
+# the SPA fallback.
+# ---------------------------------------------------------------------------
+_DASHBOARD_DIST = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "dashboard", "dist")
+
+if os.path.isdir(_DASHBOARD_DIST):
+    from fastapi.responses import FileResponse as _FileResponse
+
+    _SPA_INDEX = os.path.join(_DASHBOARD_DIST, "index.html")
+
+    @app.get("/{spa_path:path}", include_in_schema=False)
+    async def _serve_dashboard(spa_path: str):
+        """Static file when it exists, else index.html so client-side routing
+        works on a hard refresh."""
+        candidate = os.path.normpath(os.path.join(_DASHBOARD_DIST, spa_path))
+        # Path traversal guard: never serve outside the built bundle.
+        if candidate.startswith(_DASHBOARD_DIST) and os.path.isfile(candidate):
+            return _FileResponse(candidate)
+        if os.path.isfile(_SPA_INDEX):
+            return _FileResponse(_SPA_INDEX)
+        raise HTTPException(status_code=404, detail="dashboard not built")
+
+    print(f"🖥️  Serving dashboard from {_DASHBOARD_DIST} (single-origin mode)")
