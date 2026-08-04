@@ -585,3 +585,24 @@ def test_fatigue_never_interrupts_an_identified_speaker():
 # speaking" path is currently unverified — a test for it did not pass and was
 # removed rather than left green by weakening it. Do not enable FATIGUE_CUTS
 # in production until that path has a passing test.
+
+
+def test_no_jcut_pre_roll_during_the_opening_hook(monkeypatch):
+    """Owner spec, 4-aug-2026: "j-cuts should not be applied in the starting
+    convos (hook)." The viewer has no context yet, so cutting to whoever
+    speaks NEXT lands on a silent face."""
+    import subject_policy as _sp
+    monkeypatch.setattr(_sp, "JCUT_ENABLED", True)
+    p = SubjectPolicy(FPS)
+    c = cands(HOST, GUEST)
+    _, cid, tier = p.decide(c, Evidence(asd_id=1, jcut_id=2, in_hook=True), 0)
+    assert (cid, tier) == (1, TIER_ASD), "the hook must show who is talking"
+
+
+def test_jcut_pre_roll_is_allowed_after_the_hook(monkeypatch):
+    import subject_policy as _sp
+    monkeypatch.setattr(_sp, "JCUT_ENABLED", True)
+    p = SubjectPolicy(FPS)
+    _, cid, tier = p.decide(cands(HOST, GUEST),
+                            Evidence(asd_id=1, jcut_id=2, in_hook=False), 0)
+    assert (cid, tier) == (2, TIER_JCUT)

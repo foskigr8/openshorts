@@ -247,11 +247,11 @@ class Evidence:
     """
 
     __slots__ = ("asd_id", "diarized_id", "directive_id", "directive_reason",
-                 "mouth_id", "scene_changed", "jcut_id")
+                 "mouth_id", "scene_changed", "jcut_id", "in_hook")
 
     def __init__(self, asd_id=None, diarized_id=None, directive_id=None,
                  directive_reason=None, mouth_id=None, scene_changed=False,
-                 jcut_id=None):
+                 jcut_id=None, in_hook=False):
         self.asd_id = asd_id
         self.diarized_id = diarized_id
         self.directive_id = directive_id
@@ -259,6 +259,13 @@ class Evidence:
         self.mouth_id = mouth_id
         self.scene_changed = scene_changed
         self.jcut_id = jcut_id
+        # True during the clip's opening hook. A j-cut pre-roll must never
+        # fire here (owner spec, 4-aug-2026: "j-cuts should not be applied in
+        # the starting convos"). The hook is the one moment where the viewer
+        # has no context yet, so cutting to whoever speaks NEXT — before they
+        # have said anything — reads as landing on a random silent face. It is
+        # also what put the opening shot on a non-speaking listener.
+        self.in_hook = in_hook
 
     def proposal(self):
         """(candidate_id, tier) for the strongest evidence present, or
@@ -284,7 +291,8 @@ class Evidence:
         # the outgoing speaker has actually finished; ranking it above live
         # lip-sync makes it a cutaway generator. Owner spec is unambiguous:
         # "just make sure whoever's talking gets framed."
-        if JCUT_ENABLED and self.jcut_id is not None:
+        if (JCUT_ENABLED and self.jcut_id is not None
+                and not self.in_hook):
             return self.jcut_id, TIER_JCUT
         if self.asd_id is not None:
             return self.asd_id, TIER_ASD

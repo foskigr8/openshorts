@@ -1026,6 +1026,10 @@ SPLIT_RECT_MAX_HEIGHT_FRACTION = 0.45
 # of a split screen: both fit, and splitting the open read as carelessness
 # (user, 31-jul-2026). No zoom during the two-shot.
 HOOK_TWO_SHOT_SECONDS = float(os.environ.get("HOOK_TWO_SHOT_SECONDS", "1.8"))
+# Opening window in which a j-cut pre-roll is forbidden. The hook is the one
+# moment the viewer has no context, so cutting to whoever speaks NEXT — before
+# they have said a word — lands on a silent face and reads as a mistake.
+HOOK_NO_JCUT_SECONDS = float(os.environ.get("HOOK_NO_JCUT_SECONDS", "3.0"))
 # Horizontal tolerance (fraction of frame width) for matching the scene
 # context's key-subject position to a detected candidate.
 CONTEXT_PRIMARY_TOLERANCE = float(os.environ.get("CONTEXT_PRIMARY_TOLERANCE", "0.30"))
@@ -1832,6 +1836,7 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
     merge_split_frames = max(0, int(SPLIT_MERGE_GAP_SECONDS * fps))
     fresh_frames = max(1, int(SPLIT_FRESH_SECONDS * fps))
     two_shot_frames = max(1, int(HOOK_TWO_SHOT_SECONDS * fps))
+    hook_jcut_frames = max(1, int(HOOK_NO_JCUT_SECONDS * fps))
     try:
         while True:
             if use_detection_cache:
@@ -2212,6 +2217,9 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
                     asd_id=asd_id,
                     diarized_id=diarized_id,
                     jcut_id=jcut_id,
+                    # No j-cut pre-roll during the opening hook
+                    # (owner spec, 4-aug-2026).
+                    in_hook=(frame_number < hook_jcut_frames),
                     directive_id=directive_target_id,
                     directive_reason=(directive or {}).get('reason'),
                     mouth_id=mouth_id,
