@@ -293,7 +293,11 @@ class TestSmoothedCameramanEasing:
         crossed = False
         for _ in range(600):
             x1, _, x2, _ = cam.get_crop_box()
-            center = (x1 + x2) / 2
+            # Convergence is a property of the eased CAMERA, not of the crop
+            # window: thirds placement offsets the window from the subject on
+            # purpose, so reading the window centre would measure composition
+            # rather than easing.
+            center = cam.current_center_x
             assert center <= target + 0.6, "must never overshoot the target"
             assert center >= prev - 0.6, "must move monotonically toward target"
             prev = center
@@ -335,7 +339,13 @@ class TestSmoothedCameramanEasing:
         cam.force_next_update = True
         cam.update_target([1400, 400, 40, 40])
         x1, _, x2, _ = cam.get_crop_box(force_snap=True)
-        assert (x1 + x2) / 2 == pytest.approx(cam.target_center_x, abs=1)
+        # The crop centre is no longer the subject: an off-centre subject is
+        # placed on a third with looking room (COMPOSE_THIRDS). What must hold
+        # is that the snap put the SUBJECT where composition asks, inside the
+        # crop with margin.
+        crop_w = x2 - x1
+        pos = (cam.target_center_x - x1) / crop_w
+        assert 0.13 <= pos <= 0.87, f"subject stranded at {pos:.2f} of the crop"
 
     def test_head_anchor_keeps_body_box_heads_in_frame(self):
         """A YOLO head-and-chest box centred at 0.5 puts the head at the top

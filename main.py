@@ -134,6 +134,16 @@ RETARGET_DEAD_ZONE_FRAC = float(os.environ.get("RETARGET_DEAD_ZONE_FRAC", "0.035
 # only slowly. Deliberately gentle: panning is what caused every previous
 # stutter complaint, so this must never look like a pan.
 LONG_SHOT_FOLLOW_SECONDS = float(os.environ.get("LONG_SHOT_FOLLOW_SECONDS", "3.0"))
+
+# Composition. A subject within COMPOSE_SIDE_BAND of a source edge is placed on
+# the near third (looking room in front of them); anyone nearer the middle is
+# centred. COMPOSE_THIRD=1/3 is the classic line.
+COMPOSE_THIRDS = os.environ.get("COMPOSE_THIRDS", "1").strip() not in ("0", "false", "no")
+COMPOSE_THIRD = float(os.environ.get("COMPOSE_THIRD", "0.3333"))
+COMPOSE_SIDE_BAND = float(os.environ.get("COMPOSE_SIDE_BAND", "0.34"))
+# The subject must always sit at least this far inside the crop, whatever the
+# thirds placement asks for. Containment beats composition.
+COMPOSE_EDGE_MARGIN = float(os.environ.get("COMPOSE_EDGE_MARGIN", "0.14"))
 LONG_FOLLOW_RATE = float(os.environ.get("LONG_FOLLOW_RATE", "0.04"))
 LONG_FOLLOW_MAX_STEP = float(os.environ.get("LONG_FOLLOW_MAX_STEP", "3.0"))
 LONG_FOLLOW_ACCEL = float(os.environ.get("LONG_FOLLOW_ACCEL", "0.35"))
@@ -411,6 +421,22 @@ class SmoothedCameraman:
         if zoom_target is not None:
             self.target_zoom = min(max(float(zoom_target), self.min_zoom), 1.0)
 
+    def _place_frac(self, center_x):
+        """Where in the crop the subject should sit, 0..1 (0.5 = centred).
+
+        Returns a third-line placement only when the subject is meaningfully
+        off-centre in the SOURCE frame — that is the case where centring
+        would clamp and strand them against the crop edge anyway.
+        """
+        if not COMPOSE_THIRDS:
+            return 0.5
+        rel = center_x / max(1.0, float(self.video_width))   # 0..1 in source
+        if rel <= COMPOSE_SIDE_BAND:
+            return COMPOSE_THIRD          # left of frame -> sit on left third
+        if rel >= 1.0 - COMPOSE_SIDE_BAND:
+            return 1.0 - COMPOSE_THIRD    # right of frame -> right third
+        return 0.5
+
     def get_crop_box(self, force_snap=False):
         """
         Returns the (x1, y1, x2, y2) of the current crop window.
@@ -560,7 +586,39 @@ class SmoothedCameraman:
         self.current_center_y = min(max(self.current_center_y, min_cy), max_cy)
 
         center_x = min(max(self.current_center_x + drift_x, min_cx), max_cx)
-        x1 = max(0, min(int(center_x - half_w), self.video_width - crop_w))
+        # RULE OF THIRDS / LOOKING ROOM (owner spec, 4-aug-2026: "the frame is
+        # not even following the rule of thirds").
+        #
+        # The crop used to be dead-centred on the subject and then hard-clamped
+        # at the frame edge, which is the one composition that always reads as
+        # amateur: a person standing off to one side ends up jammed against the
+        # crop edge with all the empty room BEHIND them.
+        #
+        # Someone on the left of the source is almost always facing right (and
+        # vice versa) — in this genre the contestants face the host across the
+        # room. So place them on the near third and leave the space in front of
+        # their gaze. A subject already near frame centre stays centred, which
+        # is the owner's first rule: "if the person can be centered, then
+        # center the person."
+        # Clamp the WINDOW, not the centre: min_cx/max_cx above assume the
+        # subject sits dead centre, so applying a thirds offset to an
+        # already-clamped centre walks the crop off the subject entirely
+        # (caught by test_a_fresh_shot_still_re_frames_instantly_on_a_big_move:
+        # subject at x=1800 fell outside a crop ending at 1784).
+        raw_cx = self.current_center_x + drift_x
+        x1 = int(raw_cx - crop_w * self._place_frac(raw_cx))
+        # CONTAINMENT WINS OVER COMPOSITION. Near a source edge the camera
+        # centre is already clamped, so a thirds offset can walk the crop off
+        # the subject (measured: a subject at x=1800 fell outside a crop
+        # ending at 1784). The owner's rule is explicit — "if the person can
+        # be centered, center the person; if the person cannot be centered,
+        # make sure the person is at least at the edge" — so a thirds
+        # placement is only ever applied when the subject still sits inside
+        # the frame with margin.
+        subj = self.target_center_x
+        x1 = max(int(subj - crop_w * (1.0 - COMPOSE_EDGE_MARGIN)),
+                 min(x1, int(subj - crop_w * COMPOSE_EDGE_MARGIN)))
+        x1 = max(0, min(x1, self.video_width - crop_w))
         # target_center_y is the HEAD anchor (see CAMERA_HEAD_ANCHOR); place
         # it CAMERA_HEAD_Y down the crop instead of dead centre, so the eyes
         # sit on the top-third line and the subject never looks pushed low.
