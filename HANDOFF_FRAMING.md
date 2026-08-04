@@ -318,7 +318,21 @@ with the success criterion stated before the render was seen:
 | cuts | 13 | **7** |
 | vision verdict | no | **yes** |
 
-First render in the session to pass review. Published as job `ptb-v4-*`.
+First render to pass the automated vision review. Published as job `ptb-v4-*`.
+
+**THE OWNER REJECTED IT ANYWAY: "ptb v4 wasn't good at all."**
+
+Treat that as the single most important calibration in this document. The
+vision review's "watchable: yes" does NOT mean the clip is acceptable. Across
+this session the reviewer also (a) called centring "shoved to the right edge"
+when the geometry showed the subject LEFT of centre and 92% centred overall
+(see 2g), and (b) passed v4 while the owner found it unwatchable.
+
+Use the review for what it is good at — spotting WHICH timestamps sit on a
+non-speaker, and catching defects you did not think to measure. Do not use it
+as an acceptance gate, do not optimise toward its score, and never report a
+render as good on its say-so. There is no known-good baseline render yet; do
+not present v4, or any current render, as the bar to beat.
 
 Still imperfect, from that same review — these are the next items:
 1. **Looking room ignored in centred shots.** `_place_frac` only engages when
