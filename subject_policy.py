@@ -306,10 +306,28 @@ class Evidence:
         if (JCUT_ENABLED and self.jcut_id is not None
                 and not self.in_hook and self.asd_id is None):
             return self.jcut_id, TIER_JCUT
-        if self.asd_id is not None:
-            return self.asd_id, TIER_ASD
+        # THE TRANSCRIPT OUTRANKS LIP-SYNC (measured 4-aug-2026 — this is a
+        # REVERSAL of the original tier order, which was reasoned rather than
+        # measured).
+        #
+        # The reasoning was: LR-ASD names a face ON SCREEN, while diarization
+        # only names an audio label that still has to be bound to one. True,
+        # but it assumed ASD is right about WHICH face. Traced on the Pop The
+        # Balloon opening: ASD named x~490 (a silent listener) for four
+        # straight seconds while diarization pointed at x~1000-1026, and the
+        # camera sat on the wrong person the whole time. ASD was not jumping
+        # around — it was steadily, confidently wrong, which is exactly what
+        # the turn-continuity gate cannot catch.
+        #
+        # Diarization is deterministic; LR-ASD is a guess. When both name a
+        # visible candidate, the transcript wins. ASD still leads whenever
+        # diarization has no binding this frame (its real strength: locating
+        # a speaker among faces when the label chain fails), which on this
+        # source is most frames.
         if self.diarized_id is not None:
             return self.diarized_id, TIER_DIARIZED
+        if self.asd_id is not None:
+            return self.asd_id, TIER_ASD
         if self.directive_id is not None:
             return self.directive_id, TIER_DIRECTIVE
         if self.mouth_id is not None:

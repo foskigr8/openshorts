@@ -65,10 +65,23 @@ def test_diarization_is_used_when_lip_sync_is_absent():
     assert (cid, tier) == (2, TIER_DIARIZED)
 
 
-def test_lip_sync_outranks_diarization_when_they_disagree():
+def test_the_transcript_outranks_lip_sync_when_they_disagree():
+    """REVERSED 4-aug-2026 on measurement. LR-ASD named a silent listener for
+    four straight seconds on the Pop The Balloon opening while diarization
+    pointed at the real speaker. ASD was not flickering — it was steadily
+    wrong, which no continuity gate can catch. Diarization is deterministic;
+    lip-sync is a guess."""
     p = SubjectPolicy(FPS)
     _, cid, tier = p.decide(cands(HOST, GUEST),
                             Evidence(asd_id=1, diarized_id=2), 0)
+    assert (cid, tier) == (2, TIER_DIARIZED)
+
+
+def test_lip_sync_still_leads_when_the_transcript_has_no_binding():
+    """ASD's real strength: locating a speaker among faces when the
+    label->candidate chain fails. That is most frames on this source."""
+    p = SubjectPolicy(FPS)
+    _, cid, tier = p.decide(cands(HOST, GUEST), Evidence(asd_id=1), 0)
     assert (cid, tier) == (1, TIER_ASD)
 
 
