@@ -24,6 +24,7 @@ from reframe_v2 import (
     _apply_speech_activity_boost,
     _directive_split_corroborated,
     _discount_stale_yolo,
+    _banter_two_shot_eligible,
     _has_second_subject,
     _is_reaction_beat,
     _merge_person_candidates,
@@ -1445,3 +1446,44 @@ def test_asd_match_is_accepted_when_one_face_is_clearly_nearest():
     clear = [{"id": 1, "box": [1005, 205, 200, 200], "score": 1.0},
              {"id": 2, "box": [1700, 600, 200, 200], "score": 1.0}]
     assert reframe_v2._apply_asd_speaker_boost(clear, asd_box, 1920) == 1
+
+
+def test_jcut_pre_roll_proposes_the_next_long_speaker_early():
+    """Owner spec: hard cut to Speaker B 0.5s before their audio begins."""
+    turns = [(0, 100, "A"), (100, 260, "B"), (260, 400, "A")]
+    # 12 frames before B's turn (0.5s @ 24fps) -> B, jcut.
+    label, jcut = reframe_v2._effective_speaker_label(turns, 88, 24)
+    assert (label, jcut) == ("B", True)
+    # 2s before B's turn -> still A, no jcut.
+    label, jcut = reframe_v2._effective_speaker_label(turns, 52, 24)
+    assert (label, jcut) == ("A", False)
+
+
+def test_short_utterance_is_never_proposed_early():
+    """A 1s 'yeah/right' agreement must not drag the camera away early."""
+    turns = [(0, 120, "A"), (120, 144, "B"), (144, 300, "A")]
+    label, jcut = reframe_v2._effective_speaker_label(turns, 110, 24)
+    assert (label, jcut) == ("A", False), "short turn must not j-cut"
+    # Inside the short turn itself the label is still the speaker.
+    label, jcut = reframe_v2._effective_speaker_label(turns, 130, 24)
+    assert label == "B"
+
+
+def test_banter_two_shot_fires_when_the_floor_blocks_a_strong_switch():
+    """Owner tip 1.3: a strong speaker switch the 1.5s floor blocks means both
+    speakers are visible — frame both instead of lagging on the old one."""
+    from subject_policy import Evidence, TIER_HOLD
+    assert _banter_two_shot_eligible(TIER_HOLD, Evidence(asd_id=2), 1)
+    assert _banter_two_shot_eligible(TIER_HOLD, Evidence(diarized_id=2), 1)
+    assert _banter_two_shot_eligible(TIER_HOLD, Evidence(jcut_id=2), 1)
+
+
+def test_banter_two_shot_does_not_fire_when_the_switch_landed():
+    from subject_policy import (
+        Evidence, TIER_ASD, TIER_HOLD, TIER_REACTION, TIER_DIRECTIVE)
+    assert not _banter_two_shot_eligible(TIER_ASD, Evidence(asd_id=2), 1)
+    assert not _banter_two_shot_eligible(TIER_REACTION, Evidence(asd_id=2), 1)
+    # A weak (directive) proposal is not a speaker identification — the
+    # camera must not widen on it.
+    assert not _banter_two_shot_eligible(TIER_HOLD, Evidence(directive_id=2), 1)
+    assert not _banter_two_shot_eligible(TIER_HOLD, Evidence(asd_id=1), 1)

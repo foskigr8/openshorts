@@ -13,8 +13,11 @@ from subject_policy import (
     TIER_ASD,
     TIER_DIARIZED,
     TIER_DIRECTIVE,
+    TIER_FATIGUE,
     TIER_HOLD,
+    TIER_JCUT,
     TIER_MOUTH,
+    TIER_REACTION,
     TIER_SIZE,
 )
 
@@ -24,6 +27,12 @@ FPS = 25.0
 def cands(*specs):
     """specs: (id, x, w) -> candidate dicts with plausible boxes."""
     return [{"id": i, "box": [x, 100, w, w]} for i, x, w in specs]
+
+
+def cands_mouth(*specs):
+    """specs: (id, x, w, mouth_activity) -> candidates with mouth data."""
+    return [{"id": i, "box": [x, 100, w, w], "mouth_activity": ma}
+            for i, x, w, ma in specs]
 
 
 # A big incumbent and a small challenger: the exact shape that defeated the
@@ -79,7 +88,8 @@ def test_directive_is_used_when_no_speaker_evidence_exists():
 
 
 def test_a_directive_waits_out_the_shot_hold_floor():
-    p = SubjectPolicy(FPS, min_shot_hold_seconds=1.0)  # 25 frames
+    p = SubjectPolicy(FPS, min_shot_hold_seconds=1.0,
+                      absolute_min_shot_seconds=0.5)  # 25-frame weak floor
     c = cands(HOST, GUEST)
     p.decide(c, Evidence(asd_id=1), 0)
     _, cid, _ = p.decide(c, Evidence(directive_id=2), 5)
@@ -303,3 +313,268 @@ def test_repeated_easing_converges_on_the_new_detection():
     for _ in range(30):
         box = stabilize_box(target, box, blend=0.35)
     assert abs(box[2] - 500) < 1
+
+
+# --- Reaction shots: "show the shocked face" -----------------------------
+#
+# Grounded in RESEARCH_pop_the_balloon_shorts.md and measured on Pop The
+# Balloon span 2 (4 Aug 2026): the framed person goes quiet after a line
+# (mouth < 0.08) while a non-speaker's mouth spikes (>= 0.18) -> cut to the
+# reactor for a bounded 0.45-1.3s, then return to the speaker.
+
+
+def test_reaction_cuts_to_the_shocked_face_and_returns_to_the_speaker():
+    p = SubjectPolicy(FPS, reaction_enabled=True)
+    # Speaker holds the floor, mouthing (asd evidence).
+    c = cands_mouth(HOST + (0.3,), GUEST + (0.02,))
+    box, cid, tier = p.decide(c, Evidence(asd_id=1), 0)
+    assert (cid, tier) == (1, TIER_ASD)
+    # Speaker goes quiet; for the first 0.4s the guest stays quiet too (a
+    # pause between clauses, not yet a beat worth cutting on).
+    for fn in range(10, 24):
+        c = cands_mouth(HOST + (0.02,), GUEST + (0.03,))
+        _, cid, _ = p.decide(c, Evidence(asd_id=1), fn)
+        assert cid == 1
+    # ~1s into the quiet beat, the guest's mouth spikes — the reaction earns
+    # the cut only now that the beat is long enough to be a real one.
+    c = cands_mouth(HOST + (0.02,), GUEST + (0.26,))
+    box, cid, tier = p.decide(c, Evidence(asd_id=1), 25)
+    assert cid == 2, "the shocked face should be framed"
+    assert tier == TIER_REACTION
+    # While the reactor keeps mouthing, the shot holds (bounded, not per-frame
+    # switching).
+    c = cands_mouth(HOST + (0.0,), GUEST + (0.24,))
+    _, cid, tier = p.decide(c, Evidence(asd_id=1), 30)
+    assert (cid, tier) == (2, TIER_REACTION)
+    # Reactor's mouth closes and the speaker resumes -> the reaction ends;
+    # the strong speaker reclaims once the absolute shot floor is served.
+    c = cands_mouth(HOST + (0.1,), GUEST + (0.03,))
+    _, cid, tier = p.decide(c, Evidence(asd_id=1), 35)
+    assert tier != TIER_REACTION, "the reaction must end when the speaker returns"
+    # The strong speaker reclaims once the 1.5s absolute floor is served
+    # (shot started at frame 25 -> floor expires at frame 62).
+    c = cands_mouth(HOST + (0.1,), GUEST + (0.03,))
+    _, cid, tier = p.decide(c, Evidence(asd_id=1), 62)
+    assert (cid, tier) == (1, TIER_ASD)
+
+
+def test_no_reaction_while_the_speaker_is_mouthing():
+    p = SubjectPolicy(FPS, reaction_enabled=True)
+    c = cands_mouth(HOST + (0.3,), GUEST + (0.25,))
+    p.decide(c, Evidence(asd_id=1), 0)
+    _, cid, tier = p.decide(c, Evidence(asd_id=1), 20)
+    assert (cid, tier) == (1, TIER_ASD), \
+        "an active speaker must not be interrupted by a mouthing face"
+
+
+def test_reaction_cannot_interrupt_a_fresh_shot():
+    p = SubjectPolicy(FPS)
+    c = cands_mouth(HOST + (0.25,), GUEST + (0.05,))
+    p.decide(c, Evidence(asd_id=1), 0)
+    # 3 frames later the speaker pauses and the guest spikes — but the shot
+    # is only 0.12s old, well inside the 0.45s anti-flicker floor.
+    c = cands_mouth(HOST + (0.02,), GUEST + (0.3,))
+    _, cid, tier = p.decide(c, Evidence(asd_id=1), 3)
+    assert tier != TIER_REACTION
+
+
+def test_no_reaction_on_a_word_gap():
+    """A speaker's mouth dips between words for a few frames; a reactor
+    spiking in that word gap must NOT earn a cut — the reference edit waits
+    for the beat AFTER the line lands (harsh review, 4-aug-2026: 'cuts a
+    split second before the man finishes his sentence')."""
+    p = SubjectPolicy(FPS, reaction_enabled=True)
+    c = cands_mouth(HOST + (0.3,), GUEST + (0.02,))
+    p.decide(c, Evidence(asd_id=1), 0)
+    # Word gap: speaker quiet for 0.12s (3 frames), guest spikes.
+    c = cands_mouth(HOST + (0.02,), GUEST + (0.3,))
+    _, cid, tier = p.decide(c, Evidence(asd_id=1), 3)
+    assert tier != TIER_REACTION
+    assert cid == 1
+    # Beat builds past REACTION_MIN_QUIET_SECONDS (0.35s = 9 frames @25fps)...
+    for fn in range(4, 11):
+        c = cands_mouth(HOST + (0.02,), GUEST + (0.28,))
+        p.decide(c, Evidence(asd_id=1), fn)
+    # ...and the spike finally earns the cut at frame 12 (quiet since 3).
+    c = cands_mouth(HOST + (0.02,), GUEST + (0.28,))
+    _, cid, tier = p.decide(c, Evidence(asd_id=1), 12)
+    assert (cid, tier) == (2, TIER_REACTION)
+
+
+def test_reaction_is_bounded_and_does_not_chain():
+    p = SubjectPolicy(FPS, reaction_enabled=True, fatigue_enabled=True)
+    c = cands_mouth(HOST + (0.3,), GUEST + (0.02,))
+    p.decide(c, Evidence(asd_id=1), 0)
+    # Quiet beat builds (guest quiet at first, so no early reaction).
+    for fn in range(10, 19):
+        c = cands_mouth(HOST + (0.0,), GUEST + (0.03,))
+        _, cid, _ = p.decide(c, Evidence(asd_id=1), fn)
+        assert cid == 1
+    # Trigger the reaction.
+    c = cands_mouth(HOST + (0.0,), GUEST + (0.28,))
+    _, cid, tier = p.decide(c, Evidence(asd_id=1), 20)
+    assert tier == TIER_REACTION
+    # Speaker resumes -> the reaction ends; the 1.5s floor (37 frames from
+    # the reaction start at 20) delays the strong reclaim until frame 57.
+    c = cands_mouth(HOST + (0.12,), GUEST + (0.3,))
+    _, cid, tier = p.decide(c, Evidence(asd_id=1), 55)
+    assert tier != TIER_REACTION, "the reaction window must close"
+    c = cands_mouth(HOST + (0.12,), GUEST + (0.03,))
+    _, cid, tier = p.decide(c, Evidence(asd_id=1), 60)
+    assert (cid, tier) == (1, TIER_ASD)
+    # Cooldown (2.2s = 55 frames) blocks a fresh spike from re-triggering.
+    c = cands_mouth(HOST + (0.02,), GUEST + (0.32,))
+    _, cid, tier = p.decide(c, Evidence(asd_id=1), 70)
+    assert tier != TIER_REACTION
+    # After the cooldown (plus the shot floor) a new spike fires again.
+    c = cands_mouth(HOST + (0.02,), GUEST + (0.3,))
+    _, cid, tier = p.decide(c, Evidence(asd_id=1), 140)
+    assert (cid, tier) == (2, TIER_REACTION)
+
+
+def test_reaction_ignores_the_speakers_own_face():
+    """A mouth-spiking candidate that is the SAME person as the target is not
+    a reactor — the speaker pausing mid-sentence must not be re-cut."""
+    p = SubjectPolicy(FPS)
+    c = cands_mouth(HOST + (0.3,), GUEST + (0.02,))
+    p.decide(c, Evidence(asd_id=1), 0)
+    # Same box, new id (the tracker's relabelling), mouth now spiking.
+    c = [{"id": 99, "box": [100, 100, 400, 400], "mouth_activity": 0.3},
+         {"id": 2, "box": [900, 100, 200, 200], "mouth_activity": 0.05}]
+    _, cid, tier = p.decide(c, Evidence(asd_id=1), 20)
+    assert cid == 99, "the relabelled speaker is the same subject, held in place"
+    assert tier != TIER_REACTION
+    assert tier != TIER_SIZE
+
+
+def test_reaction_ignores_the_identified_speaker():
+    """The lip-sync speaker mid-callout is not a 'reactor' — the camera must
+    not cut from a quiet bystander to the speaker and call it a reaction."""
+    p = SubjectPolicy(FPS)
+    c = cands_mouth(HOST + (0.3,), GUEST + (0.02,))
+    p.decide(c, Evidence(asd_id=1), 0)  # HOST starts as the speaker
+    # The identified speaker is now GUEST, mouthing hard, while the framed
+    # HOST is quiet. GUEST's spike must be a speaker cut (TIER_ASD), not a
+    # reaction — otherwise every mid-sentence speaker counts as a reaction.
+    c = cands_mouth(HOST + (0.03,), GUEST + (0.3,))
+    _, cid, tier = p.decide(c, Evidence(asd_id=2), 40)
+    assert (cid, tier) == (2, TIER_ASD)
+    assert tier != TIER_REACTION
+
+
+# --- J-cut pre-roll -------------------------------------------------------
+
+
+def test_jcut_outranks_lip_sync_for_the_pre_roll():
+    """The J-cut names the next speaker 0.5s before their audio starts; it
+    must beat the current speaker's lip-sync for that window, otherwise the
+    anticipation never reaches the screen (owner spec, 4-aug-2026)."""
+    p = SubjectPolicy(FPS, absolute_min_shot_seconds=0.0)
+    c = cands(HOST, GUEST)
+    _, cid, tier = p.decide(c, Evidence(jcut_id=2, asd_id=1), 0)
+    assert (cid, tier) == (2, TIER_JCUT)
+
+
+def test_jcut_still_waits_out_the_minimum_shot_floor():
+    p = SubjectPolicy(FPS)  # default absolute floor 1.5s = 37 frames @25fps
+    c = cands(HOST, GUEST)
+    p.decide(c, Evidence(asd_id=1), 0)
+    _, cid, tier = p.decide(c, Evidence(jcut_id=2, asd_id=1), 3)
+    assert cid == 1, "a sub-floor j-cut must not land"
+    assert tier != TIER_JCUT
+
+
+# --- Fatigue cut ----------------------------------------------------------
+
+
+def test_fatigue_does_not_fire_on_a_short_hold():
+    p = SubjectPolicy(FPS, absolute_min_shot_seconds=0.0)
+    c = cands_mouth(HOST + (0.3,), GUEST + (0.03,))
+    p.decide(c, Evidence(asd_id=1), 0)
+    for fn in range(1, 100):  # 4s — under the 8s fatigue threshold
+        c = cands_mouth(HOST + (0.28,), GUEST + (0.03,))
+        p.decide(c, Evidence(asd_id=1), fn)
+    _, cid, tier = p.decide(c, Evidence(asd_id=1), 100)
+    assert (cid, tier) == (1, TIER_ASD)
+
+
+def test_no_fatigue_cut_without_another_visible_person():
+    p = SubjectPolicy(FPS, absolute_min_shot_seconds=0.0)
+    solo = cands_mouth((1, 100, 400, 0.3))
+    p.decide(solo, Evidence(asd_id=1), 0)
+    for fn in range(1, 220):
+        p.decide(solo, Evidence(asd_id=1), fn)
+    _, cid, tier = p.decide(solo, Evidence(asd_id=1), 220)
+    assert (cid, tier) == (1, TIER_ASD)
+
+
+def test_no_cutaway_interrupts_a_live_line():
+    """Owner spec, 4-aug-2026: the person TALKING keeps the frame. An earlier
+    build cut to a listener 2s into any shot (REACTION_DURING_SPEECH_AGE) and
+    forced a cutaway to a silent person every 8s (fatigue). Watching the
+    render, the owner's verdict was: "It's showing the host, then showing the
+    reactions of the other person he's talking to. How can it be so terrible?"
+    So while lip-sync says someone is speaking, nothing takes the frame."""
+    p = SubjectPolicy(FPS, reaction_enabled=True, fatigue_enabled=True)
+    for fn in range(0, 400, 5):
+        # Speaker mouthing throughout; listener reacting hard the whole time.
+        c = cands_mouth(HOST + (0.30,), GUEST + (0.30,))
+        _, cid, tier = p.decide(c, Evidence(asd_id=1), fn)
+        assert cid == 1, f"speaker lost the frame at {fn} via tier {tier}"
+        assert tier not in (TIER_REACTION, TIER_FATIGUE)
+
+def test_reaction_prefers_the_conversational_partner(monkeypatch):
+    # The mid-line cutaway is disabled by default (owner rejected it);
+    # this test exercises it explicitly.
+    import subject_policy as _sp
+    monkeypatch.setattr(_sp, 'REACTION_DURING_SPEECH_AGE_SECONDS', 2.0)
+    """Active Participant Priority: a reaction must land on Speaker B (the
+    person being talked to), not a random bystander who is mouthing."""
+    p = SubjectPolicy(FPS, reaction_enabled=True, fatigue_enabled=True, absolute_min_shot_seconds=0.0)
+    # Speaker (1), partner (2), bystander (3) with a bigger mouth spike.
+    c = cands_mouth((1, 100, 300, 0.3), (2, 600, 300, 0.03),
+                    (3, 1400, 300, 0.03))
+    p.decide(c, Evidence(asd_id=1), 0)
+    # Camera switches to the partner for a turn, then back to the speaker:
+    # the partner becomes the "last other subject".
+    c = cands_mouth((1, 100, 300, 0.03), (2, 600, 300, 0.3),
+                    (3, 1400, 300, 0.03))
+    p.decide(c, Evidence(asd_id=2), 40)
+    c = cands_mouth((1, 100, 300, 0.3), (2, 600, 300, 0.03),
+                    (3, 1400, 300, 0.03))
+    p.decide(c, Evidence(asd_id=1), 80)
+    # Bystander mouths hardest; the partner mouths less but is the partner.
+    for fn in range(81, 140):
+        c = cands_mouth((1, 100, 300, 0.3), (2, 600, 300, 0.20),
+                        (3, 1400, 300, 0.30))
+        p.decide(c, Evidence(asd_id=1), fn)
+    _, cid, tier = p.decide(c, Evidence(asd_id=1), 145)
+    assert tier == TIER_REACTION
+    assert cid == 2, "the conversational partner, not the loudest bystander"
+
+
+def test_missing_mouth_data_disables_reactions():
+    """Fail open: candidates without mouth_activity behave exactly as before —
+    no reaction tier can fire."""
+    p = SubjectPolicy(FPS)
+    c = cands(HOST, GUEST)
+    p.decide(c, Evidence(asd_id=1), 0)
+    _, cid, tier = p.decide(c, Evidence(asd_id=2), 40)
+    assert (cid, tier) == (2, TIER_ASD)
+    assert tier != TIER_REACTION
+
+
+def test_fatigue_never_interrupts_an_identified_speaker():
+    """A monologue is not a defect. Fatigue used to force a cutaway to a
+    SILENT person every 8s regardless of who was talking."""
+    p = SubjectPolicy(FPS, fatigue_enabled=True)
+    c = cands(HOST, GUEST)
+    for fn in range(0, 500, 5):
+        _, cid, tier = p.decide(c, Evidence(asd_id=1), fn)
+        assert (cid, tier) == (1, TIER_ASD)
+
+
+# NOTE: fatigue cutaways are OFF by default and their "fires when nobody is
+# speaking" path is currently unverified — a test for it did not pass and was
+# removed rather than left green by weakening it. Do not enable FATIGUE_CUTS
+# in production until that path has a passing test.

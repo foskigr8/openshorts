@@ -60,11 +60,16 @@ TIER_DIRECTIVE = 3
 TIER_MOUTH = 4
 TIER_HOLD = 5
 TIER_SIZE = 6
+TIER_REACTION = 7
+TIER_JCUT = 8
+TIER_FATIGUE = 9
 
 # Tiers considered STRONG: a positive identification of who is speaking.
-# These bypass the shot-hold floor entirely (see the measurement in the
-# module docstring -- gating them is what cost 27 points of accuracy).
-STRONG_TIERS = (TIER_ASD, TIER_DIARIZED)
+# They bypass the WEAK-evidence floor (MIN_SHOT_HOLD_SECONDS — gating them
+# is what cost 27 points of accuracy) but still wait out the absolute
+# minimum shot length (ABSOLUTE_MIN_SHOT_SECONDS, the owner's strict
+# 1.5-2s no-shot-shorter rule, 4-aug-2026).
+STRONG_TIERS = (TIER_ASD, TIER_DIARIZED, TIER_JCUT)
 
 # Agreeing consecutive detections required before a WEAK signal may move the
 # camera. Strong signals use 1 (measured optimal: 100% accuracy, 9 switches).
@@ -87,7 +92,63 @@ MIN_SHOT_HOLD_SECONDS = float(os.environ.get("POLICY_MIN_SHOT_HOLD", "0.9"))
 # hysteresis in the old sense: it never changes WHO is chosen, only how soon
 # the change may land, so it costs coverage rather than correctness.
 ABSOLUTE_MIN_SHOT_SECONDS = float(
-    os.environ.get("POLICY_ABSOLUTE_MIN_SHOT", "0.5"))
+    os.environ.get("POLICY_ABSOLUTE_MIN_SHOT", "1.5"))
+
+# Reaction shots ("show the shocked face"). Measured on Pop The Balloon span
+# 2 (4 Aug 2026): a non-speaker's mouth_activity runs ~0.07 median but
+# reaction spikes (shock/laugh) reach 0.18-0.32, while the framed speaker's
+# own mouth drops below ~0.08 during the beat that follows a line. So: when
+# the framed person is quiet and another face spikes hard, give that face a
+# SHORT bounded shot, then let the speaker reclaim. Thresholds are env-tunable
+# and everything degrades to no-reactions when candidates carry no mouth data.
+REACTION_MOUTH_ACTIVITY = float(
+    os.environ.get("REACTION_MOUTH_ACTIVITY", "0.18"))
+REACTION_SPEAKER_QUIET = float(
+    os.environ.get("REACTION_SPEAKER_QUIET", "0.08"))
+# A reaction may only interrupt a shot that has held this long (anti-flicker).
+REACTION_MIN_HOLD_SECONDS = float(
+    os.environ.get("REACTION_MIN_HOLD", "0.45"))
+# The identified speaker must have been QUIET this long before a reaction may
+# fire. Filters the word gaps inside a sentence (measured 4-aug-2026: the
+# first version cut to a reaction mid-clause because the speaker's mouth dips
+# between words; the harsh-editor review flagged exactly that: 'cuts a split
+# second before the man finishes his sentence').
+REACTION_MIN_QUIET_SECONDS = float(
+    os.environ.get("REACTION_MIN_QUIET", "0.35"))
+# A reaction may also fire DURING the speaker's line (the listener is
+# reacting to what is being said — owner spec, 4-aug-2026: the woman's face
+# must show while the man talks down her lifestyle) once the current shot is
+# this old. A fresh shot (< this) still requires the quiet-beat trigger, so a
+# punchline delivery is never interrupted mid-word.
+REACTION_DURING_SPEECH_AGE_SECONDS = float(
+    os.environ.get("REACTION_DURING_SPEECH_AGE", "1e9"))
+# Never hold a reaction longer than this — reference edits cap reaction shots
+# at ~1.5s and use them as punctuation, not scenes (see
+# RESEARCH_pop_the_balloon_shorts.md).
+REACTION_MAX_HOLD_SECONDS = float(
+    os.environ.get("REACTION_MAX_HOLD", "2.0"))
+# Gap required between two reaction shots, so a laughing group doesn't chain
+# the camera from face to face.
+REACTION_COOLDOWN_SECONDS = float(
+    os.environ.get("REACTION_COOLDOWN", "2.2"))
+# A reactor must be at least this fraction of the largest face's area —
+# a distant background face spiking on a laugh must not hijack the lineup.
+REACTION_MIN_RELATIVE_AREA = float(
+    os.environ.get("REACTION_MIN_RELATIVE_AREA", "0.25"))
+
+# Fatigue cut: after the camera has been locked on one speaker this long,
+# force a short cutaway to another visible person even if they are silent —
+# breaks the monotony of a long monologue (owner spec: 7-10s, 4-aug-2026).
+FATIGUE_CUT_SECONDS = float(
+    os.environ.get("FATIGUE_CUT_SECONDS", "8.0"))
+
+# Cutaways are OFF by default (4-aug-2026). Both were added to add rhythm and
+# both were measured, by the owner watching the render, to do the opposite:
+# they take the frame away from the person talking, which is the one thing the
+# clip exists to show. Turn them on per-deployment only after the speaker
+# framing itself is judged good.
+REACTION_ENABLED = os.environ.get("REACTION_CUTS", "0").strip() not in ("0", "false", "no")
+FATIGUE_ENABLED = os.environ.get("FATIGUE_CUTS", "0").strip() not in ("0", "false", "no")
 
 # Box overlap at which two detections are considered THE SAME PERSON,
 # regardless of what id they carry.
@@ -185,16 +246,18 @@ class Evidence:
     """
 
     __slots__ = ("asd_id", "diarized_id", "directive_id", "directive_reason",
-                 "mouth_id", "scene_changed")
+                 "mouth_id", "scene_changed", "jcut_id")
 
     def __init__(self, asd_id=None, diarized_id=None, directive_id=None,
-                 directive_reason=None, mouth_id=None, scene_changed=False):
+                 directive_reason=None, mouth_id=None, scene_changed=False,
+                 jcut_id=None):
         self.asd_id = asd_id
         self.diarized_id = diarized_id
         self.directive_id = directive_id
         self.directive_reason = directive_reason
         self.mouth_id = mouth_id
         self.scene_changed = scene_changed
+        self.jcut_id = jcut_id
 
     def proposal(self):
         """(candidate_id, tier) for the strongest evidence present, or
@@ -207,6 +270,13 @@ class Evidence:
         the shot, and it was measured pointing at the wrong person often
         enough that the transcript must win when the two disagree.
         """
+        # A J-cut names the NEXT speaker up to 0.5s before their audio starts
+        # (owner spec, 4-aug-2026: "execute the hard cut to Speaker B 0.5
+        # seconds before their audio waveform actually begins"). It outranks
+        # lip-sync for the pre-roll window, otherwise the current speaker's
+        # mouth would win and the anticipation would never reach the screen.
+        if self.jcut_id is not None:
+            return self.jcut_id, TIER_JCUT
         if self.asd_id is not None:
             return self.asd_id, TIER_ASD
         if self.diarized_id is not None:
@@ -255,7 +325,8 @@ class SubjectPolicy:
 
     def __init__(self, fps, min_shot_hold_seconds=None,
                  mouth_confirm=None, size_confirm=None,
-                 absolute_min_shot_seconds=None):
+                 absolute_min_shot_seconds=None,
+                 reaction_enabled=None, fatigue_enabled=None):
         self.fps = float(fps) or 25.0
         hold = (MIN_SHOT_HOLD_SECONDS if min_shot_hold_seconds is None
                 else min_shot_hold_seconds)
@@ -267,6 +338,17 @@ class SubjectPolicy:
                               else mouth_confirm)
         self.size_confirm = (SIZE_CONFIRM_SAMPLES if size_confirm is None
                              else size_confirm)
+        self.reaction_min_frames = max(0, int(REACTION_MIN_HOLD_SECONDS * self.fps))
+        self.reaction_min_quiet_frames = max(0, int(REACTION_MIN_QUIET_SECONDS * self.fps))
+        self.reaction_during_speech_frames = max(
+            0, int(REACTION_DURING_SPEECH_AGE_SECONDS * self.fps))
+        self.reaction_max_frames = max(1, int(REACTION_MAX_HOLD_SECONDS * self.fps))
+        self.reaction_cooldown_frames = max(0, int(REACTION_COOLDOWN_SECONDS * self.fps))
+        self.fatigue_frames = max(1, int(FATIGUE_CUT_SECONDS * self.fps))
+        self.reaction_enabled = (REACTION_ENABLED if reaction_enabled is None
+                                 else reaction_enabled)
+        self.fatigue_enabled = (FATIGUE_ENABLED if fatigue_enabled is None
+                                else fatigue_enabled)
         self.target_id = None
         self.target_tier = None
         # Where the framed subject was last seen. Identity of a SUBJECT is
@@ -275,6 +357,25 @@ class SubjectPolicy:
         self.shot_started = -10 ** 9
         self._pending_id = None
         self._pending_n = 0
+        self._reaction_start = None
+        self._reaction_cooldown_until = -10 ** 9
+        self._fatigue_start = None
+        self._fatigue_cooldown_until = -10 ** 9
+        # True while the current reaction was triggered DURING the speaker's
+        # line (the speaker never stopped mouthing). Such reactions hold their
+        # full window — the early-end only applies to quiet-beat reactions.
+        self._reaction_during_speech = False
+        # The box of the last DIFFERENT subject we framed (the conversational
+        # partner). Reactions/cutaways prefer this person over bystanders.
+        self._last_other_box = None
+        # When the current SPEAKER hold began. Reactions/cutaways do not reset
+        # this, so a long monologue still reaches the fatigue threshold even
+        # with reaction cuts in between.
+        self._speaker_hold_start = -10 ** 9
+        # First frame of the current "speaker is quiet" beat (None while the
+        # identified speaker is actively mouthing). A reaction may only start
+        # once this beat has lasted REACTION_MIN_QUIET_SECONDS.
+        self._speaker_quiet_since = None
         # Diagnostics: how many decisions each tier accounted for. Rendered
         # into the render log so a regression is visible without a bisect.
         self.tier_counts = {}
@@ -301,7 +402,12 @@ class SubjectPolicy:
 
     def _commit(self, cand, tier, frame_number, new_shot=True):
         if new_shot:
+            if (self.target_box is not None
+                    and not same_subject(tuple(cand["box"]), self.target_box)):
+                self._last_other_box = self.target_box
             self.shot_started = frame_number
+            if tier in STRONG_TIERS or tier == TIER_DIRECTIVE:
+                self._speaker_hold_start = frame_number
         self.target_id = cand.get("id")
         self.target_box = tuple(cand["box"])
         self.target_tier = tier
@@ -338,6 +444,194 @@ class SubjectPolicy:
                 return c
         return None
 
+    def _reactors(self, candidates, evidence, frame_width=None):
+        """Candidates with a strong expression spike who are NOT the person
+        we are already framing and NOT the identified speaker (lip-sync or
+        diarized). The speaker mid-sentence is not a reaction — measured on
+        Pop The Balloon span 2 (4 Aug 2026): a callout cut to the speaker
+        himself because his mouth spike looked like a reaction. Missing mouth
+        data yields [] — fail open."""
+        max_area = max((c["box"][2] * c["box"][3] for c in candidates),
+                       default=0.0)
+        speaker_ids = set()
+        if evidence is not None:
+            for label in (evidence.asd_id, evidence.diarized_id):
+                if label is not None:
+                    speaker_ids.add(label)
+        out = []
+        for c in candidates:
+            if c.get("mouth_activity", 0.0) < REACTION_MOUTH_ACTIVITY:
+                continue
+            if c.get("id") in speaker_ids:
+                continue  # the identified speaker is not a reactor
+            x, y, w, h = c["box"]
+            if max_area and w * h < max_area * REACTION_MIN_RELATIVE_AREA:
+                continue  # background-small — not a lineup reaction
+            if not self._same_subject(c, frame_width):
+                out.append(c)
+        return out
+
+    def _best_reactor(self, reactors):
+        """Prefer the conversational partner (the last OTHER subject we
+        framed) over a random bystander who happens to be mouthing — owner
+        spec: 'any reaction shots must be of Speaker B, not random
+        bystanders in the wide shot'."""
+        if self._last_other_box is not None:
+            for c in reactors:
+                if same_subject(tuple(c["box"]), self._last_other_box):
+                    return c
+        return max(reactors, key=lambda c: c.get("mouth_activity", 0.0))
+
+    def _maybe_fatigue(self, candidates, frame_number, evidence=None):
+        """Forced short cutaway after a long lock-on (owner spec, 4-aug-2026:
+        camera on one speaker for 7-10s -> cut to another visible person for
+        ~2s even if they are silent, to break visual monotony).
+
+        NEVER fires while the framed person is the identified speaker. Owner
+        spec, 4-aug-2026: a monologue is not a defect to be broken up — taking
+        the frame off someone mid-sentence to show a silent listener is the
+        "why is it showing the host and the other person's reactions" failure.
+        Monotony is only worth breaking when nobody is positively speaking.
+
+        Disabled unless explicitly enabled — see FATIGUE_ENABLED."""
+        if not self.fatigue_enabled or not candidates:
+            return None, None
+        if evidence is not None and self.target_tier != TIER_FATIGUE:
+            spk, spk_tier = evidence.proposal()
+            if spk_tier in STRONG_TIERS and spk == self.target_id:
+                return None, None
+        if self.target_tier == TIER_FATIGUE:
+            if (self._fatigue_start is not None
+                    and frame_number - self._fatigue_start < self.reaction_max_frames):
+                held = self._find_held(candidates)
+                if held is not None:
+                    self._refresh(held, TIER_FATIGUE)
+                    return held, TIER_FATIGUE
+            self._fatigue_cooldown_until = frame_number + self.reaction_cooldown_frames
+            return None, None
+        if frame_number < self._fatigue_cooldown_until:
+            return None, None
+        if (self._speaker_hold_start < 0
+                or frame_number - self._speaker_hold_start < self.fatigue_frames):
+            return None, None
+        if self.target_tier not in STRONG_TIERS and self.target_tier != TIER_DIRECTIVE:
+            return None, None  # only a real speaker hold gets the fatigue cut
+        held = self._find_held(candidates)
+        if held is None:
+            return None, None
+        max_area = max((c["box"][2] * c["box"][3] for c in candidates),
+                       default=0.0)
+        others = [c for c in candidates
+                  if not self._same_subject(c)
+                  and c["box"][2] * c["box"][3] >= max_area * REACTION_MIN_RELATIVE_AREA]
+        if not others:
+            return None, None
+        # Active Participant Priority: the fatigue cutaway should land on the
+        # conversational partner, not a random bystander (owner spec).
+        best = None
+        if self._last_other_box is not None:
+            best = next((c for c in others
+                         if same_subject(tuple(c["box"]), self._last_other_box)),
+                        None)
+        if best is None:
+            best = max(others, key=lambda c: c["box"][2] * c["box"][3])
+        self._fatigue_start = frame_number
+        self._commit(best, TIER_FATIGUE, frame_number)
+        return best, TIER_FATIGUE
+
+    def _maybe_reaction(self, candidates, evidence, frame_number):
+        """The "show the shocked face" edit. Returns (cand, tier) when the
+        camera should cut to a reactor this frame, else (None, None).
+
+        Trigger (measured, not assumed): the framed person is quiet (mouth
+        below REACTION_SPEAKER_QUIET — a beat after a line) while another
+        face spikes at or above REACTION_MOUTH_ACTIVITY. The reactor gets a
+        bounded shot (REACTION_MIN..MAX_HOLD), then the normal evidence flow
+        reclaims — a strong speaker proposal switches back immediately.
+
+        Disabled unless explicitly enabled — see REACTION_ENABLED.
+        """
+        if not self.reaction_enabled:
+            return None, None
+        if not candidates:
+            return None, None
+        held = self._find_held(candidates)
+        if held is None or self.target_box is None:
+            return None, None  # no established subject to deviate from
+
+        if self.target_tier == TIER_REACTION:
+            # Already showing a reaction: hold it through its bounded window,
+            # then hand back to the normal evidence flow (speaker reclaims).
+            # End EARLY when the identified speaker resumes mouthing — but
+            # only for quiet-beat reactions. A reaction triggered DURING the
+            # speaker's line must hold its window: the speaker never stopped
+            # mouthing, so early-ending would make it a single-frame flash.
+            speaker_back = False
+            if evidence is not None and not self._reaction_during_speech:
+                want_id, want_tier = evidence.proposal()
+                if want_tier in STRONG_TIERS:
+                    want = _by_id(candidates, want_id)
+                    if (want is not None and not self._same_subject(want)
+                            and want.get("mouth_activity", 0.0) >= REACTION_SPEAKER_QUIET):
+                        speaker_back = True
+            if not speaker_back and (self._reaction_start is not None
+                                     and frame_number - self._reaction_start
+                                     < self.reaction_max_frames):
+                self._refresh(held, TIER_REACTION)
+                return held, TIER_REACTION
+            self._reaction_cooldown_until = frame_number + self.reaction_cooldown_frames
+            return None, None
+
+        # Track the speaker's quiet beat. "Speaker" = the evidence-named
+        # strong speaker when the label binds to a candidate this frame,
+        # otherwise the person we are framing. Not updated during a reaction
+        # shot (the reactor's own laughing mouth would reset the beat).
+        speaker_mouth = None
+        if evidence is not None:
+            want_id, want_tier = evidence.proposal()
+            if want_tier in STRONG_TIERS:
+                want = _by_id(candidates, want_id)
+                if want is not None:
+                    speaker_mouth = want.get("mouth_activity", 0.0)
+        if speaker_mouth is None:
+            speaker_mouth = held.get("mouth_activity", 0.0)
+        if speaker_mouth >= REACTION_SPEAKER_QUIET:
+            self._speaker_quiet_since = None
+        elif self._speaker_quiet_since is None:
+            self._speaker_quiet_since = frame_number
+
+        if frame_number - self.shot_started < self.reaction_min_frames:
+            return None, None  # shot too fresh to interrupt
+        if frame_number < self._reaction_cooldown_until:
+            return None, None  # just had a reaction — no chaining
+        target_mouth = held.get("mouth_activity", 0.0)
+        if target_mouth >= REACTION_SPEAKER_QUIET:
+            # Speaker actively mouthing: the listener's face is allowed once
+            # the shot has aged past the punchline window (owner spec: show
+            # the woman while he talks down her lifestyle), unless a genuine
+            # quiet beat already qualified.
+            quiet_beat = (self._speaker_quiet_since is not None
+                          and frame_number - self._speaker_quiet_since
+                          >= self.reaction_min_quiet_frames)
+            if (not quiet_beat
+                    and frame_number - self.shot_started
+                    < self.reaction_during_speech_frames):
+                return None, None  # fresh punchline — do not interrupt
+            self._reaction_during_speech = not quiet_beat
+        else:
+            if (self._speaker_quiet_since is None
+                    or frame_number - self._speaker_quiet_since
+                    < self.reaction_min_quiet_frames):
+                return None, None  # a word gap, not a beat after a line
+            self._reaction_during_speech = False
+        reactors = self._reactors(candidates, evidence)
+        if not reactors:
+            return None, None
+        best = self._best_reactor(reactors)
+        self._reaction_start = frame_number
+        self._commit(best, TIER_REACTION, frame_number)
+        return best, TIER_REACTION
+
     # -- the decision ------------------------------------------------------
 
     def decide(self, candidates, evidence, frame_number, frame_width=None):
@@ -361,6 +655,31 @@ class SubjectPolicy:
         want = _by_id(candidates, want_id)
         if want is None:
             want_id, tier = None, None
+
+        # THE SPEAKER OUTRANKS EVERY CUTAWAY. Owner spec, 4-aug-2026:
+        # "It's supposed to frame the main subject that is talking. Prioritize
+        # him because it's him that is being shown. Instead you're prioritizing
+        # the host and every other person before him."
+        #
+        # Cutaways are punctuation, not content. Both are now OFF by default
+        # (REACTION_ENABLED / FATIGUE_ENABLED): a fatigue cut fired every 8s to
+        # a SILENT person, and a reaction could interrupt a line after 2s,
+        # which together produced "showing the host, then showing the
+        # reactions of the other person he's talking to."
+        #
+        # When enabled, a reaction may still only fire on a QUIET beat (the
+        # framed speaker's own mouth has stopped) — never over a live line.
+        react_cand, react_tier = self._maybe_reaction(
+            candidates, evidence, frame_number)
+        if react_cand is not None:
+            self.tier_counts[react_tier] = self.tier_counts.get(react_tier, 0) + 1
+            return react_cand["box"], react_cand.get("id"), react_tier
+
+        fatigue_cand, fatigue_tier = self._maybe_fatigue(
+            candidates, frame_number, evidence)
+        if fatigue_cand is not None:
+            self.tier_counts[fatigue_tier] = self.tier_counts.get(fatigue_tier, 0) + 1
+            return fatigue_cand["box"], fatigue_cand.get("id"), fatigue_tier
 
         chosen = None
         if want is not None:
@@ -416,7 +735,9 @@ class SubjectPolicy:
         """Human-readable tier breakdown for the render log."""
         names = {TIER_ASD: "lip-sync", TIER_DIARIZED: "diarized",
                  TIER_DIRECTIVE: "directed", TIER_MOUTH: "mouth",
-                 TIER_HOLD: "held", TIER_SIZE: "size"}
+                 TIER_HOLD: "held", TIER_SIZE: "size",
+                 TIER_REACTION: "reaction", TIER_JCUT: "j-cut",
+                 TIER_FATIGUE: "fatigue"}
         total = sum(self.tier_counts.values()) or 1
         parts = [f"{names[t]} {100.0 * n / total:.0f}%"
                  for t, n in sorted(self.tier_counts.items()) if n]

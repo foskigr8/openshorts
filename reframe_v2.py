@@ -614,6 +614,14 @@ MOUTH_ACTIVITY_THRESHOLD = 0.04
 SPEECH_ACTIVITY_SCORE_BOOST = 3.0
 MOUTH_HISTORY_LEN = 6
 
+# J-cut pre-roll (owner editing spec, 4-aug-2026): hard cut to the NEXT
+# speaker 0.5s before their audio starts, so the viewer sees their
+# micro-expression before they speak — human anticipation, not reaction.
+J_CUT_PRE_ROLL_SECONDS = float(os.environ.get("J_CUT_PRE_ROLL", "0.5"))
+# Short-utterance suppression: a turn shorter than this ("yeah", "right", a
+# laugh) must NOT drag the camera away from the current speaker.
+SHORT_UTTERANCE_SECONDS = float(os.environ.get("SHORT_UTTERANCE", "1.5"))
+
 
 def _update_mouth_activity(candidates, prev_candidates):
     """Carries each candidate's recent mouth-position samples forward by
@@ -762,6 +770,44 @@ def _speaker_at_frame(speaker_turns, frame_number):
         if sf <= frame_number < ef:
             return speaker
     return None
+
+
+def _effective_speaker_label(speaker_turns, frame_number, fps):
+    """(label, is_jcut) for this frame, applying the J-cut pre-roll and the
+    short-utterance suppression.
+
+    When the next speaker's turn starts within J_CUT_PRE_ROLL_SECONDS AND
+    that turn is at least SHORT_UTTERANCE_SECONDS long, propose the next
+    speaker NOW (is_jcut=True) — the cut lands before their audio begins. A
+    short turn ("yeah", "right", a laugh) is never proposed early.
+    """
+    label = _speaker_at_frame(speaker_turns, frame_number)
+    if not speaker_turns:
+        return label, False
+    pre = max(1, int(J_CUT_PRE_ROLL_SECONDS * fps))
+    for s, e, nxt in speaker_turns:
+        if s > frame_number:
+            if s - frame_number <= pre:
+                dur = (e - s) / fps if fps else 0.0
+                if dur >= SHORT_UTTERANCE_SECONDS:
+                    return nxt, True
+            break
+    return label, False
+
+
+def _banter_two_shot_eligible(decision_tier, evidence, target_id):
+    """Owner tip 1.3 (4-aug-2026): during rapid banter, when the minimum-shot
+    floor BLOCKS a strong speaker switch, the camera should show BOTH
+    speakers in the 3:4 crop instead of lagging on the old one until the
+    floor expires. True when the policy just HELD (did not switch) while a
+    strong proposal (lip-sync / diarized / J-cut) names a DIFFERENT
+    candidate — the incoming speaker is visible and the union fits."""
+    import subject_policy
+    if decision_tier != subject_policy.TIER_HOLD or evidence is None:
+        return False
+    w_id, w_tier = evidence.proposal()
+    return (w_tier in subject_policy.STRONG_TIERS and w_id is not None
+            and w_id != target_id)
 
 
 def _merge_person_candidates(face_candidates, yolo_candidates):
@@ -1776,7 +1822,9 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
                     current_scene_index += 1
                     scene_changed = True
 
-            active_speaker = _speaker_at_frame(speaker_turns, frame_number) if speaker_turns else None
+            active_speaker, _jcut = (
+                _effective_speaker_label(speaker_turns, frame_number, fps)
+                if speaker_turns else (None, False))
 
             # True only on frames where the detector actually ran, so the
             # cut-grace window below can end on real evidence rather than a
@@ -1879,8 +1927,11 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
                 # different tiers of evidence (lip-sync names a face on
                 # screen; diarization names an audio label that still has to
                 # be bound to one), and collapsing them hides which one
-                # actually drove a decision.
-                diarized_id = bound_id
+                # actually drove a decision. A J-CUT binding (next speaker,
+                # pre-roll) goes to its own slot so it can outrank lip-sync
+                # for the 0.5s before the new turn's audio starts.
+                diarized_id = None if _jcut else bound_id
+                jcut_id = bound_id if _jcut else None
                 # A confident ASD identification is a better binding than the
                 # anchor/position chain that would otherwise resolve it.
                 if asd_id is not None:
@@ -1961,15 +2012,16 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
                         # the directive entirely ("drop never").
                         if _has_second_subject(candidates, directed_box):
                             directed_box = None  # split, not an override — see below
-                    elif primary_label is not None and active_speaker == primary_label:
-                        directed_box = None  # primary's anchor is authoritative
                     else:
-                        # Position-aware for everyone else: a directive is
-                        # only kept when it demonstrably points at the
-                        # active speaker's own position (scene anchor cx, id
-                        # fast-path via bound_id) — anything farther than
-                        # SPEAKER_ANCHOR_TOLERANCE is framing a different
-                        # person and loses to the talker.
+                        # Position-aware for EVERYONE, including the primary:
+                        # a directive is kept only when it demonstrably points
+                        # at the active speaker's own position (scene anchor
+                        # cx, id fast-path via bound_id) — anything farther
+                        # than SPEAKER_ANCHOR_TOLERANCE is framing a different
+                        # person and loses to the talker. This is the Gemini
+                        # visual layer (owner spec: it must drive framing), and
+                        # it is still outranked by lip-sync/diarization in the
+                        # policy whenever the two disagree.
                         directed_cand = next(
                             (c for c in candidates if c['box'] is directed_box),
                             None)
@@ -2087,16 +2139,21 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
                 # 61% -> 70%, while removing the hysteresis that was damping
                 # it took the same clip to 97%.
                 shot_before = policy.shot_started
+                evidence = subject_policy.Evidence(
+                    asd_id=asd_id,
+                    diarized_id=diarized_id,
+                    jcut_id=jcut_id,
+                    directive_id=directive_target_id,
+                    directive_reason=(directive or {}).get('reason'),
+                    mouth_id=mouth_id,
+                    scene_changed=scene_changed)
                 target_box, target_id, decision_tier = policy.decide(
-                    candidates,
-                    subject_policy.Evidence(
-                        asd_id=asd_id,
-                        diarized_id=diarized_id,
-                        directive_id=directive_target_id,
-                        directive_reason=(directive or {}).get('reason'),
-                        mouth_id=mouth_id,
-                        scene_changed=scene_changed),
-                    frame_number, orig_w)
+                    candidates, evidence, frame_number, orig_w)
+                # Banter two-shot: a strong switch the floor blocked (the
+                # policy HELD) means the incoming speaker is already visible —
+                # frame both instead of lagging (see _banter_two_shot_eligible).
+                banter_blocked = _banter_two_shot_eligible(
+                    decision_tier, evidence, target_id)
                 # A genuinely new shot, as judged by the policy — the signal
                 # the hard cut below keys off.
                 subject_changed = (policy.shot_started != shot_before
@@ -2112,51 +2169,92 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
                 # screen on the open). Centered between the key subject and
                 # the other prominent person, no zoom, and treated as
                 # on-primary so coverage bookkeeping stays quiet.
-                two_shot = (frame_number < two_shot_frames
-                            and primary_raw_box is not None
-                            and secondary_raw_box is not None
-                            and frame_number - primary_raw_at < fresh_frames
-                            and frame_number - secondary_raw_at < fresh_frames)
+                two_shot = ((frame_number < two_shot_frames
+                             and primary_raw_box is not None
+                             and secondary_raw_box is not None
+                             and frame_number - primary_raw_at < fresh_frames
+                             and frame_number - secondary_raw_at < fresh_frames)
+                            or (banter_blocked and len(candidates) >= 2))
                 if two_shot:
-                    # Hook two-shot: frame the star + the OTHER person who can
-                    # actually share the fixed 3:4 crop. Re-pick the pair from
-                    # the CURRENT candidates: the naive biggest-other rule pairs
-                    # the star with a distant third person, whose union is wider
-                    # than the crop — the crop then falls on the gap and shows
-                    # neither subject (ground-truthed 31-jul-2026: the opening
-                    # landed on the host with the girl out of frame). The union
-                    # pad is capped so the pair stays inside the crop.
-                    target_box = None
-                    prim = None
-                    if effective_primary_id is not None:
-                        prim = next((c for c in candidates
-                                     if c.get("id") == effective_primary_id), None)
-                    if prim is not None:
-                        sec = _hook_secondary(prim, candidates,
-                                              cameraman.crop_width, orig_w, orig_h,
-                                              exclude_ids={effective_primary_id})
-                        if sec is not None:
-                            primary_raw_box = prim["box"]
-                            secondary_raw_box = sec["box"]
-                            primary_raw_at = frame_number
-                            secondary_raw_at = frame_number
-                            top_fresh_at = frame_number
-                            bot_fresh_at = frame_number
-                            target_box = _hook_union(
-                                primary_raw_box, secondary_raw_box,
-                                cameraman.crop_width, orig_w, orig_h)
-                            target_id = effective_primary_id
+                    # Compose the two-shot ONLY on entry; while it is active
+                    # the rect is LOCKED (no recompute, no re-snap). The old
+                    # per-detection recompute moved the crop every stride and
+                    # read as jitter on playback (owner report, 4-aug-2026:
+                    # 'the jittering used to be less').
+                    if not hook_two_shot_active:
+                        if banter_blocked:
+                            # Banter two-shot (owner tip 1.3): the floor
+                            # blocked a strong switch, so the incoming speaker
+                            # is already visible. Pair the HELD subject with
+                            # that incoming speaker in one 3:4 crop instead of
+                            # lagging on one of them through the floor.
+                            held_cand = None
+                            if policy.target_box is not None:
+                                held_cand = next(
+                                    (c for c in candidates
+                                     if subject_policy.same_subject(
+                                         tuple(c["box"]), tuple(policy.target_box),
+                                         orig_w)),
+                                    None)
+                            w_id, _wt = evidence.proposal()
+                            incoming = next(
+                                (c for c in candidates if c.get("id") == w_id),
+                                None)
+                            if (held_cand is not None and incoming is not None
+                                    and held_cand is not incoming):
+                                primary_raw_box = held_cand["box"]
+                                secondary_raw_box = incoming["box"]
+                                primary_raw_at = frame_number
+                                secondary_raw_at = frame_number
+                                target_box = _hook_union(
+                                    primary_raw_box, secondary_raw_box,
+                                    cameraman.crop_width, orig_w, orig_h)
+                                target_id = held_cand.get("id")
+                        else:
+                            # Hook two-shot: frame the star + the OTHER person
+                            # who can actually share the fixed 3:4 crop. The
+                            # naive biggest-other rule pairs the star with a
+                            # distant third person, whose union is wider than
+                            # the crop — the crop then falls on the gap and
+                            # shows neither subject (ground-truthed
+                            # 31-jul-2026).
+                            target_box = None
+                            prim = None
+                            if effective_primary_id is not None:
+                                prim = next(
+                                    (c for c in candidates
+                                     if c.get("id") == effective_primary_id),
+                                    None)
+                            if prim is not None:
+                                sec = _hook_secondary(
+                                    prim, candidates,
+                                    cameraman.crop_width, orig_w, orig_h,
+                                    exclude_ids={effective_primary_id})
+                                if sec is not None:
+                                    primary_raw_box = prim["box"]
+                                    secondary_raw_box = sec["box"]
+                                    primary_raw_at = frame_number
+                                    secondary_raw_at = frame_number
+                                    top_fresh_at = frame_number
+                                    bot_fresh_at = frame_number
+                                    target_box = _hook_union(
+                                        primary_raw_box, secondary_raw_box,
+                                        cameraman.crop_width, orig_w, orig_h)
+                                    target_id = effective_primary_id
+                            if target_box is None:
+                                target_box = _union_box(
+                                    primary_raw_box, secondary_raw_box,
+                                    orig_w, orig_h)
+                                target_id = effective_primary_id
+                        if target_box is not None:
                             # Land the two-shot NOW instead of waiting out the
                             # jump-confirm gate (the pair is stable — the gate
                             # exists for false-positive detector jumps, not a
-                            # deliberate hook composition).
-                            if not hook_two_shot_active:
-                                cameraman.force_next_update = True
-                                hook_two_shot_active = True
-                    if target_box is None:
-                        target_box = _union_box(primary_raw_box, secondary_raw_box,
-                                                orig_w, orig_h)
-                        target_id = effective_primary_id
+                            # deliberate composition).
+                            cameraman.force_next_update = True
+                            hook_two_shot_active = True
+                    # else: the two-shot is already locked — keep the existing
+                    # target_box so the crop does not move until it ends.
                 else:
                     hook_two_shot_active = False
                 if target_box:

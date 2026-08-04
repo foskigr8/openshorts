@@ -337,6 +337,42 @@ class TestSmoothedCameramanEasing:
         x1, _, x2, _ = cam.get_crop_box(force_snap=True)
         assert (x1 + x2) / 2 == pytest.approx(cam.target_center_x, abs=1)
 
+    def test_head_anchor_keeps_body_box_heads_in_frame(self):
+        """A YOLO head-and-chest box centred at 0.5 puts the head at the top
+        of the crop (measured: 'top of head cropped' on Pop The Balloon span
+        2, 4-aug-2026). The vertical anchor must sit at CAMERA_HEAD_ANCHOR
+        down the box, not at the box centre."""
+        cam = self._cam()
+        cam.force_next_update = True
+        # YOLO body box: head sits in the top ~16% of this rect.
+        cam.update_target([669, 99, 624, 384])
+        assert cam.target_center_y == pytest.approx(
+            99 + 384 * main.CAMERA_HEAD_ANCHOR, abs=0.01)
+        assert cam.target_center_y < 99 + 384 / 2, \
+            "body-box centering is exactly what cut heads off"
+        # A face box is head-only: the anchor stays near the box's top half.
+        cam.force_next_update = True
+        cam.update_target([855, 156, 135, 135])
+        assert cam.target_center_y == pytest.approx(
+            156 + 135 * main.CAMERA_HEAD_ANCHOR, abs=0.01)
+
+    def test_crop_places_the_head_on_the_top_third_line(self):
+        """The head anchor must sit CAMERA_HEAD_Y down the FINAL crop, not
+        dead centre — eyes on the top-third grid line (owner framing spec,
+        4-aug-2026), matching the split-cell path's SPLIT_CELL_HEAD_Y."""
+        cam = self._cam()
+        cam.force_next_update = True
+        # Mid-frame subject: only then does the source frame contain enough
+        # room for the crop to place the head at 36% (a subject near the top
+        # clamps to y=0, one near the bottom to y=video_height-crop_h — the
+        # source simply has no headroom there).
+        cam.update_target([960, 440, 40, 40], zoom_target=0.85)
+        x1, y1, x2, y2 = cam.get_crop_box(force_snap=True)
+        h = y2 - y1
+        head = 440 + 40 * main.CAMERA_HEAD_ANCHOR
+        assert h > 0
+        assert (head - y1) / h == pytest.approx(main.CAMERA_HEAD_Y, abs=0.03)
+
 
 class TestSmoothedCameramanZoom:
     """Problem 2: an eased zoom state (crop-size scale) + dynamic y so a
@@ -367,12 +403,14 @@ class TestSmoothedCameramanZoom:
     def test_zoomed_crop_is_centered_on_the_face_y(self):
         cam = self._cam()
         cam.force_next_update = True
-        # Face mid-frame; a zoomed crop must follow its vertical centre
-        # (y=500 box -> centre 520; clamp range is [459, 621] for 0.85 zoom).
+        # Face mid-frame; a zoomed crop must follow the HEAD anchor, not the
+        # box centre (y=500 box, h=40 -> 500 + 40*0.16 = 506.4). Box-centre
+        # framing is what cut heads off on body boxes (4-aug-2026).
         cam.update_target([960, 500, 40, 40], zoom_target=0.85)
         x1, y1, x2, y2 = cam.get_crop_box(force_snap=True)
         assert y1 > 0, "zoomed-in crop must leave the top of the frame"
-        assert cam.current_center_y == pytest.approx(520, abs=2)
+        assert cam.current_center_y == pytest.approx(
+            500 + 40 * main.CAMERA_HEAD_ANCHOR, abs=2)
 
     def test_full_height_crop_keeps_y_at_zero(self):
         cam = self._cam()

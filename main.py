@@ -116,7 +116,35 @@ JUMP_CONFIRM_FRAMES = max(int(os.environ.get("JUMP_CONFIRM_FRAMES", "3")), 1)
 # This is what stops the group-shot jitter: faces closer together than this are
 # both already framed, so alternating between them is motion with no benefit.
 # 0 disables the hysteresis entirely (restores the old always-follow behaviour).
-RETARGET_DEAD_ZONE_FRAC = float(os.environ.get("RETARGET_DEAD_ZONE_FRAC", "0.08"))
+# How far the framed subject may drift from the crop centre before the camera
+# corrects. 0.08 -> 0.035 (4-aug-2026): at a 3:4 crop off a 1080p source that
+# band was ~65px, and combined with the 0.25 safe zone the speaker could sit a
+# quarter of the crop width off centre indefinitely. Owner spec: "the
+# composition of the person that is talking is center. If the person cannot be
+# centered, that's when you can use rule of thirds."
+#
+# The band existed to damp A/B churn between two faces. That churn had a real
+# cause — unstable ids and a person alternating between a face box and a body
+# box — which is now fixed at source (subject_policy.same_subject,
+# identity_tracker provisional inheritance), so the compensation can shrink.
+RETARGET_DEAD_ZONE_FRAC = float(os.environ.get("RETARGET_DEAD_ZONE_FRAC", "0.035"))
+
+# Where the crop's vertical centre sits inside the detection box, as a
+# fraction DOWN the box (0.5 = box centre). Detection hands back either a
+# MediaPipe face square or a YOLO head-and-chest rect; centering the 3:4
+# crop on a body box's centre puts the head at the top edge and crops it
+# off (measured 4-aug-2026 on Pop The Balloon span 2: the shocked-face
+# moment rendered with "top of head cropped"). Anchoring on the head keeps
+# it in frame with shoulders below — the same fix the split-cell path
+# already ground-truthed (SPLIT_HEAD_FRACTION = 0.16, 31-jul-2026).
+CAMERA_HEAD_ANCHOR = float(os.environ.get("CAMERA_HEAD_ANCHOR", "0.16"))
+
+# Where the head anchor sits in the FINAL crop, as a fraction down its height.
+# 0.36 places the eyes/head on the top-third grid line (user framing spec,
+# 4-aug-2026: "place their eyes precisely on the top-third grid line to ensure
+# they don't look awkwardly low in the frame") — same value the split-cell
+# path uses for its final-crop head placement.
+CAMERA_HEAD_Y = float(os.environ.get("CAMERA_HEAD_Y", "0.36"))
 
 # --- Eased camera-motion tuning (SmoothedCameraman) ---
 # The old get_crop_box moved at one of two CONSTANT speeds with a hard
@@ -363,8 +391,10 @@ class SmoothedCameraman:
             self._pending_count = 0
             self.target_center_x = new_center
 
-        # y/zoom follow the accepted target (face vertical centre).
-        self.target_center_y = y + h / 2
+        # y/zoom follow the accepted target, anchored on the head (see
+        # CAMERA_HEAD_ANCHOR) rather than the box centre — a body box centred
+        # at 0.5 cuts the head off the top of the crop.
+        self.target_center_y = y + h * CAMERA_HEAD_ANCHOR
         if zoom_target is not None:
             self.target_zoom = min(max(float(zoom_target), self.min_zoom), 1.0)
 
@@ -493,7 +523,10 @@ class SmoothedCameraman:
 
         center_x = min(max(self.current_center_x + drift_x, min_cx), max_cx)
         x1 = max(0, min(int(center_x - half_w), self.video_width - crop_w))
-        y1 = max(0, min(int(self.current_center_y - half_h),
+        # target_center_y is the HEAD anchor (see CAMERA_HEAD_ANCHOR); place
+        # it CAMERA_HEAD_Y down the crop instead of dead centre, so the eyes
+        # sit on the top-third line and the subject never looks pushed low.
+        y1 = max(0, min(int(self.current_center_y - crop_h * CAMERA_HEAD_Y),
                         self.video_height - crop_h))
         return x1, y1, x1 + crop_w, y1 + crop_h
 
