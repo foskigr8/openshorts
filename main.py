@@ -129,6 +129,15 @@ JUMP_CONFIRM_FRAMES = max(int(os.environ.get("JUMP_CONFIRM_FRAMES", "3")), 1)
 # identity_tracker provisional inheritance), so the compensation can shrink.
 RETARGET_DEAD_ZONE_FRAC = float(os.environ.get("RETARGET_DEAD_ZONE_FRAC", "0.035"))
 
+# Long-shot follow (owner spec, 4-aug-2026). A held shot stays locked; only
+# after it has run this long may the camera track a drifting subject, and then
+# only slowly. Deliberately gentle: panning is what caused every previous
+# stutter complaint, so this must never look like a pan.
+LONG_SHOT_FOLLOW_SECONDS = float(os.environ.get("LONG_SHOT_FOLLOW_SECONDS", "3.0"))
+LONG_FOLLOW_RATE = float(os.environ.get("LONG_FOLLOW_RATE", "0.04"))
+LONG_FOLLOW_MAX_STEP = float(os.environ.get("LONG_FOLLOW_MAX_STEP", "3.0"))
+LONG_FOLLOW_ACCEL = float(os.environ.get("LONG_FOLLOW_ACCEL", "0.35"))
+
 # Where the crop's vertical centre sits inside the detection box, as a
 # fraction DOWN the box (0.5 = box centre). Detection hands back either a
 # MediaPipe face square or a YOLO head-and-chest rect; centering the 3:4
@@ -237,6 +246,10 @@ class SmoothedCameraman:
         self.aspect_ratio = aspect_ratio
         self.fps = float(fps) if fps else 30.0
         self._static_frames = 0  # consecutive frames with zero eased motion
+        # A shot must have been locked this long before the camera is allowed
+        # to FOLLOW a drifting subject instead of teleporting to them.
+        self.long_shot_follow_frames = max(
+            1, int(LONG_SHOT_FOLLOW_SECONDS * (float(fps) if fps else 30.0)))
 
         # Base crop dims at zoom=1.0 (the full defined crop). Zoom scales these
         # while keeping the aspect ratio constant — see get_crop_box.
@@ -420,17 +433,42 @@ class SmoothedCameraman:
             # to frame and literally cannot stutter. When the subject has
             # genuinely left the safe zone we re-frame instantly rather than
             # travelling, because travelling is the artefact.
-            if (abs(self.target_center_x - self.current_center_x) > self.safe_zone_radius
-                    or abs(self.target_center_y - self.current_center_y) > self.crop_height * 0.25):
+            drifted = (abs(self.target_center_x - self.current_center_x) > self.safe_zone_radius
+                       or abs(self.target_center_y - self.current_center_y) > self.crop_height * 0.25)
+            if drifted and self._static_frames >= self.long_shot_follow_frames:
+                # LONG-SHOT FOLLOW (owner spec, 4-aug-2026: "instead of
+                # constant jittering that distracts the eyes, we can use
+                # tracking if the camera doesn't change for long").
+                #
+                # A held shot normally moves NOTHING — that is what makes it
+                # impossible to stutter, and the reference edits in this genre
+                # are 100% hard cuts. But when a shot runs long and the subject
+                # walks out of the safe zone, the old behaviour TELEPORTED the
+                # crop mid-shot, which reads as a jolt with no cut to justify
+                # it. Once a shot has held this long, follow the subject
+                # gently instead: slow enough to be invisible, and it only
+                # ever engages on shots that have already earned it.
+                self.current_center_x, self._vx = self._eased_step(
+                    self.current_center_x, self.target_center_x,
+                    LONG_FOLLOW_RATE, LONG_FOLLOW_MAX_STEP, LONG_FOLLOW_ACCEL,
+                    self._vx, EASE_SNAP_EPSILON, min_step=0.0)
+                self.current_center_y, self._vy = self._eased_step(
+                    self.current_center_y, self.target_center_y,
+                    LONG_FOLLOW_RATE, LONG_FOLLOW_MAX_STEP, LONG_FOLLOW_ACCEL,
+                    self._vy, EASE_SNAP_EPSILON, min_step=0.0)
+                self.current_zoom = self.target_zoom
+                self._vz = 0.0
+            elif drifted:
                 self.current_center_x = self.target_center_x
                 self.current_center_y = self.target_center_y
                 # Focal length changes ride along with the cut — the reference
                 # edits never zoom continuously inside a held shot.
                 self.current_zoom = self.target_zoom
                 self._static_frames = 0
+                self._vx = self._vy = self._vz = 0.0
             else:
                 self._static_frames += 1
-            self._vx = self._vy = self._vz = 0.0
+                self._vx = self._vy = self._vz = 0.0
         else:
             self.current_center_x, self._vx = self._eased_step(
                 self.current_center_x, self.target_center_x,
