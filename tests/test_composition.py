@@ -21,16 +21,25 @@ def test_a_centred_subject_is_centred():
     assert abs(pos - 0.5) < 0.05, f"subject at {pos:.2f}, expected centre"
 
 
-def test_a_left_subject_sits_on_the_left_third_with_looking_room():
-    """Someone on the left of the room is facing right — the space belongs
-    in front of them, not behind."""
-    _, _, pos = cam_at(300)
-    assert pos < 0.45, f"subject at {pos:.2f}, expected left of centre"
+def test_a_subject_is_centred_wherever_the_frame_allows_it():
+    """Owner spec: "if the person can be centered, then center the person."
+    Centring is possible for x in [crop_w/2, W - crop_w/2] = [405, 1515] on a
+    1920-wide source. Two people facing each other on this format sit at
+    roughly 450 and 1500 — both inside that band, and both were being pushed
+    17% off centre by the old thirds default."""
+    for x in (450, 600, 960, 1200, 1500):
+        _, _, pos = cam_at(x)
+        assert abs(pos - 0.5) < 0.05, f"subject at {x} landed at {pos:.2f}"
 
 
-def test_a_right_subject_sits_on_the_right_third():
-    _, _, pos = cam_at(1620)
-    assert pos > 0.55, f"subject at {pos:.2f}, expected right of centre"
+def test_a_subject_outside_the_centrable_band_is_clamped_not_lost():
+    """Beyond the band the crop would leave the source, so the subject rides
+    toward the crop edge — the "at least at the edge" rule. No choice is
+    involved; geometry decides."""
+    for x in (200, 1750):
+        x1, x2, pos = cam_at(x)
+        assert x1 <= x <= x2
+        assert abs(pos - 0.5) > 0.1, "should be off centre, but only because clamped"
 
 
 def test_a_subject_at_the_extreme_edge_is_still_fully_inside_the_crop():
@@ -47,11 +56,11 @@ def test_a_subject_at_the_extreme_edge_is_still_fully_inside_the_crop():
         assert 0.10 <= pos <= 0.90, f"subject stranded at {pos:.2f}"
 
 
-def test_thirds_can_be_switched_off(monkeypatch):
-    # x=600 is far enough from the edge that centring is achievable, so the
-    # flag makes a visible difference (nearer the edge the clamp decides).
-    _, _, thirds = cam_at(600)
-    monkeypatch.setattr(m, "COMPOSE_THIRDS", False)
+def test_thirds_can_be_switched_on_for_looking_room(monkeypatch):
+    """The offset still exists for deliberate looking-room work; it is just
+    not the default any more."""
     _, _, centred = cam_at(600)
+    monkeypatch.setattr(m, "COMPOSE_THIRDS", True)
+    _, _, thirds = cam_at(600)
     assert abs(centred - 0.5) < 0.05
     assert thirds < centred - 0.1, "thirds must actually shift the framing"

@@ -138,7 +138,21 @@ LONG_SHOT_FOLLOW_SECONDS = float(os.environ.get("LONG_SHOT_FOLLOW_SECONDS", "3.0
 # Composition. A subject within COMPOSE_SIDE_BAND of a source edge is placed on
 # the near third (looking room in front of them); anyone nearer the middle is
 # centred. COMPOSE_THIRD=1/3 is the classic line.
-COMPOSE_THIRDS = os.environ.get("COMPOSE_THIRDS", "1").strip() not in ("0", "false", "no")
+# CENTRE FIRST (owner spec, 4-aug-2026: "the center of 3/4, the main focus
+# ought to be there... if the person can be centered, then center the person").
+#
+# Measured why this defaults OFF: centring is geometrically possible whenever
+# the subject sits in the middle 58% of a 1920-wide source (crop is 810 wide,
+# so x in [405, 1515]). With thirds enabled, a subject at x=450 or x=1500 —
+# exactly where two people sit facing each other on this format — was pushed
+# 17% off centre BY CHOICE, even though centring was available. Outside that
+# band the clamp already produces the "at least at the edge" behaviour on its
+# own, so the thirds offset was never the thing rescuing edge cases; it was
+# only decentring the cases that did not need it.
+#
+# Kept as an option for deliberate looking-room work later, but the default is
+# now: centre whenever the frame allows, clamp when it does not.
+COMPOSE_THIRDS = os.environ.get("COMPOSE_THIRDS", "0").strip() not in ("0", "false", "no")
 COMPOSE_THIRD = float(os.environ.get("COMPOSE_THIRD", "0.3333"))
 COMPOSE_SIDE_BAND = float(os.environ.get("COMPOSE_SIDE_BAND", "0.34"))
 # The subject must always sit at least this far inside the crop, whatever the
