@@ -795,6 +795,11 @@ def _effective_speaker_label(speaker_turns, frame_number, fps):
     return label, False
 
 
+def _by_id_present(candidates, cid):
+    """Is this id among the current candidates?"""
+    return cid is not None and any(c.get("id") == cid for c in candidates)
+
+
 def _banter_two_shot_eligible(decision_tier, evidence, target_id):
     """Owner tip 1.3 (4-aug-2026): during rapid banter, when the minimum-shot
     floor BLOCKS a strong speaker switch, the camera should show BOTH
@@ -2169,7 +2174,23 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
                 # screen on the open). Centered between the key subject and
                 # the other prominent person, no zoom, and treated as
                 # on-primary so coverage bookkeeping stays quiet.
+                # The opening two-shot must NEVER displace an identified
+                # speaker. It anchors on effective_primary_id — the talk-time
+                # primary — which on a hosted format IS the host, so on a clip
+                # that opens with a guest answering, the guest was not on
+                # screen at all for the first 1.8s (owner report, 4-aug-2026:
+                # "he wasn't even on screen to begin with, the host was being
+                # prioritized over him"). The clip was selected FOR what this
+                # person says; the open is the least acceptable place to frame
+                # someone else. Falls back to the two-shot only when nothing
+                # has identified a speaker yet.
+                _op_id, _op_tier = (evidence.proposal() if evidence is not None
+                                    else (None, None))
+                opening_speaker_known = (
+                    _op_tier in subject_policy.STRONG_TIERS
+                    and _by_id_present(candidates, _op_id))
                 two_shot = ((frame_number < two_shot_frames
+                             and not opening_speaker_known
                              and primary_raw_box is not None
                              and secondary_raw_box is not None
                              and frame_number - primary_raw_at < fresh_frames
