@@ -657,6 +657,9 @@ ASD_SPEAKER_BOOST = float(os.environ.get("ASD_SPEAKER_BOOST", "4.0"))
 # How much closer the nearest face must be than the runner-up for an LR-ASD
 # position match to count as an identification rather than a coin toss.
 ASD_MATCH_MARGIN = float(os.environ.get("ASD_MATCH_MARGIN", "1.6"))
+# How far LR-ASD may move within ONE diarized turn before it is judged to have
+# jumped to a different person (fraction of source width).
+ASD_TURN_LOCK_TOL = float(os.environ.get("ASD_TURN_LOCK_TOL", "0.08"))
 
 
 def _apply_asd_speaker_boost(candidates, asd_box, orig_w, boosted=None):
@@ -1780,6 +1783,10 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
     # for one detection sample to land with force_next_update set (see
     # SmoothedCameraman) so the snap lands on the REAL new target.
     cut_grace_frames = 0
+    # Which diarized speaker the current ASD face-lock belongs to, and where
+    # that face sat when the turn began (see the continuity gate below).
+    asd_turn_label = None
+    asd_turn_cx = None
     # Eased framing box for the current subject (see subject_policy.
     # stabilize_box). Reset on every real cut so a new shot lands exactly.
     stable_box = None
@@ -1941,6 +1948,46 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
                         asd_id = _apply_asd_speaker_boost(
                             candidates, asd_speaking_boxes[sec], orig_w,
                             boosted=asd_boosted)
+                # DIARIZATION CONTINUITY GATE (measured 4-aug-2026).
+                #
+                # Within one diarized turn the speaker CANNOT change, but
+                # LR-ASD moved to a different face ~21% of the time during a
+                # single continuous turn on this source (x~1565 for 17s, then
+                # x~1180 for 5s, same speaker, no cut) — it calls a reacting
+                # listener the speaker. That rate matched the wrong-person
+                # framing in the render almost exactly, and it is what
+                # survived removing every cutaway override.
+                #
+                # So the transcript arbitrates: the first confident ASD face
+                # of a turn is held for the rest of it, and a mid-turn jump to
+                # a different face is rejected rather than followed. ASD
+                # re-decides freely at a turn boundary or a source cut, and
+                # with no diarization this is a no-op (per-second behaviour).
+                if active_speaker is not None:
+                    if active_speaker != asd_turn_label:
+                        asd_turn_label = active_speaker
+                        asd_turn_cx = None
+                    if asd_id is not None:
+                        _m = next((c for c in candidates
+                                   if c.get("id") == asd_id), None)
+                        _cx = (_m["box"][0] + _m["box"][2] / 2.0) if _m else None
+                        if _cx is not None:
+                            if asd_turn_cx is None:
+                                asd_turn_cx = _cx
+                            elif abs(_cx - asd_turn_cx) > ASD_TURN_LOCK_TOL * orig_w:
+                                # Same speaker, different face -> ASD is wrong.
+                                # Re-resolve onto the face this turn started on.
+                                _lock = min(
+                                    candidates,
+                                    key=lambda c: abs(
+                                        c["box"][0] + c["box"][2] / 2.0 - asd_turn_cx))
+                                _lcx = _lock["box"][0] + _lock["box"][2] / 2.0
+                                asd_id = (_lock.get("id")
+                                          if abs(_lcx - asd_turn_cx)
+                                          <= ASD_TURN_LOCK_TOL * orig_w else None)
+                elif asd_turn_label is not None:
+                    asd_turn_label = None
+                    asd_turn_cx = None
                 boosted |= asd_boosted
                 bound_id = _resolve_speaker_binding(
                     candidates, active_speaker, current_scene_index,
