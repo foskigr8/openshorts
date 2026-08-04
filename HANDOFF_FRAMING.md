@@ -184,6 +184,50 @@ candidate counts + ASD coverage). Point them at the new clip.
 
 ---
 
+## 2d. READ THIS FIRST — measured 4-aug-2026, supersedes guesses below
+
+**The speaker->face BINDING is the bug. Not the speaker signal, not the policy.**
+
+A/B on the same 32s Pop The Balloon span, both vision-reviewed:
+
+| | USE_ASD=1 | USE_ASD=0 (diarization only) |
+|---|---|---|
+| tier mix | lip-sync 78%, held 21%, size 0% | diarized 76%, held 24%, size 0% |
+| cuts | 12 | 4 |
+| time on the WRONG person | 4 short spans | **22 seconds continuous** |
+| render time | 162s | 100s |
+| verdict | No | No |
+
+**Do NOT remove LR-ASD.** Disabling it is measurably worse: the camera locks
+on the red-haired co-host from 0:03 to 0:25 while the guest talks off-screen.
+
+Both paths independently land on the SAME wrong face. ASD says "this face is
+speaking"; diarization says "speaker B is speaking"; both get mapped onto the
+co-host. So the failure is in the layer that resolves a speaker to a candidate
+box — `_apply_asd_speaker_boost` (positional match) and
+`_resolve_speaker_binding` (anchor chain) — not in either speaker signal and
+not in `subject_policy`.
+
+The two symptoms are the same bug at different rates: ASD rebinds every second
+so the error looks like jitter; diarization binds once per turn so the error
+looks like a long stare at the wrong person.
+
+**Next investigation, concretely:** per second, log ASD's box centre, every
+candidate box centre, and who is actually talking. If ASD's box is correct but
+the matched candidate is wrong -> the positional match is at fault. If ASD's
+box itself sits on the co-host -> LR-ASD's own face-track selection is.
+
+Four overrides were removed on 4-aug-2026, each of which independently pointed
+the camera at the wrong person and each of which masked this: fatigue cuts,
+reaction cuts, the opening two-shot on the talk-time primary, and the j-cut
+pre-roll (which ranked ABOVE lip-sync). All are off by default now. Framing is
+measurably more speaker-driven (size scoring 61% -> 0%), but the clip is still
+not watchable because of the binding.
+
+Also still missing: a two-shot composition path (the policy always frames a
+single subject). Rule-of-thirds placement with looking room now exists
+(`main._place_frac`, tests/test_composition.py).
+
 ## 3. Known-open problems (in priority order)
 
 ### 3.1 Printed/photo faces are framed as if they were people — HIGHEST VALUE
