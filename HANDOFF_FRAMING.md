@@ -267,6 +267,44 @@ should rise. Then watch it.
 5. **Watch the video BEFORE publishing to the UI.** Twice a render was
    published and then found to be bad.
 
+## 2f. THE REMAINING BUG — LR-ASD accuracy (measured, 4-aug-2026)
+
+The binding fix (2e) landed and did NOT help: tier mix went
+`lip-sync 78%, held 21%` -> `lip-sync 74%, held 24%`, verdict still "no",
+7 spans on non-speakers. My prediction that `held` would drop was wrong.
+
+Measured directly instead (`/tmp/asdacc.py` in the container — accuracy, not
+coverage). Grouping LR-ASD's chosen speaker x-position by who the TRANSCRIPT
+says is talking, during ONE continuous turn by speaker C:
+
+    x ~1560-1600 : 17 seconds   (the real speaker)
+    x ~1170-1240 :  5 seconds   (a different person)
+    x  490       :  1 second
+
+Same speaker, no scene cut, and ASD swaps face ~21% of the time — matching the
+~24% wrong-person framing in the render. **LR-ASD is calling a reacting
+listener the speaker.** Everything else is exonerated: cutaways off, size 1%,
+policy behaving, box match fixed.
+
+### Proposed fix — gate ASD by diarization continuity
+
+The transcript is deterministic; LR-ASD is not. Within a single diarized turn
+the speaker CANNOT change, so ASD must not be allowed to move the camera to a
+different face mid-turn:
+
+1. while `active_speaker` (the diarized label) is unchanged, resolve ASD's face
+   ONCE (majority vote over the turn's seconds, or first confident match) and
+   hold that face for the rest of the turn;
+2. let ASD re-decide freely at a diarized turn boundary or a source scene cut;
+3. with no diarization available, fall back to current per-second behaviour.
+
+This keeps ASD's strength (it names a face on screen, which diarization cannot)
+while removing its weakness (per-second instability on reactive listeners), and
+it matches the owner's long-standing instruction that the transcript is the
+basis.
+
+Verify by: tier mix (`held` should fall), then WATCH IT before publishing.
+
 ## 3. Known-open problems (in priority order)
 
 ### 3.1 Printed/photo faces are framed as if they were people — HIGHEST VALUE
