@@ -228,6 +228,45 @@ Also still missing: a two-shot composition path (the policy always frames a
 single subject). Rule-of-thirds placement with looking room now exists
 (`main._place_frac`, tests/test_composition.py).
 
+## 2e. THE BINDING BUG — found and fixed 4-aug-2026 (commit d384b17)
+
+`_apply_asd_speaker_boost` matched LR-ASD's box to a candidate by EUCLIDEAN
+centre distance. LR-ASD emits a FACE box; candidates are a mix of MediaPipe
+face boxes and YOLO head-and-chest boxes whose centres sit far lower, so dy
+dominated dx. Combined with the ASD_MATCH_MARGIN ambiguity gate, the correct
+speaker and a distant wrong one looked equidistant and the match was
+**rejected outright** — reproducible: the old code returns None when the
+speaker's body box sits under the ASD box while an unrelated face sits at the
+same height.
+
+Discarded lip-sync evidence falls through to TIER_HOLD, so the camera keeps
+whoever it already had. That is the mechanism behind the long stares at the
+co-host, and why disabling ASD did not help — the same hold dominates.
+
+Now matched on |dx| with vertical overlap as a sanity check. People in this
+format sit side by side: x separates them, y does not.
+
+**Not yet confirmed on a render.** The check: tier mix `held` was 21-24% while
+evidence was being discarded; if the fix works, that should fall and `lip-sync`
+should rise. Then watch it.
+
+### Measurement traps that cost real time in this session — do not repeat
+
+1. **Coverage is not accuracy.** USE_ASD was defaulted ON because LR-ASD
+   "locates a speaker in 32/32 seconds". Nobody checked whether it locates the
+   RIGHT speaker. Never promote a signal on coverage alone.
+2. **Instrument the thing itself.** A diagnostic reported the match choosing a
+   candidate 375px away over one 6px away. It was an artefact: the cached
+   pre-boost candidates carry no ids, so the id lookup matched an arbitrary
+   dict. Re-measured by observing which candidate actually gets BOOSTED, the
+   match was fine. Verify your diagnostic before trusting its output.
+3. **One render per output path.** Two concurrent writers produced a truncated
+   file and a round of garbage numbers. Always ffprobe before publishing.
+4. **The pixel-delta jitter metric (`/tmp/jitcmp.py`) is unreliable** — it
+   failed to register two changes known to alter the output. Smoke alarm only.
+5. **Watch the video BEFORE publishing to the UI.** Twice a render was
+   published and then found to be bad.
+
 ## 3. Known-open problems (in priority order)
 
 ### 3.1 Printed/photo faces are framed as if they were people — HIGHEST VALUE
