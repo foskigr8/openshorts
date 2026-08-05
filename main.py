@@ -1551,7 +1551,13 @@ def download_youtube_video(url, output_dir="."):
     # none, because an invalid session reads as more suspicious than an
     # anonymous request (see the ios_spoof_args note above).
     attempts = (
-        [('anonymous', {}, fallback_fmt, None, False)]
+        # HD format on purpose: fallback_fmt is 'best[ext=mp4]/best', which is a
+        # PRE-MERGED (progressive) stream, and YouTube caps those at ~360-720p.
+        # Real HD needs separate bestvideo+bestaudio merged, which _hd_fmt_for
+        # builds. Measured 5-aug-2026: with fallback_fmt this attempt pulled a
+        # 10.5-minute source in 28.41 MiB (~360p) and the reframe inherited that
+        # resolution, so every delivered clip was low quality.
+        [('anonymous', {}, _hd_fmt_for(None), None, False)]
         + [('ios-spoof', ios_spoof_args, fallback_fmt, None, False)]
         + ([('HD-direct', hd_args, _hd_fmt_for(None), None, True)] if _direct_first else [])
         + ([('HD', hd_args, _hd_fmt_for(_proxy), _proxy, True)] if hd_args else [])

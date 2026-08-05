@@ -300,7 +300,13 @@ CAPTION_CONTENT_INSET_RATIO = 0.36
 # chosen as the midpoint) — see their use in generate_ass.
 AUTO_CAPTION_STYLE = {
     "style": "karaoke",
-    "alignment": "bottom",
+    # Where the burned-in captions sit. "bottom" (default), "middle" or "top" —
+    # the same three the Subtitle modal offers for restyling a finished clip
+    # (see align_map in generate_ass). Settable per deployment with
+    # CAPTION_POSITION so a Kaggle/self-host run can choose up front instead of
+    # having to restyle every clip afterwards.
+    "alignment": (os.environ.get("CAPTION_POSITION", "").strip().lower()
+                  or "bottom"),
     "font_name": "Montserrat ExtraBold",
     # 44 was tuned for the old multi-word-block style, where several words
     # shared one line. With a single word filling the whole line now, the
