@@ -53,13 +53,20 @@ if [ "${SKIP_INSTALL:-0}" != "1" ]; then
     # cheap resolution. Remedies are applied in order and IMPORT IS RETESTED
     # after each, because the right fix depends on the image version and
     # guessing a pin from outside Kaggle is how this broke in the first place.
+    # NOTE: every command in this block is guarded with `|| true`.
+    # The script runs under `set -euo pipefail`, and the whole point here is to
+    # run commands that FAIL — probing a broken import, uninstalling a package
+    # that may not be present. Without the guards, `set -e` kills the script on
+    # the first probe and the repair silently never runs, which is exactly what
+    # happened on the first attempt (5-aug-2026): output stopped dead after
+    # "attempting repair" with no error shown.
     say "Checking mediapipe imports"
     _mp_ok() { python3 -c "import mediapipe" >/dev/null 2>&1; }
     if ! _mp_ok; then
         echo "    mediapipe import failed — attempting repair"
-        _err=$(python3 -c "import mediapipe" 2>&1 | tail -1)
+        _err=$(python3 -c "import mediapipe" 2>&1 | tail -1) || true
         echo "    $_err"
-        if echo "$_err" | grep -q "runtime_version\|protobuf"; then
+        if echo "$_err" | grep -q "runtime_version\|protobuf" 2>/dev/null; then
             echo "    remedy 1/2: removing tensorflow (unused by this pipeline)"
             pip uninstall -y -q tensorflow tensorflow-cpu tensorflow-gpu 2>/dev/null || true
         fi
@@ -72,7 +79,7 @@ if [ "${SKIP_INSTALL:-0}" != "1" ]; then
             echo "    repaired: mediapipe imports"
         else
             echo "    STILL BROKEN — face detection will not work. Last error:"
-            python3 -c "import mediapipe" 2>&1 | tail -3
+            python3 -c "import mediapipe" 2>&1 | tail -3 || true
         fi
     else
         echo "    mediapipe imports"
