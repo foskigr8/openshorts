@@ -1533,8 +1533,26 @@ def download_youtube_video(url, output_dir="."):
     _direct_first = (os.environ.get("DIRECT_FIRST", "").strip() == "1"
                      and _proxy and hd_args and cookies_path)
 
+    # PLAIN ANONYMOUS FIRST — measured, 5-aug-2026.
+    #
+    # kaggle_download_probe.py ran every strategy end to end (real downloads,
+    # not metadata fetches) on Kaggle: plain anonymous with NO extractor args,
+    # no cookies and no proxy was the fastest success, and ios/tv_embed also
+    # passed. On a host whose IP is not flagged this is strictly the best path
+    # — nothing to expire, no PO-token sidecar, no proxy spend — and it was
+    # simply missing from this list.
+    #
+    # It stays first on flagged hosts too (the studio, most datacenters): there
+    # it fails in a couple of seconds on the bot wall and the existing
+    # ios-spoof/HD/fallback ladder takes over exactly as before. Cheap to try,
+    # and it removes the cookie dependency entirely wherever it works.
+    #
+    # Deliberately use_cookies=False: sending a STALE jar is worse than sending
+    # none, because an invalid session reads as more suspicious than an
+    # anonymous request (see the ios_spoof_args note above).
     attempts = (
-        [('ios-spoof', ios_spoof_args, fallback_fmt, None, False)]
+        [('anonymous', {}, fallback_fmt, None, False)]
+        + [('ios-spoof', ios_spoof_args, fallback_fmt, None, False)]
         + ([('HD-direct', hd_args, _hd_fmt_for(None), None, True)] if _direct_first else [])
         + ([('HD', hd_args, _hd_fmt_for(_proxy), _proxy, True)] if hd_args else [])
         + [('fallback', fallback_args, fallback_fmt, _proxy, True)]
