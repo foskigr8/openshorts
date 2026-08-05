@@ -2832,85 +2832,165 @@ def _extend_start_for_preceding_question(candidate, transcript_result,
             return
 
 
+def _build_word_list(transcript_result):
+    """Ground-truth word list used for snapping cut points. Built AFTER term
+    corrections so captions/snapping see the fixed spelling, not the ASR's
+    raw mishearing."""
+    words = []
+    for segment in transcript_result['segments']:
+        for word in segment.get('words', []):
+            words.append({'w': word['word'], 's': word['start'], 'e': word['end']})
+    return words
+
+
+def _vision_confirm_candidates(shorts, source_video_path, video_duration,
+                               transcript_result):
+    """Gemini Vision confirmation pass shared by every Stage 3 engine.
+
+    Each candidate gets a rough-cut upload + context/sync review (see
+    confirm_clip_with_vision). Returns the approved list, or None when every
+    candidate was rejected AND VISION_CONFIRM_FALLBACK=0 (the caller then
+    fails the job rather than shipping a clip we already know is bad).
+    """
+    if not source_video_path:
+        return shorts
+    pool = gemini_pool.pool_from_env()
+    if not pool:
+        return shorts
+    model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
+    print(f"👁️  Vision-confirming {len(shorts)} candidate(s) across a pool of {len(pool)} key(s)...")
+    approved_shorts = []
+    for s in shorts:
+        try:
+            approved = confirm_clip_with_vision(
+                pool, model_name, source_video_path, s, video_duration, transcript_result)
+        except gemini_worker.GeminiBlockedError as e:
+            print(f"🚫 Vision confirm blocked: {e} — dropping this candidate")
+            approved = False
+        if approved:
+            approved_shorts.append(s)
+        else:
+            print(f"   ✗ dropped candidate [{s.get('start', 0):.1f}s-{s.get('end', 0):.1f}s]: "
+                  f"{s.get('_rejection_reason', 'vision confirmation rejected it')}")
+    if not approved_shorts:
+        if os.environ.get("VISION_CONFIRM_FALLBACK", "1").strip().lower() in ("0", "false", "no"):
+            print("❌ Vision confirmation rejected every candidate — no clip had both a clean "
+                  "opening and an actual narrative payoff. Returning no clips for this video "
+                  "rather than one we already know is bad.")
+            return None
+        print("⚠️ Vision confirmation rejected every candidate, but VISION_CONFIRM_FALLBACK=1 "
+              "— shipping the picks anyway. The vision review stays in the log for "
+              "inspection; the user explicitly prefers clips over a zero-clip failure.")
+        return shorts
+    return approved_shorts
+
+
+def _snap_candidates(shorts, words, video_duration):
+    """Snap every clip's start/end onto real word boundaries. Long-context
+    segments get a higher floor so a full-arc candidate can't legally snap
+    down into short territory."""
+    for s in shorts:
+        is_long = s.get("clip_type") == "long_context"
+        ns, ne = snap_clip_to_words(
+            s.get("start", 0), s.get("end", 0), words, video_duration,
+            min_duration=45.0 if is_long else 15.0,
+            context_start=s.get("_context_start"))
+        s["start"], s["end"] = ns, ne
+        s.pop("_context_start", None)
+    return shorts
+
+
 def get_viral_clips(transcript_result, video_duration, source_video_path=None,
                     clip_count=None, long_context_count=0, style_variant="balanced"):
-    """Narrative-arc-aware clip selection.
+    """Stage 3 — viral moment selection, engine-selectable.
 
-    Tries DeepSeek first (deepseek_worker.deepseek_select_narrative_clips) if
-    DEEPSEEK_API_KEY is configured: a single-pass, full-transcript read that
-    traces a story to its actual resolution instead of scoring independent
-    90s windows — the old approach here had no concept of narrative closure
-    at all, so a hook spanning a window edge was silently truncated. Each
-    DeepSeek candidate then gets a Gemini Vision confirmation pass (if a
-    Gemini key pool is available) before word-snapping commits the final
-    boundaries — see confirm_clip_with_vision. Falls back to the original
-    Gemini 2-pass (score windows, then detail the shortlist) when DeepSeek
-    isn't configured or its call fails, so a self-hoster who hasn't set up
-    DeepSeek yet keeps working exactly as before. Cuts are snapped to word
-    boundaries either way so clips don't start/end mid-word.
+    Default (VIRAL_ENGINE=auto) runs the packaged viral-clip-finder skill
+    first — the structured judgment layer (15 frameworks, 8-axis rubric, 18
+    anti-patterns, niche playbooks) returning scored clips with cut briefs —
+    then falls back to the existing narrative-arc engine
+    (deepseek_worker.deepseek_select_narrative_clips → Gemini 2-pass) on any
+    failure so a provider hiccup can't zero out a job. VIRAL_ENGINE=skill
+    makes the skill a hard requirement; VIRAL_ENGINE=narrative restores the
+    pre-upgrade behavior exactly. Every engine's candidates pass through the
+    shared Gemini Vision confirmation + word-snapping tail, and optional
+    face-ID enrichment (FACE_ID_DB) upgrades the transcript to named-speaker
+    input for the skill.
     """
+    # Optional named-identity enrichment: renames anonymous diarized speaker
+    # labels where confident and hands the skill a Tier 3 input contract.
+    # Fails open — see face_id.py.
+    face_identities = None
+    if source_video_path and os.environ.get("FACE_ID_DB"):
+        try:
+            import face_id
+            transcript_result, face_identities = face_id.enrich_if_configured(
+                transcript_result, source_video_path)
+        except Exception as e:
+            print(f"⚠️ Face ID enrichment skipped ({type(e).__name__}: {e})")
+
+    engine = os.environ.get("VIRAL_ENGINE", "auto").strip().lower()
+    if engine in ("skill", "auto"):
+        try:
+            import viral_clip_finder
+            if viral_clip_finder.skill_available():
+                skill_result = viral_clip_finder.select_viral_clips(
+                    transcript_result, video_duration, clip_count=clip_count,
+                    long_context_count=long_context_count,
+                    style_variant=style_variant,
+                    face_identities=face_identities)
+                if skill_result and skill_result.get("clips"):
+                    # Same order the narrative engine uses: repair ASR
+                    # mishearings FIRST, then build the word list, so captions
+                    # and cut snapping both see the corrected spelling.
+                    if skill_result.get("term_corrections"):
+                        _apply_term_corrections(
+                            transcript_result, skill_result["term_corrections"])
+                    words = _build_word_list(transcript_result)
+                    shorts = skill_result["clips"]
+                    for s in shorts:
+                        _extend_start_for_preceding_question(s, transcript_result)
+                    shorts = _vision_confirm_candidates(
+                        shorts, source_video_path, video_duration, transcript_result)
+                    if shorts is None:
+                        return None
+                    _snap_candidates(shorts, words, video_duration)
+                    result = {"shorts": shorts,
+                              "rejected": skill_result.get("rejected", [])}
+                    if skill_result.get("cost_analysis"):
+                        result["cost_analysis"] = skill_result["cost_analysis"]
+                    return result
+                if engine == "skill":
+                    raise RuntimeError(
+                        "VIRAL_ENGINE=skill but the viral-clip-finder engine "
+                        "returned no clips (provider failure or empty result).")
+        except RuntimeError:
+            raise  # hard requirement — surface the real reason
+        except Exception as e:
+            if engine == "skill":
+                raise RuntimeError(
+                    f"VIRAL_ENGINE=skill failed ({type(e).__name__}: {e})") from e
+            print(f"⚠️ Viral Clip Finder engine failed ({type(e).__name__}: {e}) "
+                  "— falling back to the narrative engine.")
+
+    # --- Existing narrative-arc engine (unchanged behavior) ---
     deepseek_result = deepseek_worker.deepseek_select_narrative_clips(
         transcript_result, video_duration, clip_count=clip_count,
         long_context_count=long_context_count, style_variant=style_variant)
     if deepseek_result and deepseek_result.get("term_corrections"):
         _apply_term_corrections(transcript_result, deepseek_result["term_corrections"])
 
-    # Full word list — ground truth for snapping cut points, needed by both
-    # paths. Built AFTER term corrections so captions/snapping see the fixed
-    # spelling, not AssemblyAI's raw mishearing.
-    words = []
-    for segment in transcript_result['segments']:
-        for word in segment.get('words', []):
-            words.append({'w': word['word'], 's': word['start'], 'e': word['end']})
+    words = _build_word_list(transcript_result)
 
     if deepseek_result and deepseek_result.get("clips"):
         shorts = deepseek_result["clips"]
         for s in shorts:
             _extend_start_for_preceding_question(s, transcript_result)
 
-        if source_video_path:
-            pool = gemini_pool.pool_from_env()
-            if pool:
-                model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
-                print(f"👁️  Vision-confirming {len(shorts)} candidate(s) across a pool of {len(pool)} key(s)...")
-                approved_shorts = []
-                for s in shorts:
-                    try:
-                        approved = confirm_clip_with_vision(
-                            pool, model_name, source_video_path, s, video_duration, transcript_result)
-                    except gemini_worker.GeminiBlockedError as e:
-                        print(f"🚫 Vision confirm blocked: {e} — dropping this candidate")
-                        approved = False
-                    if approved:
-                        approved_shorts.append(s)
-                    else:
-                        print(f"   ✗ dropped candidate [{s.get('start', 0):.1f}s-{s.get('end', 0):.1f}s]: "
-                              f"{s.get('_rejection_reason', 'vision confirmation rejected it')}")
-                if not approved_shorts:
-                    if os.environ.get("VISION_CONFIRM_FALLBACK", "1").strip().lower() in ("0", "false", "no"):
-                        print("❌ Vision confirmation rejected every candidate — no clip had both a clean "
-                              "opening and an actual narrative payoff. Returning no clips for this video "
-                              "rather than one we already know is bad.")
-                        return None
-                    print("⚠️ Vision confirmation rejected every candidate, but VISION_CONFIRM_FALLBACK=1 "
-                          "— shipping the narrative picks anyway. The vision review stays in the log for "
-                          "inspection; the user explicitly prefers clips over a zero-clip failure.")
-                else:
-                    shorts = approved_shorts
-
-        for s in shorts:
-            # Long-context segments get a higher floor. With the shared 15s
-            # minimum, a full-arc candidate that lost a little at the edges
-            # could legally snap down into short territory — which is the
-            # "I asked for long clips and got short ones" complaint arriving
-            # by a second route, after the reviewer fix above.
-            is_long = s.get("clip_type") == "long_context"
-            ns, ne = snap_clip_to_words(
-                s.get("start", 0), s.get("end", 0), words, video_duration,
-                min_duration=45.0 if is_long else 15.0,
-                context_start=s.get("_context_start"))
-            s["start"], s["end"] = ns, ne
-            s.pop("_context_start", None)
+        shorts = _vision_confirm_candidates(
+            shorts, source_video_path, video_duration, transcript_result)
+        if shorts is None:
+            return None
+        _snap_candidates(shorts, words, video_duration)
         result = {"shorts": shorts}
         if deepseek_result.get("cost_analysis"):
             result["cost_analysis"] = deepseek_result["cost_analysis"]

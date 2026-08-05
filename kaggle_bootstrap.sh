@@ -124,6 +124,35 @@ if [ -n "${GEMINI_API_KEYS:-}" ]; then
 else
     echo "    GEMINI_API_KEYS: unset (single key; a quota hit stops the job)"
 fi
+# Stage 3 engine. The viral-clip-finder engine ships its methodology as
+# markdown files next to the code; if the clone is missing them (a partial
+# checkout, or a .gitignore that swallowed the folder) the engine reports
+# itself unavailable and the job quietly drops back to the older narrative
+# path — a silent quality regression that looks like a working run. Say so
+# here instead, while someone is still reading the output.
+VIRAL_ENGINE="${VIRAL_ENGINE:-auto}"
+export VIRAL_ENGINE
+echo "    VIRAL_ENGINE: $VIRAL_ENGINE"
+if [ -f viral_clip_finder_skill/SKILL.md ]; then
+    echo "    viral-clip-finder skill: present ($(ls viral_clip_finder_skill/references/*.md 2>/dev/null | wc -l) reference docs)"
+else
+    echo "    viral-clip-finder skill: MISSING viral_clip_finder_skill/SKILL.md"
+    if [ "$VIRAL_ENGINE" = "skill" ]; then
+        echo "    -> VIRAL_ENGINE=skill cannot run without it. Jobs will fail."
+    else
+        echo "    -> Stage 3 will fall back to the narrative engine (older, weaker selection)."
+    fi
+fi
+# The narrative engine is Gemini-only via its OWN key and has no fallback to
+# GEMINI_API_KEY (deepseek_worker._narrative_provider_candidates). Unset, it
+# contributes nothing — worth knowing, because "auto" then has no safety net
+# under the skill engine.
+if [ -n "${NARRATIVE_GEMINI_API_KEY:-}" ]; then
+    echo "    NARRATIVE_GEMINI_API_KEY: set (narrative fallback available)"
+else
+    echo "    NARRATIVE_GEMINI_API_KEY: unset — the narrative fallback is inert;"
+    echo "      the skill engine runs on GEMINI_API_KEY and is the only Stage 3 path"
+fi
 # Transcription backend. Setting ASSEMBLYAI_API_KEY alone does NOTHING —
 # transcribe_backends.py:591 picks the backend from TRANSCRIBE_BACKEND, which
 # defaults to "whisper". Measured on Kaggle 5-aug-2026: the local whisper path

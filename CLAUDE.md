@@ -55,10 +55,69 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 | `s3_uploader.py` | AWS S3 upload with caching |
 | `subtitles.py` | SRT generation, FFmpeg subtitle burning, and dubbed video transcription |
 | `translate.py` | ElevenLabs dubbing API for AI voice translation |
+| `viral_clip_finder.py` | Stage 3 judgment engine: the viral-clip-finder skill (15 frameworks, 8-axis rubric, 18 anti-patterns, niche playbooks) as a schema-enforced LLM call returning scored clips with cut briefs + rejected candidates |
+| `face_id.py` | Optional named-identity enrichment (InsightFace known-faces DB) that upgrades the transcript to named-speaker input for the skill; fails open |
+| `viral_clip_finder_skill/` | Bundled skill package (SKILL.md + references) consumed by `viral_clip_finder.py` |
 | `dashboard/src/App.jsx` | Main React component with state management |
 | `dashboard/src/components/TranslateModal.jsx` | Voice dubbing UI with language selection |
 | `dashboard/vite-plugin-seo.js` | Build-time SEO surface: injects crawler-visible homepage content, emits static pages, sitemap.xml and llms.txt |
 | `dashboard/seo/data.js` | Single source of truth for pricing, pipeline and competitor facts used by every generated page |
+
+### Viral Clip Finder (Stage 3 engine)
+
+Stage 3 ("find viral moments") is engine-selectable via `VIRAL_ENGINE`:
+
+- `auto` (default): the viral-clip-finder skill runs first; the existing
+  narrative-arc engine (deepseek_worker → Gemini 2-pass) is the fallback on
+  any provider failure, so a hiccup can't zero out a job.
+- `skill`: the skill is a hard requirement — failure fails the job loudly.
+- `narrative`: the pre-upgrade behavior exactly.
+
+Every engine's candidates pass through the shared Gemini Vision confirmation
+and word-snapping tail (`_vision_confirm_candidates` / `_snap_candidates` in
+`main.py`), so the cut/reframe/subtitle stages are unchanged. The skill's
+extra fields (score, patterns, risk flags, cold-open, caption text, B-roll
+cues, cut list) ride along in `metadata.json` for the dashboard and editors.
+
+**Both engines emit the same clip contract**, and that is load-bearing:
+
+- `keep_spans` is a list of `{"start": float, "end": float}` **dicts**
+  (`deepseek_worker.KeepSpan`). Every consumer in `main.py` reads them with
+  `span.get("start")`. Emitting `[start, end]` pairs instead raises
+  `AttributeError` inside `_extend_keep_spans_to_cover_boundaries` — which is
+  swallowed by the engine's fallback and shows up as "the skill engine never
+  runs", not as an error. `tests/test_viral_clip_finder.py` pins this against
+  the real functions compiled out of `main.py`.
+- `narrative_summary` is what `confirm_clip_with_vision` shows the vision
+  judge; the skill path aliases `why_it_hits` onto it. Without it the judge
+  reviews clips with no idea what they are supposed to resolve.
+- `term_corrections` (ASR mishearings) must be applied **before** the word
+  list is built, or captions render the misheard spelling.
+
+Env vars:
+
+- `VIRAL_ENGINE` — `auto` | `skill` | `narrative` (default `auto`)
+- `VCF_ALLOW_DEEPSEEK` — `1` opts DeepSeek's own API back into the provider
+  chain (default: Gemini only, matching the existing narrative engine)
+- `VCF_LONG_FORM_REFS` — always include the seamless-cutting reference
+  (default: only when long-context clips are requested)
+- `VCF_REFERENCES` — `full` (default) | `lean` | explicit `a.md,b.md` list.
+  The full set is ~124KB (~35k tokens) prepended to every Stage 3 call; that
+  breadth is the point, `lean` trades it for cost/latency.
+
+Note the two engines resolve keys differently: the narrative engine is
+`NARRATIVE_GEMINI_API_KEY`-only and is **inert without it** (so it cannot act
+as the `auto` safety net), while the skill engine falls back to
+`GEMINI_API_KEY`. On Kaggle only the latter is set by default, so the skill
+engine is the sole Stage 3 path there — `kaggle_bootstrap.sh` prints which.
+- `FACE_ID_DB` — path to a folder of `{name}.jpg` headshots; activates the
+  optional named-identity enrichment layer (`FACE_ID_MODEL`, `FACE_ID_CTX`,
+  `FACE_ID_SAMPLE_FPS`, `FACE_ID_THRESHOLD`, `FACE_ID_MIN_COVERAGE`,
+  `FACE_ID_MIN_TURNS_S`, `FACE_ID_MAX_SECONDS` tune it). Fails open —
+  anonymous speakers are used when InsightFace is missing, the DB is empty, or
+  nothing matches. `enrich_if_configured` returns the `{label: name}` mapping
+  (not the trajectory) because that is what the skill's transcript formatter
+  looks speakers up in.
 
 ### SEO / AI-crawler surface
 
