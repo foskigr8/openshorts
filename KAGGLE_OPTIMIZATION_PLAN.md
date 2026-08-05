@@ -108,7 +108,19 @@ job form without entering anything.
 
 ---
 
-## FINDING 3 — persistent storage: use Cloudflare R2 now, HuggingFace later
+## FINDING 3 — persistent storage — SUPERSEDED, see PLAN_CAPTIONS_AND_STORAGE.md
+
+**This section recommended Cloudflare R2 and that recommendation is withdrawn.**
+R2 requires a credit card, which the owner does not want to provide. The
+replacement decision is **HuggingFace Hub** — no card, and `HF_TOKEN` is already
+a configured Kaggle secret. Full plan and setup steps in
+`PLAN_CAPTIONS_AND_STORAGE.md`.
+
+The R2 reasoning below is kept only because the *diagnosis* underneath it still
+holds — per-job-end uploading, silent failures, and no recorded URL are real
+defects regardless of which backend is used.
+
+### (withdrawn) original R2 recommendation
 
 The owner asked for a decision between HuggingFace Hub and Cloudflare. Here is
 the reasoning, not just the answer.
