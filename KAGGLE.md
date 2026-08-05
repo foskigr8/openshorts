@@ -143,6 +143,23 @@ measured passing. So the default path is already the right one for Kaggle.
 4. **SABR warnings are normal.** `Some tv client https formats have been
    skipped… SABR-only streaming experiment` is expected; the download path
    falls through `tv_embed → android → mweb → web`, then an iOS spoof.
-5. **Kaggle's base image owns torch/opencv/numpy.** The bootstrap deliberately
+5. **protobuf: mediapipe and Kaggle's TensorFlow cannot both be satisfied.**
+   Kaggle ships TensorFlow whose generated `*_pb2.py` need `protobuf >= 5.27`
+   (when `runtime_version` appeared); mediapipe pins `protobuf < 5`. Installing
+   mediapipe downgrades protobuf and breaks TF, and since mediapipe imports
+   `tasks.python -> tensorflow`, `import mediapipe` then dies with
+   `ImportError: cannot import name 'runtime_version'`. That killed the first
+   Kaggle job (5-aug-2026).
+
+   The bootstrap repairs this by **removing TensorFlow**, which is safe and not
+   a hack: this pipeline has no TensorFlow import anywhere, it is not in
+   `requirements.txt`, and the working Docker image has no TF at all — verified
+   there, `mediapipe 0.10.14` imports against `protobuf 4.25.9`. Scene
+   detection (TransNetV2) runs on torch, not TF.
+
+   The repair retests the import after each remedy rather than trusting a
+   version pin guessed from outside Kaggle — guessing pins is what caused this.
+
+6. **Kaggle's base image owns torch/opencv/numpy.** The bootstrap deliberately
    holds those back from `requirements.txt` — reinstalling them is slow and can
    break the image's CUDA build.

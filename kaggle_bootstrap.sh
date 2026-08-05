@@ -38,6 +38,46 @@ if [ "${SKIP_INSTALL:-0}" != "1" ]; then
         requirements.txt > /tmp/req-kaggle.txt || cp requirements.txt /tmp/req-kaggle.txt
     pip install -q -r /tmp/req-kaggle.txt 2>&1 | tail -5 || {
         echo "    pip install reported errors — continuing, but expect import failures"; }
+    # protobuf conflict repair.
+    #
+    # Kaggle's image ships TensorFlow whose generated *_pb2.py files require
+    # protobuf >= 5.27 (that is when `runtime_version` appeared). mediapipe
+    # pins protobuf < 5, so installing it downgrades protobuf and BREAKS
+    # TensorFlow. mediapipe then imports tasks.python -> tensorflow ->
+    # ImportError: cannot import name 'runtime_version' from 'google.protobuf'
+    # — which is what killed the first Kaggle job (5-aug-2026).
+    #
+    # The two packages cannot both be satisfied, so one has to go. This
+    # pipeline does not use TensorFlow at all (torch does the ML work), and
+    # mediapipe only touches it for doc annotations, so removing TF is the
+    # cheap resolution. Remedies are applied in order and IMPORT IS RETESTED
+    # after each, because the right fix depends on the image version and
+    # guessing a pin from outside Kaggle is how this broke in the first place.
+    say "Checking mediapipe imports"
+    _mp_ok() { python3 -c "import mediapipe" >/dev/null 2>&1; }
+    if ! _mp_ok; then
+        echo "    mediapipe import failed — attempting repair"
+        _err=$(python3 -c "import mediapipe" 2>&1 | tail -1)
+        echo "    $_err"
+        if echo "$_err" | grep -q "runtime_version\|protobuf"; then
+            echo "    remedy 1/2: removing tensorflow (unused by this pipeline)"
+            pip uninstall -y -q tensorflow tensorflow-cpu tensorflow-gpu 2>/dev/null || true
+        fi
+        if ! _mp_ok; then
+            echo "    remedy 2/2: reinstalling mediapipe against the current protobuf"
+            pip install -q --force-reinstall --no-deps mediapipe 2>&1 | tail -2 || true
+            pip install -q "protobuf<5" 2>&1 | tail -2 || true
+        fi
+        if _mp_ok; then
+            echo "    repaired: mediapipe imports"
+        else
+            echo "    STILL BROKEN — face detection will not work. Last error:"
+            python3 -c "import mediapipe" 2>&1 | tail -3
+        fi
+    else
+        echo "    mediapipe imports"
+    fi
+
     python3 - <<'PY'
 import importlib
 for m in ("fastapi", "uvicorn", "yt_dlp", "mediapipe", "ultralytics", "torch"):
