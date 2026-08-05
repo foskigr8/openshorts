@@ -124,7 +124,23 @@ if [ -n "${GEMINI_API_KEYS:-}" ]; then
 else
     echo "    GEMINI_API_KEYS: unset (single key; a quota hit stops the job)"
 fi
-[ -n "${ASSEMBLYAI_API_KEY:-}" ] && echo "    ASSEMBLYAI_API_KEY: set" || echo "    ASSEMBLYAI_API_KEY: unset (falls back to faster-whisper, no diarization)"
+# Transcription backend. Setting ASSEMBLYAI_API_KEY alone does NOTHING —
+# transcribe_backends.py:591 picks the backend from TRANSCRIBE_BACKEND, which
+# defaults to "whisper". Measured on Kaggle 5-aug-2026: the local whisper path
+# took 254s of a ~420s job AND produced no diarization, which costs
+# subject_policy its TIER_DIARIZED evidence entirely (that run's framing line
+# read "lip-sync 97%, directed 3%" with diarized at 0%). On multi-speaker
+# footage that is the signal that stops the camera sitting on the wrong person.
+if [ -n "${ASSEMBLYAI_API_KEY:-}" ]; then
+    export TRANSCRIBE_BACKEND="${TRANSCRIBE_BACKEND:-assemblyai}"
+    echo "    ASSEMBLYAI_API_KEY: set — TRANSCRIBE_BACKEND=$TRANSCRIBE_BACKEND (API + diarization)"
+else
+    echo "    ASSEMBLYAI_API_KEY: unset — local whisper (~254s measured, and NO diarization)"
+fi
+# Authenticates model downloads from the HuggingFace Hub. Only matters on the
+# whisper fallback path, which fetches its model from HF; unauthenticated
+# requests are rate-limited and slower.
+[ -n "${HF_TOKEN:-}" ] && echo "    HF_TOKEN: set" || echo "    HF_TOKEN: unset (HF downloads rate-limited)"
 if [ -n "${YOUTUBE_COOKIES:-}" ] && [ ! -s cookies.txt ]; then
     printf '%s' "$YOUTUBE_COOKIES" > cookies.txt
     echo "    cookies.txt: written from YOUTUBE_COOKIES ($(wc -c < cookies.txt) bytes)"
