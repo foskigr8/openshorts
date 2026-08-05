@@ -97,15 +97,43 @@ This is **not yet implemented** — `app.py`'s queue is single-process. Worth
 doing only after the single-GPU path is confirmed working, because one T4
 already removes most of the wall-clock pain.
 
+## Downloads: Kaggle does NOT need cookies
+
+Measured on Kaggle with `kaggle_download_probe.py` (5-aug-2026), real 5-second
+downloads, not metadata fetches:
+
+    [PASS] anonymous (default clients)      0.2 MB in 6s
+    [PASS] anonymous + ios client           0.1 MB in 4s
+    [PASS] anonymous + tv_embed             0.1 MB in 5s
+    [FAIL] anonymous + web_safari+fetch_pot  "This video is DRM protected"
+    [PASS] cookies (cookies.txt)            0.2 MB in 5s
+    [FAIL] cookies + web_safari+fetch_pot    "This video is DRM protected"
+
+**Kaggle's IP is not flagged.** This is the opposite of the studio, where an
+unauthenticated request hits the bot wall immediately, and it is a much better
+position: nothing expires, so there is no 3-hour cookie clock to manage.
+
+Two things follow:
+
+1. **`YOUTUBE_COOKIES` is optional on Kaggle.** Set it only if you hit a
+   region- or age-restricted video, which genuinely needs a signed-in session.
+2. **The "DRM protected" failures are not DRM.** That is what a `web`-family
+   client reports when it cannot produce a PO token. Those two strategies are
+   exactly the ones needing the `bgutil-pot` sidecar, which does not exist on
+   Kaggle (`BGUTIL_BASE_URL` is unset there). Nothing to fix — the pipeline
+   skips its PO-token attempts automatically when that variable is absent.
+
+The pipeline's own first attempt (`main.py`, the `attempts` list) is
+`ios-spoof` with **no cookies and no proxy** — the same strategy the probe
+measured passing. So the default path is already the right one for Kaggle.
+
 ## Known sharp edges
 
-1. **Cookies expire in about 3 hours.** Measured on 4-aug-2026: a jar that
-   downloaded fine at 17:38 was rejected by 20:43 with *"Sign in to confirm
-   you're not a bot"*. Locally an auto-refresh loop drives a headless Chrome to
-   renew them; **that loop cannot run on Kaggle**. So a long session will lose
-   YouTube access partway through, and the fix is to re-paste the secret. This
-   is the weakest part of the whole setup — plan around it (upload sources as a
-   Kaggle Dataset for long runs).
+1. **Cookies expire in about 3 hours — but Kaggle does not need them.**
+   Measured on the studio 4-aug-2026: a jar that downloaded fine at 17:38 was
+   rejected by 20:43. The headless-Chrome refresh loop cannot run on Kaggle. If
+   you do set `YOUTUBE_COOKIES` (only needed for restricted videos), expect it
+   to go stale mid-session; the anonymous path has no such clock, so prefer it.
 2. **`cookie_health.py` is a structural check, not a functional one.** It
    verifies cookie *names* are present and will happily report `OK` for a jar
    YouTube rejects. To actually test:
