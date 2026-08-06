@@ -37,56 +37,39 @@ if [ "${SKIP_INSTALL:-0}" != "1" ]; then
     grep -vE '^(torch|torchvision|torchaudio|opencv|numpy|scipy)([=<>~!]|$)' \
         requirements.txt > /tmp/req-kaggle.txt || cp requirements.txt /tmp/req-kaggle.txt
     # Those lines are stripped because Kaggle's image already has them built
-    # against its own CUDA — but stripping them also removes requirements.txt's
-    # `numpy<2` GUARD, and a TRANSITIVE dependency can still drag numpy 2.x in.
-    # Measured 6-aug-2026: insightface unconstrained resolves to numpy 2.5.1 +
-    # opencv-python-headless 5.x, which breaks mediapipe, ultralytics and the
-    # rest of Kaggle's preinstalled stack. So pin the held-back packages to the
-    # versions ALREADY on this host and make pip resolve around them.
-    python3 - <<'PYPIN' > /tmp/constraints-kaggle.txt || true
-for name, mod in (("numpy", "numpy"), ("scipy", "scipy"),
-                  ("opencv-python", "cv2"), ("pandas", "pandas")):
+    # against Kaggle's own CUDA — which also drops requirements.txt's opencv
+    # caps. Put the caps back: insightface pulls albumentations -> albucore,
+    # which wants the newest opencv, and opencv 5.x is what drags a numpy
+    # major-version jump behind it.
+    #
+    # CAPS, not pinned versions. An exact pin has to match a release that
+    # actually exists on PyPI, and the obvious way to build one is wrong:
+    # cv2.__version__ reports "4.13.0" while the distribution is "4.13.0.x", so
+    # `opencv-python==4.13.0` is unsatisfiable — and an unsatisfiable pin is
+    # ResolutionImpossible, meaning NOTHING installs. Measured on the host
+    # 6-aug-2026: no yt-dlp, no ultralytics, no mediapipe. A cap is satisfied by
+    # whatever is already installed, so pip simply leaves it alone.
+    printf 'opencv-python<5\nopencv-contrib-python<5\nopencv-python-headless<5\n' \
+        >> /tmp/req-kaggle.txt
+    if pip install -q -r /tmp/req-kaggle.txt 2>/tmp/pip-err.log; then
+        echo "    dependencies installed"
+    else
+        echo "    pip install reported errors:"
+        grep -iE "conflict is caused by|depends on|The user requested|ResolutionImpossible|ERROR" \
+            /tmp/pip-err.log | head -8 | sed 's/^/      /' || true
+        echo "    continuing — the import checks below say what actually survived"
+    fi
+
+    # Report the versions that actually matter, without asserting a major
+    # version: this host ships numpy 2.0.2 and mediapipe 0.10.14 works on it.
+    # The real signal is whether the imports below succeed, not a number.
+    python3 - <<'PYVER' || true
+for mod in ("numpy", "cv2"):
     try:
-        m = __import__(mod)
-        print(f"{name}=={m.__version__}")
-    except Exception:
-        pass
-PYPIN
-    echo "    holding these at the versions Kaggle already ships:"
-    sed 's/^/      /' /tmp/constraints-kaggle.txt || true
-    pip install -q -c /tmp/constraints-kaggle.txt -r /tmp/req-kaggle.txt 2>&1 | tail -5 || {
-        echo "    pip install reported errors — continuing, but expect import failures"; }
-    # protobuf conflict repair.
-    #
-    # Kaggle's image ships TensorFlow whose generated *_pb2.py files require
-    # protobuf >= 5.27 (that is when `runtime_version` appeared). mediapipe
-    # pins protobuf < 5, so installing it downgrades protobuf and BREAKS
-    # TensorFlow. mediapipe then imports tasks.python -> tensorflow ->
-    # ImportError: cannot import name 'runtime_version' from 'google.protobuf'
-    # — which is what killed the first Kaggle job (5-aug-2026).
-    #
-    # The two packages cannot both be satisfied, so one has to go. This
-    # pipeline does not use TensorFlow at all (torch does the ML work), and
-    # mediapipe only touches it for doc annotations, so removing TF is the
-    # cheap resolution. Remedies are applied in order and IMPORT IS RETESTED
-    # after each, because the right fix depends on the image version and
-    # guessing a pin from outside Kaggle is how this broke in the first place.
-    # NOTE: every command in this block is guarded with `|| true`.
-    # The script runs under `set -euo pipefail`, and the whole point here is to
-    # run commands that FAIL — probing a broken import, uninstalling a package
-    # that may not be present. Without the guards, `set -e` kills the script on
-    # the first probe and the repair silently never runs, which is exactly what
-    # happened on the first attempt (5-aug-2026): output stopped dead after
-    # "attempting repair" with no error shown.
-    # The guard is only worth having if it is checked. A numpy 2.x bump breaks
-    # mediapipe/ultralytics in ways that surface much later as a failed render.
-    _np=$(python3 -c "import numpy;print(numpy.__version__)" 2>/dev/null || echo "missing")
-    case "$_np" in
-        1.*) echo "    numpy $_np — guard held" ;;
-        *)   echo "    !! numpy is $_np — something upgraded it past the <2 guard."
-             echo "       mediapipe/ultralytics will misbehave. Fix before rendering:"
-             echo "       pip install 'numpy<2'" ;;
-    esac
+        print(f"    {mod} {__import__(mod).__version__}")
+    except Exception as e:
+        print(f"    {mod} MISSING ({type(e).__name__})")
+PYVER
 
     say "Checking mediapipe imports"
     _mp_ok() { python3 -c "import mediapipe" >/dev/null 2>&1; }

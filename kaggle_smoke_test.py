@@ -91,10 +91,14 @@ def _transcription():
     Local whisper cost 254s of a ~420s job in the measured run AND produced no
     diarization, which is subject_policy's TIER_DIARIZED framing evidence.
     """
-    out = subprocess.run(
+    # LAST line only: _select_backend() prints its own explanation to stdout
+    # when it auto-selects, so the naive read captured the log line plus the
+    # answer and matched neither.
+    stdout = subprocess.run(
         [sys.executable, "-c",
          "import transcribe_backends as t;print(t._select_backend())"],
         capture_output=True, text=True, cwd=REPO_DIR).stdout.strip()
+    out = stdout.splitlines()[-1].strip() if stdout else ""
     if out == "assemblyai":
         return True, "assemblyai (API, with diarization)"
     if os.environ.get("ASSEMBLYAI_API_KEY"):
@@ -147,12 +151,26 @@ def _youtube():
     cookie_health.py only checks that cookie NAMES exist and reports OK for a
     jar YouTube rejects, so it is deliberately not used here.
     """
-    r = subprocess.run(
-        ["yt-dlp", "--cookies", "cookies.txt", "--skip-download",
-         "--print", "%(title)s", "https://youtu.be/ua9Z0Lq3QVA"],
-        capture_output=True, text=True, timeout=120, cwd=REPO_DIR)
+    # `python -m yt_dlp`, not the console script: the script is not always on
+    # PATH (it was missing on the Kaggle host even with the package installed).
+    cmd = [sys.executable, "-m", "yt_dlp", "--skip-download",
+           "--print", "%(title)s", "https://youtu.be/ua9Z0Lq3QVA"]
+    have_cookies = os.path.exists(os.path.join(REPO_DIR, "cookies.txt"))
+    if have_cookies:
+        cmd[3:3] = ["--cookies", "cookies.txt"]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
+                       cwd=REPO_DIR)
     title = (r.stdout or "").strip().splitlines()[-1] if r.stdout.strip() else ""
-    return bool(title), title or (r.stderr or "").strip()[-200:]
+    if title:
+        how = "with cookies" if have_cookies else "anonymously (no cookie jar needed)"
+        return True, f"{title} — fetched {how}"
+    # Measured 5-aug-2026: Kaggle's IP is not flagged and downloads fine with no
+    # cookies at all, so a missing jar is only worth reporting if the fetch
+    # ALSO failed — which is the case here.
+    detail = (r.stderr or "").strip()[-200:]
+    if not have_cookies:
+        detail += " (no cookies.txt; paste YOUTUBE_COOKIES if the IP is flagged)"
+    return False, detail
 
 
 def _face_id():
@@ -210,8 +228,13 @@ def main():
     if failed:
         print("\nFailed: " + ", ".join(failed))
         if "YouTube + cookies" in failed:
-            print("  YouTube: the jar expired (~3h lifetime). Re-paste "
-                  "YOUTUBE_COOKIES from a fresh local cookies.txt.")
+            if not os.path.exists(os.path.join(REPO_DIR, "cookies.txt")):
+                print("  YouTube: no cookies.txt. Kaggle usually downloads fine "
+                      "without one — if this failed for another reason, read the "
+                      "detail above before adding YOUTUBE_COOKIES.")
+            else:
+                print("  YouTube: the jar expired (~3h lifetime). Re-paste "
+                      "YOUTUBE_COOKIES from a fresh local cookies.txt.")
         if "Persistent storage" in failed:
             print("  Storage: see PLAN_CAPTIONS_AND_STORAGE.md for the "
                   "HF_TOKEN / HF_STORAGE_REPO setup (no credit card needed).")
