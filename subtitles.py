@@ -656,9 +656,11 @@ def generate_ass(transcript, clip_start, clip_end, output_path,
                     else:
                         parts.append(text)
 
-            # Per-line MarginV override: only meaningful for bottom alignment,
-            # where MarginV is measured up from the frame's bottom edge.
-            line_margin_v = general_margin_v if (ass_alignment == 2 and _in_general_range(ev_start)) else 0
+            # Per-line MarginV override for top/bottom alignment within the content box
+            if ass_alignment in (2, 8):
+                line_margin_v = general_margin_v if (_in_general_range(ev_start) or not general_ranges) else int(_clamp_number(margin_v, 0, 200, SAFE_MARGIN_V))
+            else:
+                line_margin_v = int(_clamp_number(margin_v, 0, 200, 0))
 
             events.append(
                 f"Dialogue: 0,{_ass_time(ev_start)},{_ass_time(ev_end)},Default,,0,0,{line_margin_v},,{' '.join(parts)}"

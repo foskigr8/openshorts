@@ -490,6 +490,17 @@ class TestSpeakerColors:
         content = out.read_text(encoding="utf-8-sig")
         assert "&H00FFFFFF" in content  # pure white, no dimming
 
+    def test_caption_positions_set_correct_ass_alignment_and_margin(self, tmp_path):
+        from subtitles import generate_ass
+        for pos, expected_align in [("bottom", "2"), ("middle", "5"), ("top", "8")]:
+            out = tmp_path / f"subs_{pos}.ass"
+            words = [_w(" test", 0.0, 0.5)]
+            assert generate_ass(self._transcript(words), 0, 10, str(out),
+                                alignment=pos) is True
+            content = out.read_text(encoding="utf-8-sig")
+            # Style header contains Alignment field (e.g. 0,2,10,10 for bottom, 0,5,10,10 for middle, 0,8,10,10 for top)
+            assert f",0,{expected_align},10,10," in content
+
 
 class TestBurnFilterFonts:
     """The ffmpeg filter must point libass at the bundled fonts dir — without
