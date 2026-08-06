@@ -268,7 +268,7 @@ def video_encode_args(tier=QUALITY):
     if tier not in _X264_ARGS:
         raise ValueError(f"Unknown encode tier: {tier!r}")
 
-    mode = os.environ.get("FFMPEG_ENCODER", "x264").strip().lower()
+    mode = os.environ.get("FFMPEG_ENCODER", "auto").strip().lower()
     use_nvenc = False
     if mode in ("nvenc", "auto"):
         use_nvenc = nvenc_available()
