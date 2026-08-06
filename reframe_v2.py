@@ -27,6 +27,7 @@ import tempfile
 import time
 import threading
 import face_id
+import gpu_affinity
 
 from ffmpeg_utils import (video_encode_args, gpu_decode_args,
                           gpu_render_available, QUALITY_FAST, METADATA_SCRUB)
@@ -3001,6 +3002,11 @@ def render(input_video, final_output_video, aspect_ratio,
 
     print("   🚀 Reframe engine v2 (ffmpeg-native render)")
     supersample = max(1, int(os.environ.get("CROP_SUPERSAMPLE", "1")))
+    # PART 2 (6-aug-2026): this render runs on a clip-worker thread; its
+    # assigned GPU (gpu_affinity, CLIP_GPUS) must be the ffmpeg device too,
+    # or every worker's decode/encode/filters pile onto cuda:0 and the second
+    # T4 stays idle for the ffmpeg stage.
+    worker_gpu = gpu_affinity.current_device()
     scenes, fps = m.detect_scenes(input_video)
     fps = float(fps)  # PySceneDetect can hand back a Fraction
     orig_w, orig_h = m.get_video_resolution(input_video)
@@ -3275,7 +3281,8 @@ def render(input_video, final_output_video, aspect_ratio,
             try:
                 _run([
                     "ffmpeg", "-y", "-loglevel", "error",
-                    *gpu_decode_args(output_format=True), "-i", input_video,
+                    *gpu_decode_args(device=worker_gpu, output_format=True),
+                    "-i", input_video,
                     "-filter_complex", gpu_graph, "-map", "[v]", "-map", "0:a?",
                     *video_encode_args(QUALITY_FAST), "-c:a", "copy",
                     *METADATA_SCRUB, "-movflags", "+faststart",
@@ -3288,7 +3295,7 @@ def render(input_video, final_output_video, aspect_ratio,
         if not use_gpu_graph:
             _run([
                 "ffmpeg", "-y", "-loglevel", "error",
-                *gpu_decode_args(), "-i", input_video,
+                *gpu_decode_args(device=worker_gpu), "-i", input_video,
                 "-filter_complex", graph, "-map", "[v]", "-map", "0:a?",
                 *video_encode_args(QUALITY_FAST), "-c:a", "copy",
                 *METADATA_SCRUB,

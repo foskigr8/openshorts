@@ -37,6 +37,47 @@ _TN2_LOCK = threading.Lock()
 _tn2_model = None
 
 
+class _model_device_guard:
+    """Run torch inference on the MODEL's device, then restore the thread's
+    previous current device (6-aug-2026).
+
+    Clip workers get a thread-local torch device via gpu_affinity (cuda:1 for
+    half of them), but the shared TransNetV2 model lives on the device it was
+    loaded on. Ops inside the forward pass that create tensors without an
+    explicit device use the thread's CURRENT device — so a cuda:1 worker
+    feeding the cuda:0 model died with "Expected all tensors to be on the
+    same device" and silently degraded every 2×T4 run to PySceneDetect. This
+    guard pins the current device to the model's for the duration of the
+    call and restores it afterwards, so scene detection is correct no matter
+    which GPU the worker was assigned.
+    """
+
+    def __init__(self, model_device):
+        self.model_device = model_device
+        self.prev = None
+
+    def __enter__(self):
+        try:
+            import torch
+            if torch.cuda.is_available():
+                self.prev = torch.cuda.current_device()
+                dev = torch.device(self.model_device)
+                if dev.type == "cuda":
+                    torch.cuda.set_device(dev)
+        except Exception:
+            self.prev = None
+        return self
+
+    def __exit__(self, *exc):
+        if self.prev is not None:
+            try:
+                import torch
+                torch.cuda.set_device(self.prev)
+            except Exception:
+                pass
+        return False
+
+
 def detect_scenes(video_path):
     """Detect scenes. Returns (scene_list, fps) where scene_list is a list of
     (FrameTimecode, FrameTimecode) pairs — the same contract PySceneDetect's
@@ -105,7 +146,7 @@ def _detect_transnetv2(video_path):
     model = _get_tn2_model()
     threshold = float(os.environ.get("TRANSNETV2_THRESHOLD", "0.5"))
 
-    with _TN2_LOCK, torch.no_grad():
+    with _TN2_LOCK, torch.no_grad(), _model_device_guard(model.device):
         tensor = torch.from_numpy(np.ascontiguousarray(frames)).to(model.device)
         single_frame_pred, _ = model.predict_frames(tensor, quiet=True)
 

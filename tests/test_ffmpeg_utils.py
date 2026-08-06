@@ -88,6 +88,16 @@ def test_gpu_decode_args_offloads_decode_when_probe_passes(monkeypatch):
     assert gpu_decode_args(device=1) == [
         "-hwaccel", "cuda", "-extra_hw_frames", "16",
         "-hwaccel_device", "1"]
+    assert gpu_decode_args(device="cuda:1") == [
+        "-hwaccel", "cuda", "-extra_hw_frames", "16",
+        "-hwaccel_device", "1"]
+
+
+def test_gpu_decode_args_pins_output_format_and_device_together(monkeypatch):
+    monkeypatch.setattr(ffmpeg_utils, "_probe_gpu_render", lambda: True)
+    assert gpu_decode_args(device="cuda:0", output_format=True) == [
+        "-hwaccel", "cuda", "-extra_hw_frames", "16",
+        "-hwaccel_output_format", "cuda", "-hwaccel_device", "0"]
 
 
 def test_gpu_render_zero_disables_without_probing(monkeypatch):

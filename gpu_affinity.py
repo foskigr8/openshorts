@@ -13,7 +13,10 @@ explicit device string handed to the torch code that accepts one (LR-ASD).
 
 **What this does and does not parallelize.** LR-ASD is the torch workload
 inside a clip render (20-34s of a 94-110s clip in the measured run) and it does
-shard. MediaPipe and YOLO detection stay on the default device: they run under
+shard. FFmpeg decode/encode now follows the worker's device too (the reframe,
+clip-cut and caption-burn call sites pass gpu_affinity.current_device() into
+`-hwaccel_device`), so the second GPU is used for the ffmpeg stage as well.
+MediaPipe and YOLO detection stay on the default device: they run under
 main.py's global DETECT_LOCK because the graph and the model are not
 thread-safe, so they are serialized regardless of how many GPUs exist —
 sharding them would mean a model instance per device, which is a bigger change
@@ -125,6 +128,7 @@ def describe():
     devices = available_devices()
     if len(devices) > 1:
         return (f"🎛️  Clip workers will spread across {len(devices)} GPUs "
-                f"({', '.join('cuda:%d' % d for d in devices)}) — LR-ASD is the "
-                "sharded stage; detection stays serialized on the default device.")
+                f"({', '.join('cuda:%d' % d for d in devices)}) — LR-ASD and "
+                "ffmpeg decode/encode follow the worker device; detection "
+                "stays serialized on the default device.")
     return ""

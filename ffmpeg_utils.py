@@ -209,7 +209,11 @@ def gpu_decode_args(device=None, output_format=False):
     if output_format:
         args += ["-hwaccel_output_format", "cuda"]
     if device is not None:
-        args += ["-hwaccel_device", str(device)]
+        # Accept either an int (0/1) or gpu_affinity's "cuda:N" string.
+        if isinstance(device, str) and device.lower().startswith("cuda:"):
+            args += ["-hwaccel_device", device.split(":", 1)[1]]
+        else:
+            args += ["-hwaccel_device", str(device)]
     return args
 
 

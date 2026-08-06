@@ -38,6 +38,15 @@ if [ "${GPU_COUNT:-0}" -gt 0 ]; then
     echo "    GPU_RENDER=1, CROP_SUPERSAMPLE=2 (probe + fallback inside app)"
 fi
 
+# 6-aug-2026: use BOTH T4s. CLIP_GPUS was opt-in because sharding broke
+# TransNetV2 scene detection (worker thread device vs model device); the
+# scene-detection guard in scene_detection.py now pins inference to the
+# model's device, so spreading is safe on multi-GPU hosts.
+if [ "${GPU_COUNT:-0}" -gt 1 ]; then
+    export CLIP_GPUS="${CLIP_GPUS:-0,1}"
+    echo "    CLIP_GPUS=0,1 (both GPUs: LR-ASD + ffmpeg per-worker)"
+fi
+
 # --- 2. Python deps --------------------------------------------------------
 # Kaggle's base image already carries torch/opencv/numpy built against its own
 # CUDA. Reinstalling those from requirements.txt is slow and can break CUDA, so

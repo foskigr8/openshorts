@@ -5,6 +5,7 @@ import sys
 
 from ffmpeg_utils import (video_encode_args, gpu_decode_args, QUALITY,
                           METADATA_SCRUB)
+import gpu_affinity
 from reframe_v2 import UNIFIED_CONTENT_HEIGHT_RATIO
 
 
@@ -860,7 +861,8 @@ def burn_subtitles(video_path, srt_path, output_path, alignment=2, fontsize=16,
 
     cmd = [
         'ffmpeg', '-y',
-        *gpu_decode_args(), '-i', video_path,
+        *gpu_decode_args(device=gpu_affinity.current_device()),
+        '-i', video_path,
         '-vf', vf,
         '-c:a', 'copy',
         *video_encode_args(QUALITY),

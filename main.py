@@ -2886,7 +2886,7 @@ def _build_jump_cut_source(source_video_path, keep_spans, workdir):
     for idx, (s, e) in enumerate(keep_spans):
         seg_path = os.path.join(workdir, f"keep_{idx:03d}.mp4")
         cmd = ['ffmpeg', '-y',
-               *gpu_decode_args(),
+               *gpu_decode_args(device=gpu_affinity.current_device()),
                '-ss', f'{s:.3f}', '-to', f'{e:.3f}', '-i', source_video_path,
                *source_logo_crop_vf_args(),
                *video_encode_args(QUALITY_FAST), *audio_encode_args(), seg_path]
@@ -3745,7 +3745,7 @@ if __name__ == '__main__':
                         # ffmpeg cut — re-encoding for precision on strict seconds
                         cut_command = [
                             'ffmpeg', '-y',
-                            *gpu_decode_args(),
+                            *gpu_decode_args(device=gpu_affinity.current_device()),
                             '-ss', str(start),
                             '-to', str(end),
                             '-i', input_video,
