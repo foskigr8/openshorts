@@ -694,7 +694,13 @@ def _run_deepseek_stage(api_key, model_name, prompt, response_model, base_url=DE
             if attempt == max_attempts:
                 raise
         wait = 5 * (2 ** (attempt - 1))
-        print(f"⚠️ DeepSeek transient error (attempt {attempt}/{max_attempts}), "
+        # Name the provider actually being called. This function is
+        # provider-agnostic (base_url decides), but the message said "DeepSeek"
+        # unconditionally — so a Gemini failure was reported as a DeepSeek one
+        # and read like DeepSeek was still wired in when it has not been since
+        # 1-aug-2026.
+        _provider = "DeepSeek" if DEEPSEEK_API_BASE in (base_url or "") else "Gemini"
+        print(f"⚠️ {_provider} transient error (attempt {attempt}/{max_attempts}), "
               f"retrying in {wait}s: {str(last_exc)[:150]}")
         time.sleep(wait)
 

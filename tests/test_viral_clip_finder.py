@@ -367,3 +367,66 @@ def test_long_form_reference_is_only_loaded_for_long_clips(monkeypatch):
     monkeypatch.delenv("VCF_LONG_FORM_REFS", raising=False)
     assert "SEAMLESS-CUTTING" not in vcf.build_system_prompt(include_long_form=False)
     assert "SEAMLESS-CUTTING" in vcf.build_system_prompt(include_long_form=True)
+
+
+# --- Null tolerance ---------------------------------------------------------
+#
+# Production, 6-aug-2026: the model returned five good clips and every one was
+# rejected on `"reaction_cam": null` — a field nothing downstream reads. Three
+# retries burned (~150KB prompt each), then a silent fall back to the narrative
+# engine. The prompt itself asks for `"narrative_arc": null`, so emitting null
+# elsewhere is entirely reasonable behaviour on the model's part.
+
+
+def test_null_optional_strings_are_accepted():
+    parsed = {"clips": [{"start": 10.0, "end": 40.0, "score": 88,
+                         "reaction_cam": None, "cta_placement": None,
+                         "sound_design": None, "platform_fit": None,
+                         "trim_suggestion": None, "cold_open_line": None}]}
+    model = vcf.SkillResponse.model_validate(parsed)
+    assert model.clips[0].reaction_cam == ""
+    assert model.clips[0].platform_fit == ""
+
+
+def test_null_lists_are_accepted():
+    parsed = {"clips": [{"start": 10.0, "end": 40.0, "score": 88,
+                         "b_roll_cues": None, "risk_flags": None,
+                         "secondary_patterns": None, "cut_list": None}]}
+    model = vcf.SkillResponse.model_validate(parsed)
+    assert model.clips[0].b_roll_cues == []
+    assert model.clips[0].cut_list == []
+
+
+def test_null_nested_models_are_accepted():
+    parsed = {"clips": [{"start": 10.0, "end": 40.0, "score": 88,
+                         "score_breakdown": {"hook_strength": 14,
+                                             "payoff_density": None,
+                                             "narrative_arc": None}}],
+              "rejected": [{"start": 1.0, "end": 5.0, "anti_pattern": None,
+                            "reason": None}],
+              "term_corrections": None}
+    model = vcf.SkillResponse.model_validate(parsed)
+    assert model.clips[0].score_breakdown.payoff_density == 0
+    assert model.clips[0].score_breakdown.narrative_arc is None
+    assert model.rejected[0].anti_pattern == ""
+
+
+def test_a_null_riddled_response_still_produces_usable_clips():
+    """The end-to-end shape of the production failure."""
+    parsed = {"clips": [
+        {"start": 100.0 + i * 60, "end": 130.0 + i * 60, "score": 80 + i,
+         "tier_class": "A", "reaction_cam": None, "cta_placement": None,
+         "b_roll_cues": None, "risk_flags": None, "cut_list": None,
+         "video_description_for_instagram": None}
+        for i in range(5)]}
+    vcf.SkillResponse.model_validate(parsed)
+    clips, _rejected = vcf.normalize_response(parsed, 1200.0, None)
+    assert len(clips) == 5
+    assert all(c["keep_spans"] for c in clips)
+
+
+def test_required_fields_still_fail_loudly_on_null():
+    """Dropping nulls must not turn a missing start/end into a silent default."""
+    with pytest.raises(Exception):
+        vcf.SkillResponse.model_validate(
+            {"clips": [{"start": None, "end": 40.0, "score": 88}]})

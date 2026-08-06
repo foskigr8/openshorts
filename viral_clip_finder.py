@@ -40,7 +40,7 @@ import os
 import re
 from typing import List, Optional, Tuple
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from deepseek_worker import (
     DEEPSEEK_API_BASE,
@@ -84,7 +84,31 @@ _FFMPEG_TIME_CONTRACT = """
 # --- Output contract (skill report, JSON-native) ---------------------------
 
 
-class CutEntry(BaseModel):
+class _SkillModel(BaseModel):
+    """Base for every skill response model: an explicit JSON ``null`` is treated
+    as "not provided" rather than a type error.
+
+    The prompt asks for `"narrative_arc": null` in the score breakdown, so the
+    model quite reasonably emits null for other optional fields too —
+    reaction_cam, cta_placement, b_roll_cues. A bare `field: str = ""` default
+    does NOT accept null, so the whole response was rejected over fields nobody
+    reads for the cut. Observed in production 6-aug-2026: five clips returned,
+    every one discarded on `reaction_cam`, three full retries burned (each a
+    ~150KB prompt), then a silent fall back to the narrative engine.
+
+    Dropping the null keys lets each field's own default apply. Required fields
+    (start/end) are untouched and still fail loudly if they arrive null.
+    """
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_nulls(cls, data):
+        if isinstance(data, dict):
+            return {k: v for k, v in data.items() if v is not None}
+        return data
+
+
+class CutEntry(_SkillModel):
     """One internal cut for a Tier L clip (seamless-cutting.md §8)."""
 
     cut_from: float = Field(description="end timestamp of the retained segment A")
@@ -94,7 +118,7 @@ class CutEntry(BaseModel):
                          description="same-frame | reaction shot | b-roll | zoom")
 
 
-class ScoreBreakdown(BaseModel):
+class ScoreBreakdown(_SkillModel):
     """One axis of the 8-axis rubric. Key is the axis name, value the score."""
 
     hook_strength: int = 0
@@ -108,7 +132,7 @@ class ScoreBreakdown(BaseModel):
     narrative_arc: Optional[int] = None  # Tier L only
 
 
-class SkillClipModel(BaseModel):
+class SkillClipModel(_SkillModel):
     """A scored clip with the full cut brief — the skill's per-clip report."""
 
     start: float
@@ -136,7 +160,7 @@ class SkillClipModel(BaseModel):
     video_title_for_youtube_short: str = ""
 
 
-class RejectedClipModel(BaseModel):
+class RejectedClipModel(_SkillModel):
     """A candidate that tripped the anti-pattern detector (mandatory output)."""
 
     start: float
@@ -145,7 +169,7 @@ class RejectedClipModel(BaseModel):
     reason: str = ""
 
 
-class TermCorrectionModel(BaseModel):
+class TermCorrectionModel(_SkillModel):
     """An ASR mishearing to repair before captions/word-snapping run.
 
     Same contract as deepseek_worker.TermCorrection — the narrative engine has
@@ -158,7 +182,7 @@ class TermCorrectionModel(BaseModel):
     correct: str  # the corrected term
 
 
-class SkillResponse(BaseModel):
+class SkillResponse(_SkillModel):
     clips: List[SkillClipModel] = []
     rejected: List[RejectedClipModel] = []
     term_corrections: List[TermCorrectionModel] = []
