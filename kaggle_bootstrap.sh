@@ -176,6 +176,67 @@ else
     say "Dashboard already built (dashboard/dist is newer than the sources)"
 fi
 
+# --- 3b. PO token provider (YouTube anti-bot) -------------------------------
+# "Sign in to confirm you're not a bot" on EVERY strategy, from a clean Kaggle
+# IP with no cookies (measured 6-aug-2026). YouTube increasingly requires a PO
+# token to trust a client from a datacenter/cloud IP, and cookies are a poor
+# answer here: they expire in ~3h and a STALE jar reads as more suspicious than
+# an anonymous request.
+#
+# The Docker image already solves this (see the Dockerfile's bgutil block) —
+# Kaggle simply never had it, so main.py's _pot_args was empty and every
+# attempt went in bare. This is the same provider, in the HTTP server mode its
+# own docs recommend over script-per-request.
+#
+# Entirely optional: every failure below leaves the pipeline exactly as it was,
+# downloading without a token.
+POT_DIR="${POT_DIR:-/kaggle/working/bgutil-provider}"
+POT_PORT="${POT_PORT:-4416}"
+if [ "${SKIP_POT:-0}" = "1" ]; then
+    say "PO token provider (skipped: SKIP_POT=1)"
+elif ! command -v npm >/dev/null 2>&1; then
+    say "PO token provider"
+    echo "    no npm — cannot build the provider; YouTube may hit the bot wall"
+else
+    say "YouTube PO token provider"
+    # yt-dlp nightly + the plugin that talks to the provider. The plugin is what
+    # makes yt-dlp aware of the token at all.
+    pip install -q --upgrade --pre "yt-dlp[default]" bgutil-ytdlp-pot-provider 2>&1 | tail -2 || \
+        echo "    plugin install reported errors — continuing"
+    if [ ! -f "$POT_DIR/server/build/main.js" ]; then
+        echo "    building the provider (~1-2 min, first run only)"
+        rm -rf "$POT_DIR"
+        if git clone --depth 1 -q https://github.com/Brainicism/bgutil-ytdlp-pot-provider "$POT_DIR" \
+            && (cd "$POT_DIR/server" && npm install --silent --no-audit --no-fund >/dev/null 2>&1) \
+            && (cd "$POT_DIR/server" && npx --yes tsc >/dev/null 2>&1); then
+            echo "    provider built"
+        else
+            echo "    provider build FAILED — downloads will run without a PO token"
+        fi
+    else
+        echo "    provider already built"
+    fi
+    if [ -f "$POT_DIR/server/build/main.js" ]; then
+        if curl -s --max-time 3 "http://127.0.0.1:$POT_PORT/ping" >/dev/null 2>&1; then
+            echo "    provider already running on :$POT_PORT"
+        else
+            nohup node "$POT_DIR/server/build/main.js" --port "$POT_PORT" \
+                > "$LOG_DIR/bgutil.log" 2>&1 &
+            for _ in $(seq 1 15); do
+                curl -s --max-time 2 "http://127.0.0.1:$POT_PORT/ping" >/dev/null 2>&1 && break
+                sleep 1
+            done
+        fi
+        if curl -s --max-time 3 "http://127.0.0.1:$POT_PORT/ping" >/dev/null 2>&1; then
+            export BGUTIL_BASE_URL="http://127.0.0.1:$POT_PORT"
+            echo "    provider responding — BGUTIL_BASE_URL=$BGUTIL_BASE_URL"
+        else
+            echo "    provider did not come up (see $LOG_DIR/bgutil.log)"
+            echo "    downloads will run without a PO token"
+        fi
+    fi
+fi
+
 # --- 4. Secrets ------------------------------------------------------------
 # On Kaggle these come from UserSecretsClient (see KAGGLE.md), exported into the
 # environment before this script runs. Nothing is written to disk except the
@@ -255,6 +316,13 @@ if [ -n "${FACE_ID_DB:-}" ]; then
     fi
 else
     echo "    face ID: off (set FACE_ID_DB to a folder of {name}.jpg headshots to name speakers)"
+fi
+# The single most common job-killer on a cloud IP, so it goes in the summary.
+if [ -n "${BGUTIL_BASE_URL:-}" ]; then
+    echo "    PO token: $BGUTIL_BASE_URL (YouTube anti-bot)"
+else
+    echo "    PO token: NOT available — 'Sign in to confirm you are not a bot' is likely."
+    echo "      Either the provider failed to build above, or SKIP_POT=1."
 fi
 # Where burned-in captions sit: bottom (default), middle or top.
 echo "    CAPTION_POSITION: ${CAPTION_POSITION:-bottom}"

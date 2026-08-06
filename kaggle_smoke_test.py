@@ -195,6 +195,25 @@ def _face_id():
     return True, f"active, running on GPU {ctx}"
 
 
+def _po_token():
+    """The PO token provider — what stops YouTube's bot wall on a cloud IP.
+
+    Measured 6-aug-2026: without it, every download strategy failed with "Sign
+    in to confirm you're not a bot" from a clean Kaggle IP and no cookies.
+    """
+    base = os.environ.get("BGUTIL_BASE_URL", "").strip()
+    if not base:
+        return False, ("no BGUTIL_BASE_URL — downloads run with no PO token and "
+                       "will likely hit the bot wall")
+    try:
+        with urllib.request.urlopen(f"{base}/ping", timeout=5) as r:
+            if r.status == 200:
+                return True, f"provider responding at {base}"
+            return False, f"{base}/ping returned {r.status}"
+    except Exception as e:
+        return False, f"{base} unreachable ({type(e).__name__})"
+
+
 CHECKS = [
     ("API", _api_alive),
     ("Dashboard", _dashboard),
@@ -206,7 +225,8 @@ CHECKS = [
     ("Server-side keys", _server_keys),
     ("Face ID", _face_id),
     ("Persistent storage", _storage),
-    ("YouTube + cookies", _youtube),
+    ("PO token provider", _po_token),
+    ("YouTube download", _youtube),
 ]
 
 
@@ -218,7 +238,7 @@ def main():
 
     results = []
     for label, fn in CHECKS:
-        if args.skip_youtube and label == "YouTube + cookies":
+        if args.skip_youtube and label == "YouTube download":
             continue
         check(label, fn, results)
 
@@ -227,7 +247,7 @@ def main():
     failed = [label for label, ok in results if not ok]
     if failed:
         print("\nFailed: " + ", ".join(failed))
-        if "YouTube + cookies" in failed:
+        if "YouTube download" in failed:
             if not os.path.exists(os.path.join(REPO_DIR, "cookies.txt")):
                 print("  YouTube: no cookies.txt. Kaggle usually downloads fine "
                       "without one — if this failed for another reason, read the "
@@ -235,6 +255,11 @@ def main():
             else:
                 print("  YouTube: the jar expired (~3h lifetime). Re-paste "
                       "YOUTUBE_COOKIES from a fresh local cookies.txt.")
+        if "PO token provider" in failed:
+            print("  PO token: this is the usual cause of a failed YouTube "
+                  "download from a cloud IP. Re-run kaggle_bootstrap.sh and read "
+                  "its 'YouTube PO token provider' section, or check "
+                  "/tmp/openshorts-logs/bgutil.log.")
         if "Persistent storage" in failed:
             print("  Storage: see PLAN_CAPTIONS_AND_STORAGE.md for the "
                   "HF_TOKEN / HF_STORAGE_REPO setup (no credit card needed).")
