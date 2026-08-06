@@ -36,7 +36,25 @@ if [ "${SKIP_INSTALL:-0}" != "1" ]; then
     say "Python dependencies (2-5 min)"
     grep -vE '^(torch|torchvision|torchaudio|opencv|numpy|scipy)([=<>~!]|$)' \
         requirements.txt > /tmp/req-kaggle.txt || cp requirements.txt /tmp/req-kaggle.txt
-    pip install -q -r /tmp/req-kaggle.txt 2>&1 | tail -5 || {
+    # Those lines are stripped because Kaggle's image already has them built
+    # against its own CUDA — but stripping them also removes requirements.txt's
+    # `numpy<2` GUARD, and a TRANSITIVE dependency can still drag numpy 2.x in.
+    # Measured 6-aug-2026: insightface unconstrained resolves to numpy 2.5.1 +
+    # opencv-python-headless 5.x, which breaks mediapipe, ultralytics and the
+    # rest of Kaggle's preinstalled stack. So pin the held-back packages to the
+    # versions ALREADY on this host and make pip resolve around them.
+    python3 - <<'PYPIN' > /tmp/constraints-kaggle.txt || true
+for name, mod in (("numpy", "numpy"), ("scipy", "scipy"),
+                  ("opencv-python", "cv2"), ("pandas", "pandas")):
+    try:
+        m = __import__(mod)
+        print(f"{name}=={m.__version__}")
+    except Exception:
+        pass
+PYPIN
+    echo "    holding these at the versions Kaggle already ships:"
+    sed 's/^/      /' /tmp/constraints-kaggle.txt || true
+    pip install -q -c /tmp/constraints-kaggle.txt -r /tmp/req-kaggle.txt 2>&1 | tail -5 || {
         echo "    pip install reported errors — continuing, but expect import failures"; }
     # protobuf conflict repair.
     #
@@ -60,6 +78,16 @@ if [ "${SKIP_INSTALL:-0}" != "1" ]; then
     # the first probe and the repair silently never runs, which is exactly what
     # happened on the first attempt (5-aug-2026): output stopped dead after
     # "attempting repair" with no error shown.
+    # The guard is only worth having if it is checked. A numpy 2.x bump breaks
+    # mediapipe/ultralytics in ways that surface much later as a failed render.
+    _np=$(python3 -c "import numpy;print(numpy.__version__)" 2>/dev/null || echo "missing")
+    case "$_np" in
+        1.*) echo "    numpy $_np — guard held" ;;
+        *)   echo "    !! numpy is $_np — something upgraded it past the <2 guard."
+             echo "       mediapipe/ultralytics will misbehave. Fix before rendering:"
+             echo "       pip install 'numpy<2'" ;;
+    esac
+
     say "Checking mediapipe imports"
     _mp_ok() { python3 -c "import mediapipe" >/dev/null 2>&1; }
     if ! _mp_ok; then
@@ -85,9 +113,33 @@ if [ "${SKIP_INSTALL:-0}" != "1" ]; then
         echo "    mediapipe imports"
     fi
 
+    # Face ID needs an ONNX runtime to execute; requirements.txt deliberately
+    # ships only insightface (onnxruntime-gpu is ~2GB and lives in the
+    # Dockerfile's GPU block so the CPU image stays slim). Kaggle IS a GPU host,
+    # so install it here — and only if it is not already importable, because
+    # Kaggle images sometimes carry onnxruntime already and installing both the
+    # CPU and GPU wheels puts two copies of the same module on the path.
+    say "Face ID runtime (onnxruntime)"
+    if python3 -c "import onnxruntime" >/dev/null 2>&1; then
+        echo "    onnxruntime already present ($(python3 -c 'import onnxruntime;print(onnxruntime.__version__)' 2>/dev/null))"
+    else
+        pip install -q -c /tmp/constraints-kaggle.txt onnxruntime-gpu 2>&1 | tail -3 || \
+            echo "    onnxruntime-gpu install reported errors — face ID will stay off"
+    fi
+    if python3 -c "import insightface" >/dev/null 2>&1; then
+        echo "    insightface imports"
+    else
+        echo "    insightface NOT importable — named-speaker enrichment stays off"
+        echo "    (the pipeline still runs; speakers stay anonymous)"
+    fi
+
     python3 - <<'PY'
 import importlib
-for m in ("fastapi", "uvicorn", "yt_dlp", "mediapipe", "ultralytics", "torch"):
+# cv2 is in this list because insightface pulls opencv-python-headless,
+# which overwrites the cv2 package Kaggle ships. Our usage (VideoCapture,
+# cvtColor, resize) is headless-safe and no GUI call exists in this repo,
+# but a broken cv2 would otherwise surface much later as a failed render.
+for m in ("fastapi", "uvicorn", "yt_dlp", "mediapipe", "ultralytics", "torch", "cv2"):
     try:
         importlib.import_module(m)
         print(f"    ok   {m}")
@@ -205,6 +257,21 @@ if [ -n "${HF_TOKEN:-}" ] && [ -n "${HF_STORAGE_REPO:-}" ]; then
 else
     echo "    storage: NOT configured — clips are wiped when this session ends."
     echo "      Set HF_TOKEN (a *write* token) + HF_STORAGE_REPO=<user>/openshorts-clips."
+fi
+# Named-speaker enrichment. Dormant unless FACE_ID_DB points at a folder of
+# {name}.jpg headshots. On a multi-GPU host it defaults to the LAST GPU so it
+# does not compete with the render pipeline on GPU 0 (the integration guide's
+# recommendation); FACE_ID_CTX overrides.
+if [ -n "${FACE_ID_DB:-}" ]; then
+    if [ -d "${FACE_ID_DB}" ]; then
+        _faces=$(find "${FACE_ID_DB}" -maxdepth 1 \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \) 2>/dev/null | wc -l)
+        echo "    face ID: ${FACE_ID_DB} (${_faces} headshot(s)), ctx=${FACE_ID_CTX:-auto}"
+        [ "$_faces" -eq 0 ] && echo "      -> no images found; speakers will stay anonymous"
+    else
+        echo "    face ID: FACE_ID_DB=${FACE_ID_DB} is not a directory — enrichment stays off"
+    fi
+else
+    echo "    face ID: off (set FACE_ID_DB to a folder of {name}.jpg headshots to name speakers)"
 fi
 # Where burned-in captions sit: bottom (default), middle or top.
 echo "    CAPTION_POSITION: ${CAPTION_POSITION:-bottom}"

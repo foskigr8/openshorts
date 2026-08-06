@@ -155,6 +155,28 @@ def _youtube():
     return bool(title), title or (r.stderr or "").strip()[-200:]
 
 
+def _face_id():
+    """Named-speaker enrichment. Dormant by design unless FACE_ID_DB is set —
+    reported either way so "I configured it and nothing happened" is visible
+    here rather than inferred from a job that silently used anonymous labels."""
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "import face_id, os;"
+         "print(face_id.available(), face_id.default_ctx_id(),"
+         " bool(os.environ.get('FACE_ID_DB')))"],
+        capture_output=True, text=True, cwd=REPO_DIR)
+    parts = (out.stdout or "").strip().split()
+    if len(parts) != 3:
+        return False, (out.stderr or out.stdout).strip()[-200:]
+    ready, ctx, configured = parts[0] == "True", parts[1], parts[2] == "True"
+    if not configured:
+        return True, "off (no FACE_ID_DB) — speakers stay anonymous, which is fine"
+    if not ready:
+        return False, ("FACE_ID_DB is set but insightface is not usable — "
+                       "speakers will stay anonymous")
+    return True, f"active, running on GPU {ctx}"
+
+
 CHECKS = [
     ("API", _api_alive),
     ("Dashboard", _dashboard),
@@ -164,6 +186,7 @@ CHECKS = [
     ("Transcription backend", _transcription),
     ("Stage 3 clip selection", _stage3),
     ("Server-side keys", _server_keys),
+    ("Face ID", _face_id),
     ("Persistent storage", _storage),
     ("YouTube + cookies", _youtube),
 ]

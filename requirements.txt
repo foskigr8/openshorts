@@ -35,3 +35,26 @@ pytest==8.3.4
 # /kaggle/working at session end, so clips rendered there evaporate without
 # a backup; HF was chosen over R2/B2 because it needs no credit card.
 huggingface_hub>=0.23
+# Named-speaker enrichment (face_id.py): ArcFace/buffalo_l face recognition,
+# used to turn anonymous diarized labels ("SPEAKER_00") into real names before
+# clip selection reads the transcript. InsightFace over DeepFace/dlib on the
+# integration guide's recommendation: ~15ms/face on a T4 vs ~80ms and ~300ms,
+# and it shares the ONNX ecosystem YOLOv8 already uses.
+#
+# MEASURED 6-aug-2026, and the reason for the numpy pin below: installing this
+# unconstrained resolves to numpy 2.5.1 + opencv-python-headless 5.x (pulled in
+# through albumentations -> albucore), which breaks mediapipe, ultralytics and
+# Kaggle's whole preinstalled stack. With numpy held at <2 pip backtracks to
+# opencv-python-headless 4.11 and leaves numpy/scipy/scikit-learn untouched.
+# kaggle_bootstrap.sh additionally pins to the versions already on the host.
+insightface==0.7.3
+# Not a direct import anywhere — it is a GUARD. Several transitive deps above
+# (insightface's chain in particular) will happily pull numpy 2.x, and the
+# pinned mediapipe/ultralytics/torch stack does not work on it.
+numpy<2
+#
+# insightface also needs an ONNX RUNTIME, deliberately NOT listed here:
+# onnxruntime-gpu is ~2GB and lives in the Dockerfile's GPU block (alongside
+# onnx-asr for Parakeet) so the default CPU image stays slim. GPU images and
+# kaggle_bootstrap.sh install it. Without one, face_id fails open and the
+# pipeline runs with anonymous speakers exactly as before.

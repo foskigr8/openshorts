@@ -44,6 +44,32 @@ import os
 from typing import Dict, List, Optional, Tuple
 
 
+def default_ctx_id() -> int:
+    """Which GPU InsightFace runs on.
+
+    Defaults to the LAST visible device, not device 0. On the 2×T4 target that
+    puts face ID on GPU 1 while the render pipeline (YOLO, MediaPipe, LR-ASD,
+    ffmpeg) keeps GPU 0 — the integration guide's explicit recommendation, and
+    it matters because face ID runs BEFORE clip selection, so sharing device 0
+    would stall the stage everything else waits on. Single-GPU and CPU hosts
+    get 0, which is the old behaviour. FACE_ID_CTX overrides.
+    """
+    configured = os.environ.get("FACE_ID_CTX", "").strip()
+    if configured:
+        try:
+            return int(configured)
+        except ValueError:
+            print(f"⚠️ Face ID: FACE_ID_CTX={configured!r} is not an integer — using 0")
+            return 0
+    try:
+        import torch
+        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+            return torch.cuda.device_count() - 1
+    except Exception:
+        pass
+    return 0
+
+
 def available() -> bool:
     """True when a known-faces DB is configured and the library imports."""
     if not os.environ.get("FACE_ID_DB"):
@@ -271,10 +297,11 @@ def enrich_if_configured(transcript_result: dict,
     if not available() or not video_path or not os.path.exists(video_path):
         return transcript_result, None
     try:
+        ctx_id = default_ctx_id()
         db = KnownFacesDB(
             os.environ["FACE_ID_DB"],
             model_name=os.environ.get("FACE_ID_MODEL", "buffalo_l"),
-            ctx_id=int(os.environ.get("FACE_ID_CTX", "0")))
+            ctx_id=ctx_id)
         if not db.embeddings:
             print("⚠️ Face ID: known-faces DB is empty — no names to match.")
             return transcript_result, None
@@ -291,7 +318,7 @@ def enrich_if_configured(transcript_result: dict,
             identifications, gap_tolerance=max(2.0, 2.0 / max(sample_fps, 0.1)))
         named = ", ".join(i["name"] for i in trajectory["identities"])
         print(f"🪪  Face ID: identified {named} over "
-              f"{len(identifications)} sample(s).")
+              f"{len(identifications)} sample(s) on GPU {ctx_id}.")
         enriched, mapping = enrich_transcript_speakers(
             transcript_result, trajectory,
             min_coverage=float(os.environ.get("FACE_ID_MIN_COVERAGE", "0.6")),

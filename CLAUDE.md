@@ -120,7 +120,20 @@ engine is the sole Stage 3 path there — `kaggle_bootstrap.sh` prints which.
   anonymous speakers are used when InsightFace is missing, the DB is empty, or
   nothing matches. `enrich_if_configured` returns the `{label: name}` mapping
   (not the trajectory) because that is what the skill's transcript formatter
-  looks speakers up in.
+  looks speakers up in. Defaults to the LAST GPU (GPU 1 on a 2xT4) so it does
+  not compete with the render pipeline on GPU 0; `FACE_ID_CTX=-1` forces CPU.
+
+`insightface` is in `requirements.txt`, but **installing it unconstrained
+breaks the stack** (measured 6-aug-2026): its chain pulls numpy 2.5.1 and
+opencv-python-headless 5.x through `albumentations -> albucore`, and the pinned
+mediapipe/ultralytics/torch stack does not work on numpy 2. Hence the `numpy<2`
+guard line in requirements.txt — it is not imported by anything, it exists to
+stop that. `kaggle_bootstrap.sh` re-applies the same protection differently: it
+strips numpy/scipy/opencv lines (Kaggle's are CUDA-built), so it generates a
+constraints file from the versions already installed on the host and passes it
+to pip, then verifies numpy is still 1.x afterwards. The ONNX runtime is
+separate again — `onnxruntime-gpu` is ~2GB and lives in the Dockerfile's GPU
+block, with the bootstrap installing it on Kaggle.
 
 ### Kaggle host
 

@@ -117,3 +117,56 @@ def test_identify_faces_respects_the_scan_limit(monkeypatch):
     import inspect
     sig = inspect.signature(face_id.identify_faces_in_video)
     assert sig.parameters["max_seconds"].default == 900.0
+
+
+# --- Device selection -------------------------------------------------------
+#
+# The integration guide is explicit: on a dual-GPU host, put InsightFace on
+# GPU 1 and leave GPU 0 to the render pipeline. Face ID runs BEFORE clip
+# selection, so sharing device 0 stalls the stage everything else waits on.
+
+
+def _fake_torch(monkeypatch, count, available=True):
+    import sys
+    import types
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(
+        cuda=types.SimpleNamespace(is_available=lambda: available,
+                                   device_count=lambda: count)))
+
+
+def test_dual_gpu_puts_face_id_on_the_last_device(monkeypatch):
+    monkeypatch.delenv("FACE_ID_CTX", raising=False)
+    _fake_torch(monkeypatch, 2)
+    assert face_id.default_ctx_id() == 1
+
+
+def test_single_gpu_uses_device_zero(monkeypatch):
+    monkeypatch.delenv("FACE_ID_CTX", raising=False)
+    _fake_torch(monkeypatch, 1)
+    assert face_id.default_ctx_id() == 0
+
+
+def test_cpu_host_uses_device_zero(monkeypatch):
+    monkeypatch.delenv("FACE_ID_CTX", raising=False)
+    _fake_torch(monkeypatch, 0, available=False)
+    assert face_id.default_ctx_id() == 0
+
+
+def test_missing_torch_is_not_fatal(monkeypatch):
+    import sys
+    monkeypatch.delenv("FACE_ID_CTX", raising=False)
+    monkeypatch.setitem(sys.modules, "torch", None)  # import raises
+    assert face_id.default_ctx_id() == 0
+
+
+def test_explicit_ctx_overrides_the_default(monkeypatch):
+    monkeypatch.setenv("FACE_ID_CTX", "0")
+    _fake_torch(monkeypatch, 4)
+    assert face_id.default_ctx_id() == 0
+
+
+def test_a_junk_ctx_falls_back_to_zero(monkeypatch, capsys):
+    monkeypatch.setenv("FACE_ID_CTX", "gpu-one")
+    _fake_torch(monkeypatch, 2)
+    assert face_id.default_ctx_id() == 0
+    assert "FACE_ID_CTX" in capsys.readouterr().out
