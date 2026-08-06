@@ -22,9 +22,11 @@ nothing at all on single-clip jobs.
 
 Environment
 -----------
-CLIP_GPUS   comma-separated device indices to spread across (default: every
-            visible CUDA device). "0" pins everything to GPU 0 — the old
-            behaviour. Ignored when CUDA is unavailable.
+CLIP_GPUS   comma-separated device indices to spread across. UNSET = no
+            affinity at all (every worker uses the default device), which is
+            the default because sharding broke TransNetV2 scene detection on
+            the first real 2xT4 run — see available_devices(). Set
+            CLIP_GPUS=0,1 to opt in. Ignored when CUDA is unavailable.
 """
 
 import os
@@ -58,8 +60,25 @@ def available_devices():
                         part = part.strip()
                         if part.isdigit() and int(part) < count:
                             devices.append(int(part))
-                else:
-                    devices = list(range(count))
+                # OPT-IN ONLY. Spreading workers across GPUs by default broke
+                # scene detection on the first real 2xT4 run (6-aug-2026):
+                #
+                #   TransNetV2 scene detection failed (RuntimeError: Expected
+                #   all tensors to be on the same device, but got weight is on
+                #   cuda:0, different from other tensors on cuda:1)
+                #
+                # The model is loaded once on the default device; a worker
+                # thread whose current device is cuda:1 then feeds it tensors
+                # from the wrong device. It failed open to PySceneDetect, so
+                # the job still finished — with WORSE scene boundaries, which
+                # is exactly the kind of silent quality regression this
+                # codebase keeps getting bitten by.
+                #
+                # The measured upside was never large (LR-ASD is 20-34s of a
+                # 94-110s clip, and detection stays serialized under
+                # DETECT_LOCK either way), so it is not worth shipping on by
+                # default until every model load is device-aware. Set
+                # CLIP_GPUS=0,1 to opt back in.
         except Exception:
             devices = []
         _devices_cache = devices

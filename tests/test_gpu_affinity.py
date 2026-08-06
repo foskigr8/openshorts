@@ -47,13 +47,24 @@ def test_missing_torch_is_not_fatal(monkeypatch):
     assert gpu_affinity.assign_worker(3) is None
 
 
+def test_sharding_is_off_unless_opted_in(monkeypatch):
+    """Default = no affinity. Assigning workers to cuda:1 broke TransNetV2,
+    which loads on the default device and then got tensors from another one."""
+    _fake_torch(monkeypatch, 2)
+    assert gpu_affinity.available_devices() == []
+    assert gpu_affinity.assign_worker(0) is None
+    assert gpu_affinity.current_device() is None
+
+
 def test_single_gpu_pins_everything_to_zero(monkeypatch):
+    monkeypatch.setenv("CLIP_GPUS", "0")
     _fake_torch(monkeypatch, 1)
     assert [gpu_affinity.assign_worker(i) for i in range(3)] == \
         ["cuda:0", "cuda:0", "cuda:0"]
 
 
 def test_two_gpus_round_robin_by_clip_index(monkeypatch):
+    monkeypatch.setenv("CLIP_GPUS", "0,1")
     selected = _fake_torch(monkeypatch, 2)
     assert [gpu_affinity.assign_worker(i) for i in range(5)] == \
         ["cuda:0", "cuda:1", "cuda:0", "cuda:1", "cuda:0"]
@@ -75,6 +86,7 @@ def test_clip_gpus_ignores_indices_that_do_not_exist(monkeypatch):
 
 def test_assignment_is_per_thread(monkeypatch):
     """Two worker threads must not clobber each other's device."""
+    monkeypatch.setenv("CLIP_GPUS", "0,1")
     _fake_torch(monkeypatch, 2)
     seen = {}
 
@@ -93,6 +105,7 @@ def test_assignment_is_per_thread(monkeypatch):
 
 
 def test_a_failed_set_device_degrades_to_the_default(monkeypatch, capsys):
+    monkeypatch.setenv("CLIP_GPUS", "0,1")
     _fake_torch(monkeypatch, 2, fail_set=True)
     assert gpu_affinity.assign_worker(1) is None
     assert gpu_affinity.current_device() is None
@@ -100,11 +113,13 @@ def test_a_failed_set_device_degrades_to_the_default(monkeypatch, capsys):
 
 
 def test_describe_is_silent_unless_there_is_something_to_share(monkeypatch):
+    monkeypatch.setenv("CLIP_GPUS", "0")
     _fake_torch(monkeypatch, 1)
     assert gpu_affinity.describe() == ""
 
 
 def test_describe_names_the_devices_when_sharding(monkeypatch):
+    monkeypatch.setenv("CLIP_GPUS", "0,1")
     _fake_torch(monkeypatch, 2)
     text = gpu_affinity.describe()
     assert "cuda:0" in text and "cuda:1" in text

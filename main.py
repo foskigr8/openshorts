@@ -3453,15 +3453,24 @@ if __name__ == '__main__':
                     if success and os.environ.get("WATERMARK") == "1":
                         apply_watermark(clip_final_path)
                     if success:
-                        # Captions last, so they sit on top of the watermark and
-                        # the canonical file stays clean for re-styling.
-                        auto_caption_clip(clip_final_path, clip_transcript, render_clip_start,
-                                         render_clip_end, general_ranges=general_ranges)
-                        # Optional background-audio removal, last before the
-                        # ready marker. Copies the video stream, so isolating
-                        # the voice never costs a generation of video quality.
-                        # Fails OPEN: a separation error must ship the clip with
-                        # its original audio, never a silent or missing track.
+                        # Background-audio removal FIRST, then captions.
+                        #
+                        # This order is load-bearing and was wrong until
+                        # 6-aug-2026: auto_caption_clip does not modify the clip
+                        # in place, it writes a NEW subtitled_<ts>_<name>.mp4
+                        # with `-c:a copy`, and app.py serves that derived file
+                        # (_canonical_clip_file picks the newest one). Cleaning
+                        # the audio afterwards therefore cleaned a file nobody
+                        # watches, while the delivered clip kept its original
+                        # music — reported from a real job ("I put remove
+                        # background audio and I still hear sound in three
+                        # clips"), and the log confirmed it: captions burned at
+                        # 02:53:46, audio cleaned at 02:53:55, on the wrong file.
+                        #
+                        # Cleaning first means the caption pass copies the
+                        # ALREADY-cleaned audio through. Fails OPEN: a
+                        # separation error ships the original audio, never a
+                        # silent or missing track.
                         if remove_background_audio:
                             try:
                                 import audio_cleanup
@@ -3478,6 +3487,10 @@ if __name__ == '__main__':
                                     os.remove(clip_final_path + ".voice.mp4")
                                 except OSError:
                                     pass
+                        # Captions after, so they sit on top of the watermark and
+                        # the canonical file stays clean for re-styling.
+                        auto_caption_clip(clip_final_path, clip_transcript, render_clip_start,
+                                         render_clip_end, general_ranges=general_ranges)
                         # Only now — captions burned (or deliberately skipped) and
                         # the file fully written — is the clip safe to surface.
                         # app.py's poll loop gates on this marker.

@@ -483,6 +483,14 @@ def generate_ass(transcript, clip_start, clip_end, output_path,
     content_bottom_ratio = (1 - UNIFIED_CONTENT_HEIGHT_RATIO) / 2 + UNIFIED_CONTENT_HEIGHT_RATIO
     caption_inset_ratio = CAPTION_CONTENT_INSET_RATIO * UNIFIED_CONTENT_HEIGHT_RATIO
     general_margin_v = round(((1 - content_bottom_ratio) + caption_inset_ratio) * PLAY_RES_Y)
+    # Respect a caller who asked for MORE lift than the content box needs.
+    # This margin exists to keep captions off the blurred fill during GENERAL
+    # scenes, so it is a FLOOR, not a fixed value — before this, a per-job
+    # "bottom, raised" choice was silently discarded on every general-layout
+    # line, which is what "I set the caption position and only centre happens"
+    # looks like from the outside.
+    general_margin_v = max(general_margin_v,
+                           int(_clamp_number(margin_v, 0, 200, SAFE_MARGIN_V)))
     general_ranges = general_ranges or []
 
     def _in_general_range(t):
