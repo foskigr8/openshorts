@@ -379,6 +379,7 @@ class SmoothedCameraman:
         # still crawling towards the real target after the shot requiring it
         # had already ended (ground-truthed 31-jul-2026).
         self.force_next_update = False
+        self.force_next_snap = False
 
     def _q(self, value):
         """Quantize a crop position to the 1/supersample grid.
@@ -438,6 +439,7 @@ class SmoothedCameraman:
 
         if self.force_next_update:
             self.force_next_update = False
+            self.force_next_snap = True
             self._pending_target = None
             self._pending_count = 0
             self.target_center_x = new_center
@@ -547,7 +549,8 @@ class SmoothedCameraman:
         push-in doesn't crop heads off; at zoom=1.0 the crop is full-height
         and y collapses to 0 exactly as before.
         """
-        if force_snap:
+        if force_snap or self.force_next_snap:
+            self.force_next_snap = False
             self.current_center_x = self.target_center_x
             self.current_center_y = self.target_center_y
             self.current_zoom = self.target_zoom

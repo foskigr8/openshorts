@@ -387,6 +387,22 @@ class TestSmoothedCameramanEasing:
         assert h > 0
         assert (head - y1) / h == pytest.approx(main.CAMERA_HEAD_Y, abs=0.03)
 
+    def test_force_next_update_snaps_crop_instantly_on_cut(self):
+        """When force_next_update is True (subject_changed cut), get_crop_box()
+        must snap immediately to the new subject target position without requiring
+        force_snap=True parameter or safe_zone_radius drift threshold."""
+        cam = self._cam()
+        cam.force_next_update = True
+        cam.update_target([100, 100, 200, 200])
+        cam.get_crop_box(force_snap=True)
+        # Now simulate a cut to a new subject only 50px away (sub-safe-zone delta)
+        cam.force_next_update = True
+        cam.update_target([150, 100, 200, 200])
+        x1, y1, x2, y2 = cam.get_crop_box()  # force_snap defaults to False!
+        center_x = (x1 + x2) / 2.0
+        assert center_x == pytest.approx(150 + 100, abs=0.5), \
+            "Subject cut must snap crop center instantly on get_crop_box()"
+
 
 class TestSmoothedCameramanZoom:
     """Problem 2: an eased zoom state (crop-size scale) + dynamic y so a
