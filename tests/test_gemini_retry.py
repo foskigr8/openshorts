@@ -144,3 +144,33 @@ def test_clean_response_is_not_flagged_as_blocked():
         candidates = []
 
     gemini_worker.raise_if_blocked(_Resp())  # must not raise
+
+
+def test_bounded_timeout_is_applied(monkeypatch):
+    """6-aug-2026: a hung provider must not stall the job for minutes."""
+    import gemini_worker
+    captured = {}
+
+    def fake_client(api_key, http_options=None):
+        captured["api_key"] = api_key
+        captured["http_options"] = http_options
+        return object()
+
+    monkeypatch.setattr(gemini_worker.genai, "Client", fake_client)
+    gemini_worker.make_client("test-key")
+    assert captured["api_key"] == "test-key"
+    assert captured["http_options"].timeout == 120000
+
+
+def test_bounded_timeout_env_override(monkeypatch):
+    import gemini_worker
+    monkeypatch.setenv("GEMINI_TIMEOUT_MS", "45000")
+    captured = {}
+
+    def fake_client(api_key, http_options=None):
+        captured["http_options"] = http_options
+        return object()
+
+    monkeypatch.setattr(gemini_worker.genai, "Client", fake_client)
+    gemini_worker.make_client("test-key")
+    assert captured["http_options"].timeout == 45000

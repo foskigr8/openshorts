@@ -2467,7 +2467,7 @@ def _context_check_once(pool, model_name, source_video_path, candidate,
     try:
         context_cut = _rough_cut_candidate(
             source_video_path, start - context_preroll, end, video_duration, pad=0.0)
-        client = genai.Client(api_key=key)
+        client = gemini_worker.make_client(key)
         # A long-context segment is a different product from a tight short, so
         # it gets a different reviewer. Judging it with the short prompt was why
         # requesting long clips still produced short ones: rule 3 there demands
@@ -2544,7 +2544,7 @@ def analyze_scene_context(pool, model_name, clip_path, clip_duration,
     if not key:
         return []
     try:
-        client = genai.Client(api_key=key)
+        client = gemini_worker.make_client(key)
         excerpt = _clip_relative_transcript_excerpt(
             transcript_result, clip_start,
             clip_end if clip_end is not None else clip_start + clip_duration)
@@ -2640,7 +2640,7 @@ def confirm_clip_with_vision(pool, model_name, source_video_path, candidate,
         if not key:
             return
         try:
-            client = genai.Client(api_key=key)
+            client = gemini_worker.make_client(key)
             prompt = gemini_worker.VISION_VISUAL_CHECK_PROMPT_TEMPLATE.format(
                 narrative_summary=candidate.get("narrative_summary", ""),
                 candidate_start_offset=min(2.0, start))
@@ -3319,7 +3319,7 @@ def get_viral_clips(transcript_result, video_duration, source_video_path=None,
         print("❌ Error: GEMINI_API_KEY not found in environment variables.")
         return None
 
-    client = genai.Client(api_key=api_key)
+    client = gemini_worker.make_client(api_key)
     model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
     language = str(transcript_result.get('language') or 'unknown')
     print(f"\U0001f916  Model: {model_name} | language: {language}")
@@ -3409,7 +3409,7 @@ def get_visual_clips(video_path, video_duration, language="en"):
     if not api_key:
         print("❌ Error: GEMINI_API_KEY not found.")
         return None
-    client = genai.Client(api_key=api_key)
+    client = gemini_worker.make_client(api_key)
     model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
     print(f"🎥  Model: {model_name} | uploading {os.path.basename(video_path)}…")
 

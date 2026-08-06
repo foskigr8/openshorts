@@ -54,7 +54,7 @@ def _install_fake_client(monkeypatch, visual_parsed, context_parsed):
     models = _FakeModels(visual_parsed, context_parsed)
 
     class _FakeClient:
-        def __init__(self, api_key=None):
+        def __init__(self, api_key=None, http_options=None):
             self.files = files
             self.models = models
 
@@ -85,7 +85,7 @@ def _install_fake_client_context_sequence(monkeypatch, visual_parsed, context_pa
     models = _FakeModelsContextSequence(visual_parsed, context_parsed_sequence)
 
     class _FakeClient:
-        def __init__(self, api_key=None):
+        def __init__(self, api_key=None, http_options=None):
             self.files = files
             self.models = models
 
@@ -211,7 +211,7 @@ def test_gemini_error_fails_open_and_marks_key_bad(monkeypatch):
             raise RuntimeError("upload failed")
 
     class _BoomClient:
-        def __init__(self, api_key=None):
+        def __init__(self, api_key=None, http_options=None):
             self.files = _BoomFiles()
             self.models = None
 

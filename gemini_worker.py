@@ -7,6 +7,21 @@ from typing import List, Optional
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types as genai_types
+
+# Bounded Gemini read timeout (6-aug-2026). The SDK default (~5 min) let a
+# hung provider stall a whole job for 3m19s in the complaint run (ReadTimeout
+# at 02:50:54, call started 02:47:35) — longer than any other stage. Capping
+# it means one bad provider call can no longer be the job's longest stage;
+# the provider ladder / fallback handles the failure. Env-overridable.
+GEMINI_TIMEOUT_MS = int(os.environ.get("GEMINI_TIMEOUT_MS", "120000"))
+
+
+def make_client(api_key):
+    """genai.Client with a bounded read timeout (see GEMINI_TIMEOUT_MS)."""
+    timeout_ms = int(os.environ.get("GEMINI_TIMEOUT_MS", GEMINI_TIMEOUT_MS))
+    return genai.Client(
+        api_key=api_key,
+        http_options=genai_types.HttpOptions(timeout=timeout_ms))
 from pydantic import BaseModel
 
 from clip_selection import lookup_model_prices
@@ -731,7 +746,7 @@ def main() -> int:
         payload = json.load(f)
 
     model_name = args.model
-    client = genai.Client(api_key=api_key)
+    client = make_client(api_key)
     config = _config_for_strategy(args.strategy, args.mode, model_name)
     language = str(payload.get("language") or "unknown")
 
