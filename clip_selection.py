@@ -169,11 +169,7 @@ def _nearest_within(values, target, window, prefer_after=False, prefer_before=Fa
     if prefer_before:
         before = [v for v in near if v <= target]
         if before:
-            best_before = max(before)
-            after = [v for v in near if v > target]
-            # Take the later boundary only if it is clearly closer.
-            if not after or (target - best_before) <= (min(after) - target) * 1.6 + 0.35:
-                return best_before
+            return max(before)
     if prefer_after:
         after = [v for v in near if v >= target]
         if after:

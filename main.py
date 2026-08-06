@@ -1609,23 +1609,13 @@ def download_youtube_video(url, output_dir=".", require_hd=False):
     # source height, 80% of delivered clips came out 406x720 (audited 25-jul-2026).
     def _hd_fmt_for(proxy):
         if proxy:
-            return ('bestvideo[vcodec^=avc1][height<=720][ext=mp4]+bestaudio[ext=m4a]/'
-                    'bestvideo[vcodec^=avc1][height<=720]+bestaudio/'
+            return ('bestvideo[height<=720]+bestaudio/'
                     'best[height<=720][ext=mp4]/best[height<=720]/best')
-        return ('bestvideo[vcodec^=avc1][height<=1080][ext=mp4]+bestaudio[ext=m4a]/'
-                'bestvideo[vcodec^=avc1][height<=1080]+bestaudio/'
-                # 6-aug-2026 (PART 6): avc1-only can reject a video whose ONLY
-                # HD streams are vp9/av01 (increasingly common on YouTube) —
-                # the ladder then fell to a ~360p progressive stream even
-                # though a 1080p vp9 existed. vp9/av01 merge fine into the
-                # mp4 container; the codec filter was a compatibility nicety,
-                # not a requirement.
-                'bestvideo[vcodec^=vp09][height<=1080][ext=mp4]+bestaudio[ext=m4a]/'
-                'bestvideo[vcodec^=av01][height<=1080][ext=mp4]+bestaudio[ext=m4a]/'
-                'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/'
-                'bestvideo[height<=1080]+bestaudio/'
-                'best[height<=1080][ext=mp4]/best[ext=mp4]/best')
-    fallback_fmt = 'best[ext=mp4]/best'
+        return ('bestvideo[height>=1080]+bestaudio/'
+                'bestvideo[height>=720]+bestaudio/'
+                'bestvideo+bestaudio/'
+                'best[ext=mp4]/best')
+    fallback_fmt = 'bestvideo+bestaudio/best'
 
     def _base_opts(extractor_args, proxy, use_cookies=True):
         return {
