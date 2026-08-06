@@ -3021,7 +3021,7 @@ def render(input_video, final_output_video, aspect_ratio,
     import main as m
 
     print("   🚀 Reframe engine v2 (ffmpeg-native render)")
-    supersample = max(1, int(os.environ.get("CROP_SUPERSAMPLE", "1")))
+    supersample = max(1, int(os.environ.get("CROP_SUPERSAMPLE", "2")))
     # PART 2 (6-aug-2026): this render runs on a clip-worker thread; its
     # assigned GPU (gpu_affinity, CLIP_GPUS) must be the ffmpeg device too,
     # or every worker's decode/encode/filters pile onto cuda:0 and the second

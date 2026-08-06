@@ -222,7 +222,12 @@ CAMERA_STYLE = os.environ.get("CAMERA_STYLE", "cut").strip().lower()
 # owner reported: "why is it not stabilized?"). At 2x the grid is 0.5 source
 # px, which reads as smooth motion instead of stall/jump. Cost is near-zero on
 # GPU hosts (scale_cuda) and one extra scale on CPU.
-CROP_SUPERSAMPLE = max(1, int(os.environ.get("CROP_SUPERSAMPLE", "1")))
+#
+# DEFAULT 2 (6-aug-2026): the owner's #1 acceptance criterion is "no jitter",
+# so the sub-pixel path is on everywhere, not just on GPU hosts. The upscale
+# is a few seconds per clip on CPU; set CROP_SUPERSAMPLE=1 to restore the old
+# whole-pixel behavior.
+CROP_SUPERSAMPLE = max(1, int(os.environ.get("CROP_SUPERSAMPLE", "2")))
 
 # Light EMA on committed x-targets (see SmoothedCameraman.update_target):
 # detector box-centres oscillate ±2-5px between detections even for a
@@ -301,7 +306,7 @@ class SmoothedCameraman:
         # 2x render pass (CROP_SUPERSAMPLE) can step sub-pixel. Defaults to the
         # process-wide setting; the renderer passes its own copy explicitly.
         self.supersample = max(
-            1, int(supersample or os.environ.get("CROP_SUPERSAMPLE", "1")))
+            1, int(supersample or os.environ.get("CROP_SUPERSAMPLE", "2")))
         self._grid = 1.0 / self.supersample
         self._static_frames = 0  # consecutive frames with zero eased motion
         # A shot must have been locked this long before the camera is allowed
