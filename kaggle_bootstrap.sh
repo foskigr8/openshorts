@@ -28,6 +28,16 @@ else
     GPU_COUNT=0
 fi
 
+# 6-aug-2026 (PART 2): on a GPU host, prefer CUDA decode offload and the 2x
+# supersampled crop path (sub-pixel camera steps). Both probe and fall back
+# cleanly inside the app when the ffmpeg build lacks CUDA, so exporting them
+# unconditionally here is safe on CPU-only boxes too.
+if [ "${GPU_COUNT:-0}" -gt 0 ]; then
+    export GPU_RENDER="${GPU_RENDER:-1}"
+    export CROP_SUPERSAMPLE="${CROP_SUPERSAMPLE:-2}"
+    echo "    GPU_RENDER=1, CROP_SUPERSAMPLE=2 (probe + fallback inside app)"
+fi
+
 # --- 2. Python deps --------------------------------------------------------
 # Kaggle's base image already carries torch/opencv/numpy built against its own
 # CUDA. Reinstalling those from requirements.txt is slow and can break CUDA, so
