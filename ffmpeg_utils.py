@@ -10,8 +10,10 @@ Only the codec/quality args live here; surrounding args (-movflags, -pix_fmt,
 audio codecs, filters) stay at each call site.
 """
 import os
+import shutil
 import subprocess
 import threading
+import tempfile
 
 # Quality tiers pinning the historical libx264 settings.
 QUALITY = "quality"            # was: -preset medium -crf 18
@@ -102,12 +104,15 @@ GPU_RENDER_FILTERS = ("scale_cuda", "scale_npp", "overlay_cuda", "crop_cuda")
 
 
 def _probe_gpu_render():
-    """Can this ffmpeg decode on the GPU AND filter on the GPU?
+    """Can THIS ffmpeg decode and filter on the GPU on THIS host?
 
-    Requires a CUDA hwaccel (cuda/nvdec/cuvid) plus at least one CUDA filter
-    in `ffmpeg -filters`. The historical CPU path is byte-identical when this
-    returns False, so a build without CUDA support simply keeps current
-    behavior.
+    Requires BOTH build capability (CUDA hwaccel + a CUDA filter in
+    `ffmpeg -filters`) AND a working device: two tiny real operations are
+    run — a CUDA decode of a generated file, and scale_cuda on uploaded
+    frames. Build support alone is not enough: a container with CUDA filters
+    but no NVIDIA device (e.g. a CPU-only backend) must not enable
+    `-hwaccel cuda` and then fail every render. The historical CPU path is
+    byte-identical when this returns False.
     """
     try:
         hw = subprocess.run(
@@ -135,7 +140,38 @@ def _probe_gpu_render():
     present = sorted(n for n in GPU_RENDER_FILTERS if n in names)
     if not present:
         return False
-    print(f"🎞️ [GPU_RENDER] CUDA hwaccel + filters available: {present}")
+    probe_dir = tempfile.mkdtemp(prefix="gpu_render_probe_")
+    try:
+        src = os.path.join(probe_dir, "src.mp4")
+        ok = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error",
+             "-f", "lavfi", "-i", "color=black:s=64x64:d=0.2",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", src],
+            capture_output=True, timeout=30)
+        if ok.returncode != 0:
+            return False
+        dec = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error",
+             "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+             "-i", src, "-vf", "hwdownload,format=nv12",
+             "-f", "null", "-"],
+            capture_output=True, timeout=30)
+        if dec.returncode != 0:
+            return False
+        flt = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error",
+             "-f", "lavfi", "-i", "color=red:s=64x64:d=0.2",
+             "-vf", "hwupload_cuda,scale_cuda=32:32,format=yuv420p",
+             "-f", "null", "-"],
+            capture_output=True, timeout=30)
+        if flt.returncode != 0:
+            return False
+    except Exception:
+        return False
+    finally:
+        shutil.rmtree(probe_dir, ignore_errors=True)
+    print(f"🎞️ [GPU_RENDER] CUDA decode + filters verified on this device: "
+          f"{present}")
     return True
 
 
@@ -157,18 +193,21 @@ def gpu_render_available():
     return _gpu_render_ok
 
 
-def gpu_decode_args(device=None):
+def gpu_decode_args(device=None, output_format=False):
     """Input-side ffmpeg args to decode on the GPU; [] = CPU decode.
 
-    Only plain ``-hwaccel cuda`` (frames downloaded to system memory for the
-    CPU filtergraph) — the CUDA filter chain (scale_cuda/overlay_cuda) is a
-    separate, host-verified change and must not ship untested. ``device``
-    pins a multi-GPU worker to a specific card (see gpu_affinity.py; never
-    CUDA_VISIBLE_DEVICES — it is read once at CUDA init).
+    ``output_format=True`` keeps the decoded frames on the GPU
+    (``-hwaccel_output_format cuda``) for the CUDA filtergraph
+    (unified_filtergraph_gpu); the default keeps frames in system memory so
+    the CPU filtergraph works unchanged. ``device`` pins a multi-GPU worker
+    to a specific card (see gpu_affinity.py; never CUDA_VISIBLE_DEVICES — it
+    is read once at CUDA init).
     """
     if not gpu_render_available():
         return []
     args = ["-hwaccel", "cuda", "-extra_hw_frames", "16"]
+    if output_format:
+        args += ["-hwaccel_output_format", "cuda"]
     if device is not None:
         args += ["-hwaccel_device", str(device)]
     return args

@@ -30,6 +30,23 @@ def test_unified_filtergraph_supersamples_the_input():
     assert "crop@c=w=1620:h=2160:x=200:y=100" in graph
 
 
+def test_unified_filtergraph_gpu_uses_cuda_filters():
+    graph = reframe_v2.unified_filtergraph_gpu(
+        1080, 1920, 810, 1080, "/tmp/cmd.txt", 100, initial_y=50)
+    assert "hwdownload,format=nv12" in graph
+    assert "scale_cuda=1080:1920:force_original_aspect_ratio=increase" in graph
+    assert "scale_cuda=1080:1440" in graph
+    assert "overlay_cuda=x=0:y=(H-h)/2" in graph
+    assert "hwupload_cuda" in graph
+
+
+def test_unified_filtergraph_gpu_supersamples_on_gpu():
+    graph = reframe_v2.unified_filtergraph_gpu(
+        1080, 1920, 1620, 2160, "/tmp/cmd.txt", 200, initial_y=100,
+        supersample=2)
+    assert "scale_cuda=w=iw*2:h=ih*2:format=nv12" in graph
+
+
 def test_unified_filtergraph_default_is_unchanged():
     graph = reframe_v2.unified_filtergraph(
         1080, 1920, 810, 1080, "/tmp/cmd.txt", 100, initial_y=50)

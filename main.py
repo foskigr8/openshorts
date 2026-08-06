@@ -1455,6 +1455,25 @@ def _download_quality_floor(specs):
     return None
 
 
+def _enforce_hd_gate(specs, require_hd=False):
+    """PART 6 (6-aug-2026): refuse to proceed on a sub-HD source.
+
+    Returns the floor reason (or None) and raises when ``require_hd`` is set
+    and the source is below the floor — the downloader exists to LAND high
+    quality, not to report what it landed. ALLOW_LOW_QUALITY_SOURCE=1 keeps
+    an explicit escape hatch for uploaders whose source is genuinely soft.
+    """
+    reason = _download_quality_floor(specs)
+    if reason and require_hd and os.environ.get(
+            "ALLOW_LOW_QUALITY_SOURCE", "").strip().lower() not in (
+            "1", "true", "yes"):
+        raise RuntimeError(
+            f"HD download failed: the best available source is {reason}. "
+            "The reframe inherits the source ceiling, so clips would be soft. "
+            "Set ALLOW_LOW_QUALITY_SOURCE=1 to proceed anyway.")
+    return reason
+
+
 # Byte budget for the sanitized video title used as the stem of every derived
 # file. Filesystems cap a name in BYTES (255 on ext4), not characters, and the
 # pipeline decorates this stem: "_clip_10.mp4" (12), "subtitled_<ts>_" (21),
@@ -1482,7 +1501,7 @@ def sanitize_filename(filename):
     return truncate_bytes(filename, MAX_TITLE_BYTES)
 
 
-def download_youtube_video(url, output_dir="."):
+def download_youtube_video(url, output_dir=".", require_hd=False):
     """
     Downloads a YouTube video using yt-dlp.
     Returns the path to the downloaded video and the video title.
@@ -1587,6 +1606,16 @@ def download_youtube_video(url, output_dir="."):
                     'best[height<=720][ext=mp4]/best[height<=720]/best')
         return ('bestvideo[vcodec^=avc1][height<=1080][ext=mp4]+bestaudio[ext=m4a]/'
                 'bestvideo[vcodec^=avc1][height<=1080]+bestaudio/'
+                # 6-aug-2026 (PART 6): avc1-only can reject a video whose ONLY
+                # HD streams are vp9/av01 (increasingly common on YouTube) —
+                # the ladder then fell to a ~360p progressive stream even
+                # though a 1080p vp9 existed. vp9/av01 merge fine into the
+                # mp4 container; the codec filter was a compatibility nicety,
+                # not a requirement.
+                'bestvideo[vcodec^=vp09][height<=1080][ext=mp4]+bestaudio[ext=m4a]/'
+                'bestvideo[vcodec^=av01][height<=1080][ext=mp4]+bestaudio[ext=m4a]/'
+                'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/'
+                'bestvideo[height<=1080]+bestaudio/'
                 'best[height<=1080][ext=mp4]/best[ext=mp4]/best')
     fallback_fmt = 'best[ext=mp4]/best'
 
@@ -1675,7 +1704,20 @@ def download_youtube_video(url, output_dir="."):
     sanitized_title = None
     last_err = None
     used_proxy = False
-    for label, ea, fmt, proxy, use_cookies in attempts:
+    best_title = None
+    best_specs = None
+    best_path = None
+
+    def _quality_key(specs):
+        """Rough sharpness ordering for choosing between landed files."""
+        return (specs["height"], specs["bitrate_mbps"])
+
+    for idx, (label, ea, fmt, proxy, use_cookies) in enumerate(attempts):
+        # PART 6 (6-aug-2026): a low-quality success must not stop the ladder
+        # when a better (HD-labeled) strategy is still queued — the goal is
+        # that HD LANDS, not that the first success ships. Only attempts that
+        # can plausibly produce a better stream count as "remaining HD".
+        remaining_hd = any("HD" in a[0] for a in attempts[idx + 1:])
         # A 403 on the media fetch is usually transient: the googlevideo URL is
         # bound to the IP that extracted it, and the residential proxy rotates
         # its exit IP between requests. Retrying re-extracts and usually lands
@@ -1686,6 +1728,31 @@ def download_youtube_video(url, output_dir="."):
                 sanitized_title = _attempt(ea, fmt, proxy, use_cookies)
                 used_proxy = proxy is not None
                 print(f"✅ Download succeeded ({label}).")
+                # Verify what actually landed BEFORE deciding to proceed.
+                _landed = os.path.join(output_dir, f"{sanitized_title}.mp4")
+                _specs = _probe_video_specs(_landed)
+                if _specs is not None:
+                    print(f"📐 Source specs ({label}): {_specs['width']}x"
+                          f"{_specs['height']} @ {_specs['fps']}fps · "
+                          f"{_specs['bitrate_mbps']} Mbps · "
+                          f"{_specs['size_mb']} MiB")
+                    _reason = _download_quality_floor(_specs)
+                    if _reason:
+                        print(f"⚠️ LOW-QUALITY SOURCE ({label}): {_reason}")
+                        if remaining_hd:
+                            # Park this file aside, keep climbing; restore it
+                            # at the end if nothing better lands.
+                            try:
+                                _best = _landed + ".best"
+                                shutil.copy2(_landed, _best)
+                                best_title, best_specs = sanitized_title, _specs
+                                best_path = _best
+                                print("   ↪️ Below the HD floor — continuing "
+                                      "the ladder for a higher-quality stream.")
+                            except OSError as _e:
+                                print(f"   ⚠️ Could not park best download ({_e})")
+                            sanitized_title = None  # keep climbing
+                            break
                 break
             except Exception as e:
                 last_err = e
@@ -1720,23 +1787,43 @@ Technical Details: {str(last_err)}
                 downloaded_file = os.path.join(output_dir, f)
                 break
 
-    # PART 6 download gate (6-aug-2026): verify what actually landed, log the
-    # true specs, warn loudly when the source is below the HD floor, and
-    # persist the specs next to the file so the job metadata can surface them
-    # (the pipeline merges this into *_metadata.json — see _snap_candidates'
-    # caller). The reframe inherits the source ceiling, so this is the only
-    # place the "quality is low" complaint can actually be fixed or explained.
+    # Restore the best-quality file if the ladder's last attempt landed worse
+    # than a parked one (e.g. an HD attempt succeeded below-floor, then the
+    # final fallback overwrote it with something even worse).
+    if best_path and best_specs:
+        try:
+            _final_specs = _probe_video_specs(downloaded_file)
+            if (_final_specs is None
+                    or _quality_key(_final_specs) < _quality_key(best_specs)):
+                os.replace(best_path, downloaded_file)
+                print(f"♻️ Restored the best download ({best_specs['width']}x"
+                      f"{best_specs['height']} @ "
+                      f"{best_specs['bitrate_mbps']} Mbps) over the ladder's "
+                      "final attempt.")
+        except OSError as e:
+            print(f"⚠️ Could not restore best download ({e})")
+    elif best_path:
+        try:
+            os.remove(best_path)
+        except OSError:
+            pass
+
+    # PART 6 gate (6-aug-2026): measure the FINAL file and refuse to proceed
+    # on a source below the HD floor when the caller requires HD. The
+    # downloader exists to LAND high quality — warning alone was not enough —
+    # but ALLOW_LOW_QUALITY_SOURCE=1 keeps the escape hatch for uploaders
+    # whose source is genuinely soft.
     source_specs = _probe_video_specs(downloaded_file)
     if source_specs:
-        print(f"📐 Source specs: {source_specs['width']}x{source_specs['height']} "
+        print(f"📐 Source specs (final): {source_specs['width']}x{source_specs['height']} "
               f"@ {source_specs['fps']}fps · {source_specs['bitrate_mbps']} Mbps "
               f"· {source_specs['size_mb']} MiB")
-        reason = _download_quality_floor(source_specs)
+        reason = _enforce_hd_gate(source_specs, require_hd=require_hd)
         if reason:
             print(f"⚠️ LOW-QUALITY SOURCE: {reason} — clips will look soft. "
-                  "This is the uploader's source ceiling (or the download "
-                  "fell back to a pre-merged progressive stream), not the "
-                  "render pipeline.")
+                  "This is the uploader's source ceiling (or the ladder fell "
+                  "back to a pre-merged progressive stream), not the render "
+                  "pipeline.")
         try:
             with open(os.path.join(output_dir, "source_specs.json"), "w") as f:
                 json.dump(source_specs, f, indent=2)
@@ -3459,7 +3546,8 @@ if __name__ == '__main__':
             else:
                 output_dir = "."
         
-        input_video, video_title = download_youtube_video(args.url, output_dir)
+        input_video, video_title = download_youtube_video(
+            args.url, output_dir, require_hd=True)
         _write_progress(output_dir, "download", note="source downloaded")
         _stage_durations["download"] = time.time() - _stage_t0
         _stage_t0 = time.time()

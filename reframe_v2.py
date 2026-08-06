@@ -28,8 +28,8 @@ import time
 import threading
 import face_id
 
-from ffmpeg_utils import (video_encode_args, gpu_decode_args, QUALITY_FAST,
-                          METADATA_SCRUB)
+from ffmpeg_utils import (video_encode_args, gpu_decode_args,
+                          gpu_render_available, QUALITY_FAST, METADATA_SCRUB)
 
 ANALYSIS_MAX_WIDTH = 640
 
@@ -389,6 +389,48 @@ def unified_filtergraph(out_w, out_h, crop_w, crop_h, cmd_path, initial_x,
         f"crop={out_w}:{out_h},gblur=sigma=24[bg];"
         f"[fga]scale={fg_w}:{fg_h},setsar=1[fg];"
         f"[bg][fg]overlay=x=0:y=(H-h)/2,setsar=1[vraw];"
+        f"[vraw]{COLOR_GRADE_FILTER}[v]"
+    )
+
+
+def unified_filtergraph_gpu(out_w, out_h, crop_w, crop_h, cmd_path,
+                            initial_x, initial_y=0, supersample=1):
+    """GPU variant of unified_filtergraph (PART 2.3, 6-aug-2026).
+
+    Same 3:4 crop/letterbox composition, but the heavy work moves onto the
+    GPU: scale (scale_cuda) and overlay (overlay_cuda) run on CUDA frames;
+    the sendcmd crop, the background cover-crop, gblur and the color grade
+    have no CUDA variants and stay on CPU (crop is cheap, and the blur/grade
+    are small relative to the full-size scales they replace).
+
+    Only safe to call when ffmpeg_utils.gpu_render_available() passed its
+    REAL device test — the probe verifies a CUDA decode AND scale_cuda on
+    this exact host, so a CPU-only box never reaches this graph. render()
+    additionally retries with the CPU graph on any failure, so a GPU edge
+    case degrades instead of breaking a job.
+    """
+    fg_w = out_w
+    fg_h = int(round(out_w * crop_h / crop_w))
+    fg_h += fg_h % 2
+    ss = max(1, int(supersample))
+    pre = (f"scale_cuda=w=iw*{ss}:h=ih*{ss}:format=nv12,"
+           if ss > 1 else "")
+    return (
+        f"[0:v]{pre}hwdownload,format=nv12,"
+        f"sendcmd=f='{cmd_path}',"
+        f"crop@c=w={crop_w}:h={crop_h}:x={initial_x}:y={initial_y},"
+        f"split=2[fga][bga];"
+        # Background: cover the canvas on the GPU, then the exact crop + blur
+        # on CPU (the crop is a cheap memcpy-style op; gblur has no CUDA
+        # variant and runs at full size only here).
+        f"[bga]hwupload_cuda,"
+        f"scale_cuda={out_w}:{out_h}:force_original_aspect_ratio=increase:"
+        f"format=yuv420p,hwdownload,crop={out_w}:{out_h},gblur=sigma=24[bg];"
+        # Foreground: scale on the GPU, stay on the GPU for the overlay.
+        f"[fga]hwupload_cuda,scale_cuda={fg_w}:{fg_h}:format=yuv420p[fg_cu];"
+        f"[bg]hwupload_cuda[bg_cu];"
+        f"[bg_cu][fg_cu]overlay_cuda=x=0:y=(H-h)/2,"
+        f"hwdownload,format=yuv420p,setsar=1[vraw];"
         f"[vraw]{COLOR_GRADE_FILTER}[v]"
     )
 
@@ -3218,16 +3260,43 @@ def render(input_video, final_output_video, aspect_ratio,
 
         # One pass over the whole clip — no more per-scene segment/concat
         # step, since every frame now renders through the same filtergraph.
-        _run([
-            "ffmpeg", "-y", "-loglevel", "error",
-            *gpu_decode_args(), "-i", input_video,
-            "-filter_complex", graph, "-map", "[v]", "-map", "0:a?",
-            *video_encode_args(QUALITY_FAST), "-c:a", "copy", *METADATA_SCRUB,
-            # +faststart moves the moov atom to the front so the browser <video>
-            # can start playing before the whole file downloads.
-            "-movflags", "+faststart",
-            final_output_video,
-        ])
+        # PART 2.3 (6-aug-2026): when the probe verified a real CUDA device,
+        # run the scale/overlay on the GPU. Any failure retries with the CPU
+        # graph, so a GPU edge case degrades instead of breaking the job.
+        use_gpu_graph = (
+            not split_info and gpu_render_available()
+            and os.environ.get("GPU_FILTERS", "1").strip().lower()
+            not in ("0", "false", "no"))
+        if use_gpu_graph:
+            gpu_graph = unified_filtergraph_gpu(
+                out_w, out_h, crop_w * ss, crop_h * ss, cmd_path,
+                int(round(initial_x * ss)),
+                initial_y=int(round(initial_y * ss)), supersample=ss)
+            try:
+                _run([
+                    "ffmpeg", "-y", "-loglevel", "error",
+                    *gpu_decode_args(output_format=True), "-i", input_video,
+                    "-filter_complex", gpu_graph, "-map", "[v]", "-map", "0:a?",
+                    *video_encode_args(QUALITY_FAST), "-c:a", "copy",
+                    *METADATA_SCRUB, "-movflags", "+faststart",
+                    final_output_video,
+                ])
+            except Exception as e:
+                print(f"   ⚠️ GPU filtergraph failed "
+                      f"({type(e).__name__}: {e}) — retrying with the CPU graph")
+                use_gpu_graph = False
+        if not use_gpu_graph:
+            _run([
+                "ffmpeg", "-y", "-loglevel", "error",
+                *gpu_decode_args(), "-i", input_video,
+                "-filter_complex", graph, "-map", "[v]", "-map", "0:a?",
+                *video_encode_args(QUALITY_FAST), "-c:a", "copy",
+                *METADATA_SCRUB,
+                # +faststart moves the moov atom to the front so the browser
+                # <video> can start playing before the whole file downloads.
+                "-movflags", "+faststart",
+                final_output_video,
+            ])
     finally:
         import shutil
         shutil.rmtree(workdir, ignore_errors=True)

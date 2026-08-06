@@ -17,11 +17,22 @@
 >   LOW-QUALITY SOURCE warning + metadata; fallback relabeled) and PART 2's
 >   safe layer (GPU_RENDER probe, `-hwaccel cuda` decode offload on all four
 >   ffmpeg call sites, Demucs `--device cuda`).
-> - **Needs a GPU-host run to verify (do not ship as proven):** PART 2.3's
->   CUDA filtergraph (scale_cuda/overlay_cuda) — the probe reports what the
->   build has, but the chain itself must be validated on the 2×T4 box; and
->   PART 6.4 (single-encode caption burn) — the 3–4 re-encode generations
->   remain, secondary to the now-fixed download ceiling.
+> - **Implemented but must be validated on the 2×T4 box (the probe's real
+>   device test cannot pass on a CPU-only host):** PART 2.3's CUDA filtergraph
+>   (scale_cuda/overlay_cuda with hwdownload around the CPU-only crop/blur/
+>   grade) — gated on a REAL device probe and retried with the CPU graph on
+>   any failure, so a GPU edge case degrades instead of breaking a job. The
+>   probe itself was hardened: build support alone no longer enables
+>   `-hwaccel cuda` (the studio container has CUDA filters but no device and
+>   correctly stays on CPU). PART 6.4 (single-encode caption burn) remains
+>   open — the 3–4 re-encode generations are secondary to the download gate.
+> - **PART 6 hardened per owner direction ("make sure high quality lands"):**
+>   a below-floor success no longer ends the ladder — it parks the file aside
+>   and keeps trying HD strategies, restoring the best at the end; and the
+>   pipeline now FAILS the job when the best available source is still below
+>   the floor (`ALLOW_LOW_QUALITY_SOURCE=1` is the escape hatch) instead of
+>   shipping soft clips with a warning. The HD format string also accepts
+>   vp9/av01 streams when avc1 HD is unavailable.
 > - Kaggle notebook env cell: set `GPU_RENDER=1`, `CROP_SUPERSAMPLE=2` on the
 >   T4 host and confirm the probe line appears in the job log.
 >

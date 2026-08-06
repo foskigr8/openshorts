@@ -82,6 +82,9 @@ def test_gpu_decode_args_empty_when_probe_fails(monkeypatch):
 def test_gpu_decode_args_offloads_decode_when_probe_passes(monkeypatch):
     monkeypatch.setattr(ffmpeg_utils, "_probe_gpu_render", lambda: True)
     assert gpu_decode_args() == ["-hwaccel", "cuda", "-extra_hw_frames", "16"]
+    assert gpu_decode_args(output_format=True) == [
+        "-hwaccel", "cuda", "-extra_hw_frames", "16",
+        "-hwaccel_output_format", "cuda"]
     assert gpu_decode_args(device=1) == [
         "-hwaccel", "cuda", "-extra_hw_frames", "16",
         "-hwaccel_device", "1"]

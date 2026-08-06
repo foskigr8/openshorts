@@ -28,6 +28,28 @@ def test_quality_floor_passes_genuine_hd():
         {"height": 1080, "bitrate_mbps": 4.0}) is None
 
 
+def test_hd_gate_raises_on_sub_hd_when_required():
+    with pytest.raises(RuntimeError, match="HD download failed"):
+        main._enforce_hd_gate({"height": 480, "bitrate_mbps": 4.0},
+                              require_hd=True)
+
+
+def test_hd_gate_warns_but_allows_when_not_required():
+    assert main._enforce_hd_gate(
+        {"height": 480, "bitrate_mbps": 4.0}, require_hd=False) is not None
+
+
+def test_hd_gate_honors_allow_low_quality_escape_hatch(monkeypatch):
+    monkeypatch.setenv("ALLOW_LOW_QUALITY_SOURCE", "1")
+    assert main._enforce_hd_gate(
+        {"height": 480, "bitrate_mbps": 4.0}, require_hd=True) is not None
+
+
+def test_hd_gate_passes_genuine_hd():
+    assert main._enforce_hd_gate(
+        {"height": 1080, "bitrate_mbps": 4.0}, require_hd=True) is None
+
+
 def test_probe_video_specs_reports_true_resolution(tmp_path):
     video = tmp_path / "tiny.mp4"
     writer = main.cv2.VideoWriter(
