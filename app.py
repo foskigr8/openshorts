@@ -1335,6 +1335,7 @@ app.add_middleware(
 
 # Mount static files for serving videos
 app.mount("/videos", StaticFiles(directory=OUTPUT_DIR), name="videos")
+app.mount("/outputs", StaticFiles(directory=OUTPUT_DIR), name="outputs")
 
 # Mount static files for serving thumbnails
 THUMBNAILS_DIR = os.path.join(OUTPUT_DIR, "thumbnails")

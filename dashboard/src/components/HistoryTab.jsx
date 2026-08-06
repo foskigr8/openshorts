@@ -221,6 +221,12 @@ export default function HistoryTab({ onReopenProject, search = '' }) {
                           onPlay={(e) => pauseAllOtherPlayers(e.currentTarget)}
                         />
                       </div>
+                    ) : v.status === 'processing' || vids[0]?.status === 'processing' ? (
+                      <div className="aspect-[9/16] bg-paper3 flex flex-col items-center justify-center gap-2 text-brass relative overflow-hidden">
+                        <div className="absolute inset-0 bg-gradient-to-b from-brass/5 via-brass/20 to-brass/5 animate-pulse" />
+                        <Loader2 size={24} className="animate-spin relative z-10 text-brass" />
+                        <span className="readout text-[10px] uppercase relative z-10 text-ink">rendering clip…</span>
+                      </div>
                     ) : (
                       <div className="aspect-[9/16] bg-paper3 flex flex-col items-center justify-center gap-2 text-muted">
                         <AlertTriangle size={22} />

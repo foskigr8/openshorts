@@ -1692,11 +1692,10 @@ def download_youtube_video(url, output_dir=".", require_hd=False):
         # 10.5-minute source in 28.41 MiB (~360p) and the reframe inherited that
         # resolution, so every delivered clip was low quality.
         [('anonymous', {}, _hd_fmt_for(None), None, False)]
-        + [('ios-spoof', ios_spoof_args, fallback_fmt, None, False)]
+        + [('ios-spoof', ios_spoof_args, _hd_fmt_for(None), None, False)]
         + ([('HD-direct', hd_args, _hd_fmt_for(None), None, True)] if _direct_first else [])
         + ([('HD', hd_args, _hd_fmt_for(_proxy), _proxy, True)] if hd_args else [])
-        + [('fallback (LOW-RES PROGRESSIVE)', fallback_args, fallback_fmt,
-            _proxy, True)]
+        + [('fallback-hd', fallback_args, _hd_fmt_for(_proxy), _proxy, True)]
     )
 
     sanitized_title = None
