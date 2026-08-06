@@ -100,17 +100,45 @@ fi
 # Built once into dashboard/dist and then served by app.py. No VITE_API_URL is
 # set on purpose: config.js falls back to a relative base, so the SPA talks to
 # whatever origin serves it — which is what makes one tunnel enough.
-if [ ! -d dashboard/dist ]; then
+# Rebuild when the SOURCE is newer than the build, not just when dist is
+# missing. dashboard/dist is gitignored, so a fresh clone always builds — but
+# the notebook now pulls into an existing checkout (cell 2), and a UI change
+# arriving that way left a stale dist in place reporting "already built". The
+# dashboard is compiled, so an un-rebuilt dist serves the OLD interface with
+# no sign anything is wrong. REBUILD_DASHBOARD=1 forces it.
+dashboard_needs_build() {
+    [ ! -d dashboard/dist ] && return 0
+    [ "${REBUILD_DASHBOARD:-0}" = "1" ] && return 0
+    # Any source file newer than the built index.html.
+    newer=$(find dashboard/src dashboard/index.html dashboard/package.json \
+                 dashboard/vite.config.js dashboard/seo 2>/dev/null \
+                 -newer dashboard/dist/index.html -print -quit)
+    [ -n "$newer" ]
+}
+
+if dashboard_needs_build; then
     if command -v npm >/dev/null 2>&1; then
-        say "Building dashboard (2-4 min)"
-        (cd dashboard && npm ci --silent 2>/dev/null || npm install --silent) \
-            && (cd dashboard && npm run build --silent)
+        if [ -d dashboard/dist ]; then
+            say "Rebuilding dashboard — sources changed since the last build (2-4 min)"
+        else
+            say "Building dashboard (2-4 min)"
+        fi
+        if (cd dashboard && npm ci --silent 2>/dev/null || npm install --silent) \
+                && (cd dashboard && npm run build --silent); then
+            echo "    dashboard build ok"
+        else
+            # Loud on purpose: app.py serves dist directly, so a failed build
+            # means the UI is stale or absent while everything else looks fine.
+            echo "    !! DASHBOARD BUILD FAILED — the served UI is stale or missing."
+            echo "       Run it by hand for the real error:"
+            echo "       cd dashboard && npm run build"
+        fi
     else
         echo "    no npm — dashboard cannot be built here."
         echo "    Commit dashboard/dist, or attach it as a Kaggle Dataset."
     fi
 else
-    say "Dashboard already built (dashboard/dist)"
+    say "Dashboard already built (dashboard/dist is newer than the sources)"
 fi
 
 # --- 4. Secrets ------------------------------------------------------------
