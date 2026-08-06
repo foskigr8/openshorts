@@ -625,10 +625,10 @@ def transcribe_media(media_path):
                 print(f"🎙️ [ASR] parakeet ok: lang={transcript['language']} "
                       f"segments={len(transcript['segments'])}")
                 return transcript
-            print(f"⚠️ [ASR] parakeet result rejected ({reason}) — "
+            print(f"⚠️ DEGRADED OUTPUT: [ASR] parakeet result rejected ({reason}) — "
                   f"falling back to whisper")
         except Exception as e:
-            print(f"⚠️ [ASR] parakeet failed ({type(e).__name__}: {e}) — "
+            print(f"⚠️ DEGRADED OUTPUT: [ASR] parakeet failed ({type(e).__name__}: {e}) — "
                   f"falling back to whisper")
 
     if backend == "assemblyai":
@@ -638,7 +638,7 @@ def transcribe_media(media_path):
                   f"segments={len(transcript['segments'])}")
             return transcript
         except Exception as e:
-            print(f"⚠️ [ASR] assemblyai failed ({type(e).__name__}: {e}) — "
-                  f"falling back to whisper")
+            print(f"⚠️ DEGRADED OUTPUT: [ASR] assemblyai failed ({type(e).__name__}: {e}) — "
+                  f"falling back to whisper (slow, no diarization)")
 
     return _transcribe_with_whisper(media_path)

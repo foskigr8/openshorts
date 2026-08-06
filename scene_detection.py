@@ -87,7 +87,7 @@ def detect_scenes(video_path):
         try:
             return _detect_transnetv2(video_path)
         except Exception as e:
-            print(f"   ⚠️ TransNetV2 scene detection failed "
+            print(f"   ⚠️ DEGRADED OUTPUT: TransNetV2 scene detection failed "
                   f"({type(e).__name__}: {e}) — falling back to PySceneDetect")
     return _detect_pyscenedetect(video_path)
 

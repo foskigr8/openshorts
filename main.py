@@ -3320,7 +3320,7 @@ def get_viral_clips(transcript_result, video_duration, source_video_path=None,
             if engine == "skill":
                 raise RuntimeError(
                     f"VIRAL_ENGINE=skill failed ({type(e).__name__}: {e})") from e
-            print(f"⚠️ Viral Clip Finder engine failed ({type(e).__name__}: {e}) "
+            print(f"⚠️ DEGRADED OUTPUT: Viral Clip Finder engine failed ({type(e).__name__}: {e}) "
                   "— falling back to the narrative engine.")
 
     # --- Existing narrative-arc engine (unchanged behavior) ---
