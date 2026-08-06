@@ -185,3 +185,29 @@ def delete_prefix(prefix) -> int:
             print(f"⚠️ HF storage: delete of {path} failed "
                   f"({type(e).__name__}: {e})")
     return removed
+
+
+def list_job_files():
+    """{job_id: [filenames]} from the HF repo, for restoring History on a
+    fresh Kaggle session (6-aug-2026). /kaggle/working is wiped between
+    sessions, so the only record of previous jobs is the backup repo; the
+    history endpoint uses this to rebuild entries that point at
+    /api/storage/{job_id}/{filename} for on-demand restore."""
+    api = _client()
+    if api is None:
+        return {}
+    try:
+        files = api.list_repo_files(repo_id=repo_id(), repo_type="dataset")
+    except Exception as e:
+        print(f"⚠️ HF storage: list failed ({type(e).__name__}: {e})")
+        return {}
+    jobs = {}
+    for path in files:
+        if not path.startswith("jobs/"):
+            continue
+        parts = path.split("/", 2)
+        if len(parts) < 3:
+            continue
+        job_id, filename = parts[1], parts[2]
+        jobs.setdefault(job_id, []).append(filename)
+    return jobs

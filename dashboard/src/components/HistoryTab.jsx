@@ -175,6 +175,13 @@ export default function HistoryTab({ onReopenProject, search = '' }) {
                   </p>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
+                  <a
+                    href={`/api/jobs/${jobId}/logs`}
+                    className="btn-ghost px-3 py-2 text-xs"
+                    title="Download this run's full log as a text file"
+                  >
+                    <span className="icon-chip-muted !w-6 !h-6"><Download size={13} /></span> logs
+                  </a>
                   {project && onReopenProject && (
                     <button
                       onClick={() => handleReopen(jobId)}

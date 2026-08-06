@@ -287,7 +287,16 @@ SAFE_MARGIN_V = 43
 # (user reference, 1-aug-2026: research_clips/ptb_4.mp4) — that reference
 # show's captions sit noticeably higher, roughly two-fifths up the frame
 # rather than hugging the very bottom edge.
+#
+# 6-aug-2026: the FLOOR using this value made "bottom" land at ~40% up the
+# frame, which reads as MIDDLE — the owner's "I put the caption at bottom,
+# still came back at middle" report. The raised placement is now a MARGIN
+# choice (CAPTION_MARGIN_V), not a forced floor: the floor only exists to
+# keep captions off the blurred fill below the content box, so it clears the
+# content-box bottom edge by a small inset and then respects the per-job
+# margin. Set CAPTION_MARGIN_V >= 100 to get the raised reference look back.
 CAPTION_CONTENT_INSET_RATIO = 0.36
+CAPTION_CONTENT_FLOOR_INSET = 0.04  # fraction of FRAME height, not box height
 
 
 # The caption look applied automatically to every generated clip.
@@ -483,14 +492,14 @@ def generate_ass(transcript, clip_start, clip_end, output_path,
     # CAPTION_CONTENT_INSET_RATIO up from the bottom of that box.
     PLAY_RES_Y = 288
     content_bottom_ratio = (1 - UNIFIED_CONTENT_HEIGHT_RATIO) / 2 + UNIFIED_CONTENT_HEIGHT_RATIO
-    caption_inset_ratio = CAPTION_CONTENT_INSET_RATIO * UNIFIED_CONTENT_HEIGHT_RATIO
-    general_margin_v = round(((1 - content_bottom_ratio) + caption_inset_ratio) * PLAY_RES_Y)
-    # Respect a caller who asked for MORE lift than the content box needs.
-    # This margin exists to keep captions off the blurred fill during GENERAL
-    # scenes, so it is a FLOOR, not a fixed value — before this, a per-job
-    # "bottom, raised" choice was silently discarded on every general-layout
-    # line, which is what "I set the caption position and only centre happens"
-    # looks like from the outside.
+    # FLOOR: just enough margin to clear the blurred fill below the content
+    # box (content-bottom offset + a small inset). This is deliberately NOT
+    # the raised reference placement — since 6-aug-2026 the raised look is a
+    # CAPTION_MARGIN_V choice, and the floor must not dominate it into
+    # looking like "middle" when the owner asks for bottom.
+    general_margin_v = round(
+        ((1 - content_bottom_ratio) + CAPTION_CONTENT_FLOOR_INSET) * PLAY_RES_Y)
+    # Respect a caller who asked for MORE lift than the floor needs.
     general_margin_v = max(general_margin_v,
                            int(_clamp_number(margin_v, 0, 200, SAFE_MARGIN_V)))
     general_ranges = general_ranges or []

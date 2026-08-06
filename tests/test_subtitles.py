@@ -248,8 +248,26 @@ class TestGenerateAss:
         words = [_w(" hello", 0.0, 0.5)]
         assert generate_ass(self._transcript(words), 0, 10, str(out)) is True
         content = out.read_text(encoding="utf-8-sig")
-        line = [l for l in content.splitlines() if l.startswith("Dialogue:")][0]
+        line = [l for l in content.splitlines()
+                if l.startswith("Dialogue:")][0]
         assert line.split(",")[7] == "0"
+
+    def test_general_floor_keeps_bottom_near_the_bottom(self, tmp_path):
+        # 6-aug-2026: the content-box floor used to place "bottom" at ~40%
+        # up the frame (reads as MIDDLE). It now clears the blur band by a
+        # small inset and then respects the per-job margin.
+        from subtitles import generate_ass
+        out = tmp_path / "subs.ass"
+        words = [_w(" hello", 0.0, 0.5)]
+        assert generate_ass(self._transcript(words), 0, 10, str(out),
+                            alignment="bottom", margin_v=43,
+                            general_ranges=[(0.0, 10.0)]) is True
+        content = out.read_text(encoding="utf-8-sig")
+        line = next(l for l in content.splitlines()
+                    if l.startswith("Dialogue:"))
+        margin = int(line.split(",")[7])
+        assert 40 <= margin <= 55, \
+            f"'bottom' must sit just inside the content box, got {margin}"
 
     def test_karaoke_merges_fragments_too(self, tmp_path):
         from subtitles import generate_ass

@@ -20,7 +20,7 @@ from hardware_defaults import default_max_concurrent_jobs
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, Response
 from starlette.background import BackgroundTask
 from pydantic import BaseModel
 from s3_uploader import upload_job_artifacts, list_all_clips, upload_actor_to_s3, list_actor_gallery, upload_video_to_gallery, list_video_gallery
@@ -2285,6 +2285,31 @@ async def restore_from_storage(job_id: str, filename: str, request: Request):
     return FileResponse(local_path, media_type="video/mp4")
 
 
+@app.get("/api/jobs/{job_id}/logs")
+async def job_logs_download(job_id: str):
+    """Download a job's logs as plain text (6-aug-2026).
+
+    Logs used to exist only in memory; the per-job logs.jsonl is now the
+    durable copy. Serve it as an attachment so the owner can keep diagnosis
+    material ("the logs is there for a reason... so I can easily copy it").
+    """
+    job_path = os.path.join(OUTPUT_DIR, os.path.basename(job_id))
+    entries = _replay_job_logs(job_id, job_path)
+    if not entries:
+        entries = jobs.get(job_id, {}).get('logs', [])
+    if not entries:
+        raise HTTPException(status_code=404,
+                            detail="No logs retained for this job")
+    text = "\n".join(
+        time.strftime("%H:%M:%S", time.localtime(e.get("ts", 0)))
+        + "  " + str(e.get("text", ""))
+        for e in entries)
+    return Response(
+        text, media_type="text/plain",
+        headers={"Content-Disposition":
+                 f'attachment; filename="{job_id}_logs.txt"'})
+
+
 @app.get("/api/history")
 async def list_history(request: Request):
     """Every clip still on disk, newest job first — the durable history view.
@@ -2301,6 +2326,7 @@ async def list_history(request: Request):
     """
     owner = await _request_owner_id(request)
     videos = []
+    known_job_ids = set()
     try:
         job_ids = os.listdir(OUTPUT_DIR)
     except FileNotFoundError:
@@ -2309,6 +2335,7 @@ async def list_history(request: Request):
         job_path = os.path.join(OUTPUT_DIR, job_id)
         if job_id == os.path.basename(THUMBNAILS_DIR) or not os.path.isdir(job_path):
             continue
+        known_job_ids.add(job_id)
         # Ownership is checked before anything else so it guards the
         # no-metadata branch below too.
         job_owner = None
@@ -2446,6 +2473,38 @@ async def list_history(request: Request):
                         v["status"] = job_status
         except Exception as e:
             print(f"⚠️ Could not read history entry {job_id}: {e}")
+    # Fresh-session fallback (6-aug-2026): on a new Kaggle session the whole
+    # working dir is wiped, so the disk scan above finds nothing — but the HF
+    # backup repo still holds every finished clip. Rebuild entries from the
+    # repo so previous projects are visible again and playable via the
+    # on-demand restore endpoint.
+    if hf_storage.configured():
+        try:
+            for job_id, filenames in hf_storage.list_job_files().items():
+                if job_id in known_job_ids:
+                    continue
+                clips = sorted(
+                    f for f in filenames
+                    if "_clip_" in f
+                    and not f.startswith(("autosubs_", "temp_", "hook_",
+                                          "subtitled_0_")))
+                for i, name in enumerate(clips):
+                    title = re.sub(r"^subtitled_\d+_", "", name)
+                    title = re.sub(r"_clip_\d+\.mp4$", "", title)
+                    videos.append({
+                        "id": f"{job_id}_{i}",
+                        "job_id": job_id,
+                        "title": title,
+                        "created_at": "",
+                        "status": "completed",
+                        "duration": 0,
+                        "size_bytes": 0,
+                        "storage": "huggingface",
+                        "view_url": f"/api/storage/{job_id}/{name}",
+                        "download_url": f"/api/storage/{job_id}/{name}",
+                    })
+        except Exception as e:
+            print(f"⚠️ HF history fallback failed ({type(e).__name__}: {e})")
     videos.sort(key=lambda v: v["created_at"], reverse=True)
     return {"videos": videos}
 

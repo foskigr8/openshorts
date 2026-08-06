@@ -102,6 +102,30 @@ def test_status_reports_presence_but_never_the_token(monkeypatch):
     assert "hf_write_token" not in repr(status)
 
 
+def test_list_job_files_groups_by_job(monkeypatch):
+    _configure(monkeypatch)
+    api = FakeApi()
+    api.files = [
+        "jobs/abc/subtitled_1_Title_clip_1.mp4",
+        "jobs/abc/Title_clip_1.mp4",
+        "jobs/def/Other_clip_1.mp4",
+        "README.md",
+    ]
+    _install_fake_hub(monkeypatch, api)
+    jobs = hf_storage.list_job_files()
+    assert jobs == {
+        "abc": ["subtitled_1_Title_clip_1.mp4", "Title_clip_1.mp4"],
+        "def": ["Other_clip_1.mp4"],
+    }
+
+
+def test_list_job_files_empty_when_unconfigured(monkeypatch):
+    api = FakeApi()
+    api.files = ["jobs/abc/clip.mp4"]
+    _install_fake_hub(monkeypatch, api)
+    assert hf_storage.list_job_files() == {}
+
+
 def test_status_hides_the_repo_when_unconfigured():
     assert hf_storage.status()["repo"] is None
 
