@@ -34,7 +34,7 @@ def test_unified_filtergraph_gpu_uses_cuda_filters():
     graph = reframe_v2.unified_filtergraph_gpu(
         1080, 1920, 810, 1080, "/tmp/cmd.txt", 100, initial_y=50)
     assert "hwdownload,format=nv12" in graph
-    assert "scale_cuda=1080:1920:force_original_aspect_ratio=increase" in graph
+    assert "scale_cuda=270:480:force_original_aspect_ratio=increase" in graph
     assert "scale_cuda=1080:1440" in graph
     assert "overlay_cuda=x=0:y=(H-h)/2" in graph
     assert "hwupload_cuda" in graph
