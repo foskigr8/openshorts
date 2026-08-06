@@ -43,6 +43,12 @@ doing the precise who-is-speaking work during reframing.
 import os
 from typing import Dict, List, Optional, Tuple
 
+# One model + one DB load per process: enrich_if_configured (source-level)
+# and the per-clip framing pass both need identifications, and InsightFace
+# model load is the expensive part. Keyed by the exact configuration so
+# different DBs/models never collide.
+_DB_CACHE: Dict[tuple, "KnownFacesDB"] = {}
+
 
 def default_ctx_id() -> int:
     """Which GPU InsightFace runs on.
@@ -85,6 +91,22 @@ def available() -> bool:
               "speaker enrichment.")
         return False
     return True
+
+
+def get_known_faces_db(db_path: str = None, model_name: str = None,
+                       ctx_id: int = None):
+    """Cached KnownFacesDB instance (see _DB_CACHE)."""
+    db_path = db_path or os.environ.get("FACE_ID_DB")
+    if not db_path or not os.path.isdir(db_path):
+        return None
+    model_name = model_name or os.environ.get("FACE_ID_MODEL", "buffalo_l")
+    if ctx_id is None:
+        ctx_id = default_ctx_id()
+    key = (db_path, model_name, ctx_id)
+    if key not in _DB_CACHE:
+        _DB_CACHE[key] = KnownFacesDB(db_path, model_name=model_name,
+                                      ctx_id=ctx_id)
+    return _DB_CACHE[key]
 
 
 class KnownFacesDB:
@@ -221,6 +243,82 @@ def build_face_trajectory(identifications: List[dict],
     return {"identities": identities}
 
 
+def _iou(a, b):
+    """Intersection-over-union of two (x, y, w, h) boxes."""
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    inter_w = max(0.0, min(ax + aw, bx + bw) - max(ax, bx))
+    inter_h = max(0.0, min(ay + ah, by + bh) - max(ay, by))
+    inter = inter_w * inter_h
+    union = aw * ah + bw * bh - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _xywh(bbox):
+    """Normalize an InsightFace bbox [x1, y1, x2, y2] to (x, y, w, h)."""
+    x1, y1, x2, y2 = (float(v) for v in bbox[:4])
+    return x1, y1, max(0.0, x2 - x1), max(0.0, y2 - y1)
+
+
+def find_track_at_timestamp(tracks, timestamp, bbox, iou_threshold=0.3):
+    """Which track is active at this timestamp with bbox overlap (Step 3d).
+
+    ``tracks``: list of {track_id, frames: [{timestamp, bbox}]} — the
+    shape the integration guide specifies. ``bbox`` may be InsightFace
+    [x1,y1,x2,y2] or (x,y,w,h); both are normalized internally.
+    Returns the matching track_id or None.
+    """
+    ident_box = _xywh(bbox)
+    for track in tracks:
+        for frame in track.get("frames", []):
+            if abs(float(frame["timestamp"]) - timestamp) < 0.5:
+                if _iou(_xywh(frame["bbox"]), ident_box) >= iou_threshold:
+                    return track["track_id"]
+    return None
+
+
+def merge_face_id_with_tracker(tracker_tracks, face_identifications,
+                               min_agreement=0.6):
+    """Map anonymous track IDs to named identities (Step 3d, integration doc).
+
+    tracker_tracks: list of {track_id, frames: [{timestamp, bbox}]}
+    face_identifications: list of {timestamp, name, confidence, bbox}
+
+    Returns {track_id -> {"name", "confidence", "on_screen": [[s, e], ...]}}.
+    A track is only named when >= min_agreement of its matched
+    identifications vote for the same name, so a face that flickers between
+    two people never gets committed.
+    """
+    track_to_name: Dict[int, Dict[str, int]] = {}
+    track_to_samples: Dict[int, List[dict]] = {}
+    for ident in face_identifications:
+        track_id = find_track_at_timestamp(
+            tracker_tracks, ident["timestamp"], ident["bbox"])
+        if track_id is None:
+            continue
+        track_to_name.setdefault(track_id, {})
+        track_to_name[track_id][ident["name"]] = \
+            track_to_name[track_id].get(ident["name"], 0) + 1
+        track_to_samples.setdefault(track_id, []).append(ident)
+
+    result = {}
+    for track_id, votes in track_to_name.items():
+        if not votes:
+            continue
+        best_name = max(votes, key=votes.get)
+        total = sum(votes.values())
+        confidence = votes[best_name] / total
+        if confidence >= min_agreement:
+            samples = sorted(track_to_samples[track_id],
+                             key=lambda s: s["timestamp"])
+            result[track_id] = {
+                "name": best_name,
+                "confidence": round(confidence, 4),
+                "on_screen": _ranges_from_samples(samples),
+            }
+    return result
+
+
 def _overlap_seconds(turns: List[List[float]], ranges: List[List[float]]) -> float:
     total = 0.0
     for s1, e1 in turns:
@@ -298,10 +396,9 @@ def enrich_if_configured(transcript_result: dict,
         return transcript_result, None
     try:
         ctx_id = default_ctx_id()
-        db = KnownFacesDB(
-            os.environ["FACE_ID_DB"],
-            model_name=os.environ.get("FACE_ID_MODEL", "buffalo_l"),
-            ctx_id=ctx_id)
+        db = get_known_faces_db(ctx_id=ctx_id)
+        if db is None:
+            return transcript_result, None
         if not db.embeddings:
             print("⚠️ Face ID: known-faces DB is empty — no names to match.")
             return transcript_result, None

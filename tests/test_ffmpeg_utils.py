@@ -9,7 +9,10 @@ from ffmpeg_utils import (
     QUALITY,
     QUALITY_FAST,
     audio_encode_args,
+    gpu_decode_args,
+    gpu_render_available,
     reset_encoder_cache,
+    reset_gpu_render_cache,
     video_encode_args,
 )
 
@@ -17,9 +20,12 @@ from ffmpeg_utils import (
 @pytest.fixture(autouse=True)
 def _clean_encoder_state(monkeypatch):
     monkeypatch.delenv("FFMPEG_ENCODER", raising=False)
+    monkeypatch.delenv("GPU_RENDER", raising=False)
     reset_encoder_cache()
+    reset_gpu_render_cache()
     yield
     reset_encoder_cache()
+    reset_gpu_render_cache()
 
 
 def test_default_args_pin_historical_x264_settings():
@@ -66,6 +72,40 @@ def test_auto_probes_only_once(monkeypatch):
     for _ in range(3):
         video_encode_args(QUALITY_FAST)
     assert len(calls) == 1
+
+
+def test_gpu_decode_args_empty_when_probe_fails(monkeypatch):
+    monkeypatch.setattr(ffmpeg_utils, "_probe_gpu_render", lambda: False)
+    assert gpu_decode_args() == []
+
+
+def test_gpu_decode_args_offloads_decode_when_probe_passes(monkeypatch):
+    monkeypatch.setattr(ffmpeg_utils, "_probe_gpu_render", lambda: True)
+    assert gpu_decode_args() == ["-hwaccel", "cuda", "-extra_hw_frames", "16"]
+    assert gpu_decode_args(device=1) == [
+        "-hwaccel", "cuda", "-extra_hw_frames", "16",
+        "-hwaccel_device", "1"]
+
+
+def test_gpu_render_zero_disables_without_probing(monkeypatch):
+    monkeypatch.setenv("GPU_RENDER", "0")
+    called = {"n": 0}
+
+    def _fail():
+        called["n"] += 1
+        raise AssertionError("must not probe when disabled")
+
+    monkeypatch.setattr(ffmpeg_utils, "_probe_gpu_render", _fail)
+    assert gpu_render_available() is False
+    assert called["n"] == 0
+
+
+def test_gpu_render_required_warns_and_falls_back(monkeypatch, capsys):
+    monkeypatch.setenv("GPU_RENDER", "1")
+    monkeypatch.setattr(ffmpeg_utils, "_probe_gpu_render", lambda: False)
+    assert gpu_render_available() is False
+    out = capsys.readouterr().out
+    assert "GPU_RENDER=1" in out
 
 
 def test_missing_ffmpeg_binary_means_x264(monkeypatch):

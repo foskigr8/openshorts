@@ -72,7 +72,14 @@ export default function HistoryTab({ onReopenProject, search = '' }) {
     }
   };
 
-  const fmtDate = (iso) => (iso ? new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '');
+  // 6-aug-2026 (PART 5.1): the owner wants date AND time so two runs of the
+  // same link are distinguishable at a glance, not just the date.
+  const fmtDate = (iso) => (iso
+    ? new Date(iso).toLocaleString(undefined, {
+        year: 'numeric', month: 'short', day: 'numeric',
+        hour: '2-digit', minute: '2-digit',
+      })
+    : '');
 
   const handleDelete = async (jobId, title) => {
     if (deleting) return;
@@ -193,12 +200,13 @@ export default function HistoryTab({ onReopenProject, search = '' }) {
                 </div>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-5">
-                {vids.map((v) => (
+                {vids.map((v, vi) => (
                   <div key={v.id} className="card card-hover overflow-hidden group">
                     {v.view_url ? (
                       <div className="aspect-[9/16] bg-black">
                         <video
                           src={v.view_url}
+                          poster={`/api/thumbnails/${jobId}/${vi}`}
                           controls
                           preload="metadata"
                           className="w-full h-full object-contain"

@@ -87,10 +87,14 @@ class TestJumpConfirmation:
         cam.target_center_x = 500.0
         return cam
 
-    def test_small_moves_apply_immediately(self):
+    def test_mid_band_moves_are_ema_damped(self):
+        # 6-aug-2026 (TARGET_EMA): detector box-centre wobble in the band
+        # between the dead zone and the safe zone used to commit instantly and
+        # the chase followed the noise. A light EMA now damps it — the target
+        # still moves (50% of the way), but not to the raw noisy centre.
         cam = self._cam()
         cam.update_target([540, 0, 20, 20])          # centre 550, well inside
-        assert cam.target_center_x == 550
+        assert cam.target_center_x == 525.0
 
     def test_a_single_big_jump_is_ignored(self):
         cam = self._cam()

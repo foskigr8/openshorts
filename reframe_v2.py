@@ -26,8 +26,10 @@ import subprocess
 import tempfile
 import time
 import threading
+import face_id
 
-from ffmpeg_utils import video_encode_args, QUALITY_FAST, METADATA_SCRUB
+from ffmpeg_utils import (video_encode_args, gpu_decode_args, QUALITY_FAST,
+                          METADATA_SCRUB)
 
 ANALYSIS_MAX_WIDTH = 640
 
@@ -81,7 +83,7 @@ def _sendcmd_timestamp(frame_index, fps):
     return f"{t:.6f}"
 
 
-def dedupe_sendcmd_lines(xs, fps, target="crop@c"):
+def dedupe_sendcmd_lines(xs, fps, target="crop@c", scale=1):
     """sendcmd lines driving crop@c, deduped to change-points.
 
     Entries are either a bare x value (pan-only, emits ``crop@c x {x}`` —
@@ -90,6 +92,11 @@ def dedupe_sendcmd_lines(xs, fps, target="crop@c"):
     commands together so a zoom-in changes crop size AND position at the
     same timestamp, while a pure pan still collapses to one line per change
     point since w/h/y are unchanged). Timestamps are relative to the clip.
+
+    ``scale`` (supersampling, 6-aug-2026): the renderer may upscale the
+    source by CROP_SUPERSAMPLE and crop in that 2x space, so crop positions
+    that were quantized to a 1/supersample source grid become whole pixels
+    again here. scale=1 reproduces the historical behavior exactly.
     """
     lines = []
     prev = None
@@ -99,6 +106,8 @@ def dedupe_sendcmd_lines(xs, fps, target="crop@c"):
         stamp = _sendcmd_timestamp(i, fps)
         if isinstance(entry, (tuple, list)):
             x, y, w, h = entry
+            if scale != 1:
+                x, y, w, h = (int(round(v * scale)) for v in (x, y, w, h))
             # sendcmd grammar: each ';'-separated command carries its own
             # timestamp ("time target param value;") — repeating the stamp is
             # how multiple crop@c params change at the SAME time.
@@ -106,7 +115,8 @@ def dedupe_sendcmd_lines(xs, fps, target="crop@c"):
                 f"{stamp} {target} w {w}; {stamp} {target} h {h}; "
                 f"{stamp} {target} x {x}; {stamp} {target} y {y};")
         else:
-            lines.append(f"{stamp} {target} x {entry};")
+            value = entry if scale == 1 else int(round(entry * scale))
+            lines.append(f"{stamp} {target} x {value};")
         prev = entry
     return lines
 
@@ -333,7 +343,7 @@ COLOR_GRADE_FILTER = (
 
 
 def unified_filtergraph(out_w, out_h, crop_w, crop_h, cmd_path, initial_x,
-                         initial_y=0):
+                         initial_y=0, supersample=1):
     """Consistent 3:4-shaped crop window, letterboxed into the output canvas
     over a blurred full-frame background — repositioned per frame via sendcmd
     (x/y/zoom all drive crop@c parameters at change-points), so a tight
@@ -353,12 +363,24 @@ def unified_filtergraph(out_w, out_h, crop_w, crop_h, cmd_path, initial_x,
     on playback (user, 31-jul-2026). Cropping first and splitting after means
     background and foreground travel together, which is what the blurred-
     backdrop look is supposed to do.
+
+    ``supersample`` (>1, 6-aug-2026): upscale the source before cropping so
+    the eased crop path can step sub-pixel. The caller passes crop
+    dims/positions ALREADY scaled into 2x space (the camera emits positions on
+    a 1/supersample source grid; scaling by ss and rounding makes them whole
+    2x pixels, which ffmpeg's integer crop filter can represent). Without it,
+    every eased tail below 1px stalls and then jumps — the follow-shot judder.
+    The final scale to the delivery size is unchanged, so output dimensions
+    are identical; only the internal crop resolution differs.
     """
     fg_w = out_w
     fg_h = int(round(out_w * crop_h / crop_w))
     fg_h += fg_h % 2
+    ss = max(1, int(supersample))
+    in_prefix = (f"scale=iw*{ss}:ih*{ss}:flags=bicubic,"
+                 if ss > 1 else "")
     return (
-        f"[0:v]sendcmd=f='{cmd_path}',"
+        f"[0:v]{in_prefix}sendcmd=f='{cmd_path}',"
         f"crop@c=w={crop_w}:h={crop_h}:x={initial_x}:y={initial_y},"
         f"split=2[fga][bga];"
         # Same content, blown up to cover the full canvas and blurred hard
@@ -379,7 +401,8 @@ def unified_split_filtergraph(out_w, out_h, crop_w, crop_h, main_cmd_path,
                               initial_top, initial_bottom,
                               enable_expr,
                               top_frame_cmd, bottom_frame_cmd,
-                              initial_top_frame, initial_bottom_frame):
+                              initial_top_frame, initial_bottom_frame,
+                              supersample=1):
     """Stacked two-cell reaction-cam variant of unified_filtergraph.
 
     The normal single-crop letterboxed path renders the whole clip (so the
@@ -400,6 +423,11 @@ def unified_split_filtergraph(out_w, out_h, crop_w, crop_h, main_cmd_path,
 
     ``initial_top`` / ``initial_bottom`` are ``(x, y, scale_w, scale_h)`` —
     the crop window's start position and the zoom scale's start size.
+
+    ``supersample`` (>1): same 2x-space treatment as unified_filtergraph. The
+    caller scales the main/cell rects, cell dims and source bounds into 2x
+    space; the zoom-scale targets and the final cell crops stay in output
+    pixels, so the whole filtergraph is consistent at 2x source resolution.
     """
     fg_h = int(round(out_w * crop_h / crop_w))
     fg_h += fg_h % 2
@@ -408,8 +436,11 @@ def unified_split_filtergraph(out_w, out_h, crop_w, crop_h, main_cmd_path,
     bot_x, bot_y, bot_sw, bot_sh = initial_bottom
     top_fx, top_fy = initial_top_frame
     bot_fx, bot_fy = initial_bottom_frame
+    ss = max(1, int(supersample))
+    in_prefix = (f"scale=iw*{ss}:ih*{ss}:flags=bicubic,"
+                 if ss > 1 else "")
     return (
-        f"[0:v]split=3[vm][va][vb];"
+        f"[0:v]{in_prefix}split=3[vm][va][vb];"
         f"[vm]sendcmd=f='{main_cmd_path}',"
         f"crop@c=w={crop_w}:h={crop_h}:x={initial_x}:y={initial_y},"
         f"split=2[fga][bga];"
@@ -1803,10 +1834,81 @@ def _split_ranges_from_flags(flags, fps, min_frames, merge_frames, max_seconds):
     return picked
 
 
+def _ident_bbox_xywh(bbox):
+    """Normalize an InsightFace bbox [x1, y1, x2, y2] to (x, y, w, h)."""
+    x1, y1, x2, y2 = (float(v) for v in bbox[:4])
+    return x1, y1, max(0.0, x2 - x1), max(0.0, y2 - y1)
+
+
+def _accumulate_face_id_votes(candidates, face_identifications, frame_number,
+                              fps, votes):
+    """Vote candidate ids -> names from clip-relative face-ID samples.
+
+    Runs on every detection frame after ids are stamped. Each named sample
+    within ±0.5s whose box overlaps a candidate's box (IoU >= 0.3) votes for
+    that candidate id. The votes let _face_id_binding name a track only once
+    multiple samples agree — a face that flickers between two people never
+    gets committed.
+    """
+    if not face_identifications or not candidates:
+        return votes
+    ts = frame_number / fps if fps else 0.0
+    for ident in face_identifications:
+        if abs(float(ident["timestamp"]) - ts) > 0.5:
+            continue
+        ib = _ident_bbox_xywh(ident["bbox"])
+        for c in candidates:
+            cid = c.get("id")
+            if cid is None or not c["box"]:
+                continue
+            if face_id._iou(c["box"], ib) >= 0.3:
+                votes.setdefault(cid, {})
+                votes[cid][ident["name"]] = \
+                    votes[cid].get(ident["name"], 0) + 1
+    return votes
+
+
+def _face_id_binding(candidates, votes, active_speaker, frame_number, fps,
+                     face_identifications):
+    """Face-ID upgrade of the diarized speaker binding (PART 4, 6-aug-2026).
+
+    Diarization produces a speaker LABEL; binding that label to a face is the
+    chain's weak link (see _resolve_speaker_binding). When face ID has named
+    a candidate (and the transcript's labels were renamed by
+    face_id.enrich_if_configured), a candidate whose name matches the current
+    speaker is returned even if the anchor chain failed — TIER_DIARIZED then
+    frames them. Never forces a cut (the cooldown/hysteresis still apply) and
+    never fires when face ID is off.
+
+    Two paths: a fresh identification at this timestamp naming the speaker's
+    box directly, or accumulated votes (>= 2 samples, >= 60% agreement).
+    """
+    if not active_speaker or not candidates:
+        return None
+    ts = frame_number / fps if fps else 0.0
+    for ident in face_identifications or []:
+        if (abs(float(ident["timestamp"]) - ts) > 0.5
+                or ident["name"] != active_speaker):
+            continue
+        ib = _ident_bbox_xywh(ident["bbox"])
+        for c in candidates:
+            if c["box"] and face_id._iou(c["box"], ib) >= 0.3:
+                return c.get("id")
+    for cid, name_counts in (votes or {}).items():
+        total = sum(name_counts.values())
+        if total < 2:
+            continue
+        best = max(name_counts, key=name_counts.get)
+        if best == active_speaker and name_counts[best] / total >= 0.6:
+            return cid
+    return None
+
+
 def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
                         cameraman, tracker, speaker_turns=None,
                         focus_directives=None, primary_subject_x=None,
-                        asd_speaking_boxes=None, cell_aspect=None):
+                        asd_speaking_boxes=None, cell_aspect=None,
+                        face_identifications=None):
     """Per-frame crop trajectory for the unified 3:4-consistent render (see
     UNIFIED_CROP_RATIO) — every frame gets a crop position from the SAME
     crop shape, repositioned to whoever's relevant, instead of switching
@@ -1830,6 +1932,11 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
     Returns rects: (x1, y1, w, h) per frame — the full crop window, so the
     render can drive zoom (w/h) and vertical position (y) as well as x
     (always populated — there's no more GENERAL fallback to skip).
+
+    ``face_identifications`` (PART 4, 6-aug-2026): clip-relative named
+    face-ID samples from face_id.identify_faces_in_video. When present, they
+    upgrade the weakest link in speaker binding (diarized label -> face) so
+    a named speaker whose anchor chain failed still gets framed.
     """
     import numpy as np
     import main as m
@@ -1916,6 +2023,8 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
     # stabilize_box / §2h(2b)).
     last_target_kind = None
     id_seen_counts = {}
+    face_votes = {}  # candidate id -> {name: vote_count}
+    face_binding_uses = 0
     # Whoever the camera is currently on. A change here is a hard cut.
     last_target_id = None
     # Frame of the last hard cut, from ANY trigger (directive, tracker
@@ -2039,6 +2148,12 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
                 # below re-stamps and snapshots the BOOSTED scores into the
                 # tracker's accumulation — idempotent within a frame).
                 tracker.assign_ids(candidates, frame_number, orig_w)
+                # PART 4 (6-aug-2026): vote named face-ID samples onto the
+                # freshly stamped candidate ids. Only runs when FACE_ID_DB is
+                # configured (face_identifications is None otherwise).
+                _accumulate_face_id_votes(
+                    candidates, face_identifications, frame_number, fps,
+                    face_votes)
                 # How many detections each identity has persisted for. A real
                 # person accumulates a long track; a face that is not a person
                 # -- a printed photo held up to camera, a poster, a face on a
@@ -2136,6 +2251,21 @@ def _analyze_trajectory(input_video, scenes_boundaries, fps, orig_w, orig_h,
                 bound_id = _resolve_speaker_binding(
                     candidates, active_speaker, current_scene_index,
                     speaker_anchors, speaker_to_id, orig_w) if active_speaker else None
+                # PART 4: if the anchor chain failed to bind the diarized
+                # speaker to a face, let face ID do it — a named candidate
+                # whose face-ID name matches the current speaker label. This
+                # is the upgrade that makes FACE_ID_DB actually drive framing
+                # instead of only renaming transcript labels.
+                if bound_id is None and active_speaker:
+                    _fid = _face_id_binding(
+                        candidates, face_votes, active_speaker,
+                        frame_number, fps, face_identifications)
+                    if _fid is not None:
+                        bound_id = _fid
+                        face_binding_uses += 1
+                        if face_binding_uses == 1:
+                            print(f"   🪪 Face ID binding active — framing "
+                                  f"speaker '{active_speaker}' by name")
                 # Kept separate from bound_id for the policy: these are two
                 # different tiers of evidence (lip-sync names a face on
                 # screen; diarization names an audio label that still has to
@@ -2828,6 +2958,7 @@ def render(input_video, final_output_video, aspect_ratio,
     import main as m
 
     print("   🚀 Reframe engine v2 (ffmpeg-native render)")
+    supersample = max(1, int(os.environ.get("CROP_SUPERSAMPLE", "1")))
     scenes, fps = m.detect_scenes(input_video)
     fps = float(fps)  # PySceneDetect can hand back a Fraction
     orig_w, orig_h = m.get_video_resolution(input_video)
@@ -2848,7 +2979,8 @@ def render(input_video, final_output_video, aspect_ratio,
     # delivery aspect_ratio — SmoothedCameraman derives crop_width/height
     # from video_width/height and this ratio only, never from out_w/out_h.
     cameraman = m.SmoothedCameraman(out_w, out_h, orig_w, orig_h,
-                                    aspect_ratio=UNIFIED_CROP_RATIO, fps=fps)
+                                    aspect_ratio=UNIFIED_CROP_RATIO, fps=fps,
+                                    supersample=supersample)
     _clip_end = clip_end if clip_end is not None else clip_start + (scene_boundaries[-1][1] / fps)
     # LR-ASD: who is actually speaking, from lip movement synced to audio.
     # Clip-scoped on purpose — see asd_worker.score_clip. Entirely optional:
@@ -2928,15 +3060,58 @@ def render(input_video, final_output_video, aspect_ratio,
                                                  scene_boundaries[-1][1])
                      if transcript else None)
 
+    # PART 4 (6-aug-2026): named face-ID samples for THIS clip (clip-relative
+    # timestamps, so they match the loop's frame clock). Opt-in and fail-open:
+    # without FACE_ID_DB, face_identifications stays None and framing is
+    # byte-identical to before. The DB/model are cached process-wide by
+    # face_id.get_known_faces_db, so the per-clip cost is the 2fps scan only.
+    face_identifications = None
+    if face_id.available():
+        try:
+            _db = face_id.get_known_faces_db()
+            if _db is not None and _db.embeddings:
+                face_identifications = face_id.identify_faces_in_video(
+                    input_video, _db,
+                    sample_fps=float(
+                        os.environ.get("FACE_ID_SAMPLE_FPS", "2")),
+                    threshold=float(
+                        os.environ.get("FACE_ID_THRESHOLD", "0.4")))
+                if face_identifications:
+                    _names = sorted({i["name"] for i in face_identifications})
+                    print(f"   🪪 Face ID: {len(face_identifications)} named "
+                          f"sample(s) [{', '.join(_names)}] — upgrading "
+                          "speaker binding")
+        except Exception as e:
+            print(f"   ⚠️ Face ID clip pass failed ({e}) — "
+                  "framing without names")
+
     rects, split_info = _analyze_trajectory(
         input_video, scene_boundaries, fps, orig_w, orig_h,
         cameraman, tracker, speaker_turns=speaker_turns,
         focus_directives=focus_directives,
         primary_subject_x=primary_subject_x,
         asd_speaking_boxes=asd_speaking_boxes,
-        cell_aspect=split_cell_aspect(out_w, out_h))
+        cell_aspect=split_cell_aspect(out_w, out_h),
+        face_identifications=face_identifications)
     if not rects:
         raise RuntimeError("analysis produced no frames")
+
+    # Path instrumentation (PART 1.1): REFRAME_DUMP_PATH=<dir> writes the
+    # emitted per-frame crop rects (source pixels, pre-supersample) so camera
+    # jitter can be diagnosed numerically instead of by eyeballing compressed
+    # video — the plan's measurement rule (HANDOFF_FRAMING.md §2e).
+    dump_dir = os.environ.get("REFRAME_DUMP_PATH", "").strip()
+    if dump_dir:
+        try:
+            import numpy as np
+            os.makedirs(dump_dir, exist_ok=True)
+            tag = os.path.splitext(os.path.basename(final_output_video))[0]
+            np.save(os.path.join(dump_dir, f"{tag}_rects.npy"),
+                    np.asarray(rects, dtype=float))
+            print(f"   📐 REFRAME_DUMP_PATH: wrote {tag}_rects.npy "
+                  f"({len(rects)} rects)")
+        except Exception as e:
+            print(f"   ⚠️ REFRAME_DUMP_PATH failed ({e}) — continuing")
 
     # Base crop (zoom=1.0) sizes for the filtergraph's initial crop@c; the
     # sendcmd file overrides w/h/x/y at every change-point, so zoom levels
@@ -2945,11 +3120,22 @@ def render(input_video, final_output_video, aspect_ratio,
     initial_x, initial_y = rects[0][0], rects[0][1]
     workdir = tempfile.mkdtemp(prefix="reframe_v2_")
     try:
+        ss = supersample
+        # Crop in 2x space so sub-pixel (1/ss source px) steps become whole
+        # pixels for ffmpeg's integer crop filter. The camera already emitted
+        # rects on the 1/ss grid (SmoothedCameraman._q); scaling by ss and
+        # rounding makes them exact 2x-pixel coordinates.
+        cmd_rects = [(int(round(x * ss)), int(round(y * ss)),
+                      int(round(w * ss)), int(round(h * ss)))
+                     for (x, y, w, h) in rects]
         cmd_path = os.path.join(workdir, "cmd.txt")
         with open(cmd_path, "w") as f:
-            f.write("\n".join(dedupe_sendcmd_lines(rects, fps)) + "\n")
-        graph = unified_filtergraph(out_w, out_h, crop_w, crop_h, cmd_path,
-                                    initial_x, initial_y=initial_y)
+            f.write("\n".join(dedupe_sendcmd_lines(cmd_rects, fps)) + "\n")
+        graph = unified_filtergraph(out_w, out_h,
+                                    crop_w * ss, crop_h * ss, cmd_path,
+                                    int(round(initial_x * ss)),
+                                    initial_y=int(round(initial_y * ss)),
+                                    supersample=ss)
         if split_info:
             # Fixed-size cell crop (never resized — see split_cell_size), so
             # each cell gets TWO sendcmd files: x/y reposition the crop, w/h
@@ -2957,6 +3143,18 @@ def render(input_video, final_output_video, aspect_ratio,
             # the ffmpeg trac #10984 freeze bug this split avoids.
             cell_w, cell_h = split_cell_size(
                 orig_w, orig_h, aspect=split_cell_aspect(out_w, out_h))
+            # Supersampling scales every SOURCE-space value (rects, cell
+            # dims, source bounds) into 2x space; the zoom-scale targets and
+            # the final cell crops stay in output pixels, so the scale ratios
+            # inside cell_* helpers cancel out and the graph stays consistent.
+            def _ss_rects(rs):
+                return [(int(round(a * ss)), int(round(b * ss)),
+                         int(round(c * ss)), int(round(d * ss)))
+                        for (a, b, c, d) in rs]
+            top_rects = _ss_rects(split_info["top"])
+            bot_rects = _ss_rects(split_info["bottom"])
+            cell_w, cell_h = cell_w * ss, cell_h * ss
+            ss_orig = (orig_w * ss, orig_h * ss)
             half_h = out_h // 2
             top_xy_path = os.path.join(workdir, "top_xy.txt")
             top_zoom_path = os.path.join(workdir, "top_zoom.txt")
@@ -2966,51 +3164,52 @@ def render(input_video, final_output_video, aspect_ratio,
             bot_frame_path = os.path.join(workdir, "bot_frame.txt")
             with open(top_xy_path, "w") as f:
                 f.write("\n".join(cell_xy_sendcmd_lines(
-                    split_info["top"], fps, "crop@ct", cell_w, cell_h,
-                    orig_w, orig_h)) + "\n")
+                    top_rects, fps, "crop@ct", cell_w, cell_h,
+                    *ss_orig)) + "\n")
             with open(bot_xy_path, "w") as f:
                 f.write("\n".join(cell_xy_sendcmd_lines(
-                    split_info["bottom"], fps, "crop@cb", cell_w, cell_h,
-                    orig_w, orig_h)) + "\n")
+                    bot_rects, fps, "crop@cb", cell_w, cell_h,
+                    *ss_orig)) + "\n")
             with open(top_zoom_path, "w") as f:
                 f.write("\n".join(cell_zoom_sendcmd_lines(
-                    split_info["top"], fps, "scale@st", cell_w, cell_h,
+                    top_rects, fps, "scale@st", cell_w, cell_h,
                     out_w, half_h)) + "\n")
             with open(bot_zoom_path, "w") as f:
                 f.write("\n".join(cell_zoom_sendcmd_lines(
-                    split_info["bottom"], fps, "scale@sb", cell_w, cell_h,
+                    bot_rects, fps, "scale@sb", cell_w, cell_h,
                     out_w, half_h)) + "\n")
             # Final-crop tracking so the head stays at a fixed height in the
             # cell instead of drifting out of a centred crop.
             with open(top_frame_path, "w") as f:
                 f.write("\n".join(cell_frame_sendcmd_lines(
-                    split_info["top"], fps, "crop@ft", cell_w, cell_h,
-                    orig_w, orig_h, out_w, half_h)) + "\n")
+                    top_rects, fps, "crop@ft", cell_w, cell_h,
+                    *ss_orig, out_w, half_h)) + "\n")
             with open(bot_frame_path, "w") as f:
                 f.write("\n".join(cell_frame_sendcmd_lines(
-                    split_info["bottom"], fps, "crop@fb", cell_w, cell_h,
-                    orig_w, orig_h, out_w, half_h)) + "\n")
+                    bot_rects, fps, "crop@fb", cell_w, cell_h,
+                    *ss_orig, out_w, half_h)) + "\n")
             enable_expr = "+".join(
                 f"between(t,{s},{e})" for s, e in split_info["ranges"])
-            init_top = cell_initial_xy(split_info["top"][0], cell_w, cell_h,
-                                       orig_w, orig_h) + cell_scale_target(
-                split_info["top"][0], cell_w, cell_h, out_w, half_h)
+            init_top = cell_initial_xy(top_rects[0], cell_w, cell_h,
+                                       *ss_orig) + cell_scale_target(
+                top_rects[0], cell_w, cell_h, out_w, half_h)
             init_bottom = cell_initial_xy(
-                split_info["bottom"][0], cell_w, cell_h,
-                orig_w, orig_h) + cell_scale_target(
-                split_info["bottom"][0], cell_w, cell_h, out_w, half_h)
+                bot_rects[0], cell_w, cell_h,
+                *ss_orig) + cell_scale_target(
+                bot_rects[0], cell_w, cell_h, out_w, half_h)
             init_top_frame = cell_frame_xy(
-                split_info["top"][0], init_top[:2], cell_w, cell_h,
+                top_rects[0], init_top[:2], cell_w, cell_h,
                 init_top[2:], out_w, half_h)
             init_bottom_frame = cell_frame_xy(
-                split_info["bottom"][0], init_bottom[:2], cell_w, cell_h,
+                bot_rects[0], init_bottom[:2], cell_w, cell_h,
                 init_bottom[2:], out_w, half_h)
             graph = unified_split_filtergraph(
-                out_w, out_h, crop_w, crop_h, cmd_path, initial_x, initial_y,
+                out_w, out_h, crop_w * ss, crop_h * ss, cmd_path,
+                int(round(initial_x * ss)), int(round(initial_y * ss)),
                 top_xy_path, top_zoom_path, bot_xy_path, bot_zoom_path,
                 cell_w, cell_h, init_top, init_bottom, enable_expr,
                 top_frame_path, bot_frame_path,
-                init_top_frame, init_bottom_frame)
+                init_top_frame, init_bottom_frame, supersample=ss)
             spans = ", ".join(f"{s:.1f}-{e:.1f}s"
                               for s, e in split_info["ranges"])
             total = sum(e - s for s, e in split_info["ranges"])
@@ -3020,7 +3219,8 @@ def render(input_video, final_output_video, aspect_ratio,
         # One pass over the whole clip — no more per-scene segment/concat
         # step, since every frame now renders through the same filtergraph.
         _run([
-            "ffmpeg", "-y", "-loglevel", "error", "-i", input_video,
+            "ffmpeg", "-y", "-loglevel", "error",
+            *gpu_decode_args(), "-i", input_video,
             "-filter_complex", graph, "-map", "[v]", "-map", "0:a?",
             *video_encode_args(QUALITY_FAST), "-c:a", "copy", *METADATA_SCRUB,
             # +faststart moves the moov atom to the front so the browser <video>

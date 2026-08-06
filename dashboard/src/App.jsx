@@ -847,6 +847,7 @@ function App() {
           clip_count: data.clipCount ?? null,
           long_context_clips: data.longContextClips || 0,
           remove_background_audio: data.removeBackgroundAudio || '',
+          force_new: true,
           custom_width: data.outputFormat === 'custom' ? data.customWidth : null,
           custom_height: data.outputFormat === 'custom' ? data.customHeight : null,
           captions: data.captions !== false,

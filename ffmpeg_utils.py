@@ -90,6 +90,95 @@ def audio_encode_args():
 _probe_lock = threading.Lock()
 _nvenc_ok = None  # None = not probed yet
 _announced = False
+_gpu_render_lock = threading.Lock()
+_gpu_render_ok = None  # None = not probed yet
+
+# GPU decode/filter support (PART 2, 6-aug-2026). Kaggle's ffmpeg build is
+# not guaranteed to ship CUDA filters even though NVENC works, so this is
+# probed once per process and every call site falls back to CPU decode when
+# the build cannot do it. `GPU_RENDER=0` disables; `GPU_RENDER=1` requires
+# (warns and falls back if the build lacks CUDA); `auto` uses the probe.
+GPU_RENDER_FILTERS = ("scale_cuda", "scale_npp", "overlay_cuda", "crop_cuda")
+
+
+def _probe_gpu_render():
+    """Can this ffmpeg decode on the GPU AND filter on the GPU?
+
+    Requires a CUDA hwaccel (cuda/nvdec/cuvid) plus at least one CUDA filter
+    in `ffmpeg -filters`. The historical CPU path is byte-identical when this
+    returns False, so a build without CUDA support simply keeps current
+    behavior.
+    """
+    try:
+        hw = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-hwaccels"],
+            capture_output=True, text=True, timeout=30)
+        # getattr/None guards: tests stub subprocess.run with doubles that
+        # carry only returncode; a missing stdout just means "no hwaccel".
+        hw_names = str(getattr(hw, "stdout", "") or "").lower()
+    except Exception:
+        return False
+    if not any(a in hw_names for a in ("cuda", "nvdec", "cuvid")):
+        return False
+    try:
+        flt = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-filters"],
+            capture_output=True, text=True, timeout=30)
+        flt_text = str(getattr(flt, "stdout", "") or "")
+    except Exception:
+        return False
+    names = set()
+    for line in flt_text.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            names.add(parts[1])
+    present = sorted(n for n in GPU_RENDER_FILTERS if n in names)
+    if not present:
+        return False
+    print(f"🎞️ [GPU_RENDER] CUDA hwaccel + filters available: {present}")
+    return True
+
+
+def gpu_render_available():
+    """Probe CUDA decode/filter support once and cache it (thread-safe)."""
+    global _gpu_render_ok
+    if _gpu_render_ok is None:
+        mode = os.environ.get("GPU_RENDER", "auto").strip().lower()
+        if mode == "0":
+            _gpu_render_ok = False
+        else:
+            with _gpu_render_lock:
+                if _gpu_render_ok is None:
+                    _gpu_render_ok = _probe_gpu_render()
+                    if not _gpu_render_ok and mode == "1":
+                        print("⚠️ [GPU_RENDER] GPU_RENDER=1 but this ffmpeg "
+                              "build lacks CUDA hwaccel/filters — falling "
+                              "back to CPU decode")
+    return _gpu_render_ok
+
+
+def gpu_decode_args(device=None):
+    """Input-side ffmpeg args to decode on the GPU; [] = CPU decode.
+
+    Only plain ``-hwaccel cuda`` (frames downloaded to system memory for the
+    CPU filtergraph) — the CUDA filter chain (scale_cuda/overlay_cuda) is a
+    separate, host-verified change and must not ship untested. ``device``
+    pins a multi-GPU worker to a specific card (see gpu_affinity.py; never
+    CUDA_VISIBLE_DEVICES — it is read once at CUDA init).
+    """
+    if not gpu_render_available():
+        return []
+    args = ["-hwaccel", "cuda", "-extra_hw_frames", "16"]
+    if device is not None:
+        args += ["-hwaccel_device", str(device)]
+    return args
+
+
+def reset_gpu_render_cache():
+    """Test hook: forget the cached GPU-render probe result."""
+    global _gpu_render_ok
+    with _gpu_render_lock:
+        _gpu_render_ok = None
 
 
 def _probe_nvenc():

@@ -104,6 +104,14 @@ class VisionContextCheckResponse(BaseModel):
     suggested_start_delta: float  # seconds; only ever used to move the start EARLIER (<=0)
     suggested_end_delta: float  # seconds; only ever used to EXTEND, never shrink
     reason: str
+    # 6-aug-2026 (PART 3.3): boundary-bleed checks. All optional with defaults
+    # so older model outputs (and the long-context template, which doesn't ask
+    # for them) still parse — a null here must never throw the response away
+    # the way reaction_cam:null did.
+    different_speaker_open: Optional[bool] = None  # another face owns frame 0
+    speaker_on_screen_at: Optional[float] = None   # sec into clip the intended speaker first appears
+    end_scene_bleed: Optional[bool] = None         # next scene's person already on screen at the end
+    end_bleed_pullback: Optional[float] = None     # seconds to trim from the END (>=0)
 
 
 # --- scene context / focus direction (third verification layer) -------------
@@ -315,11 +323,27 @@ Check:
    AND leave `suggested_start_delta` at 0 — the clip should be dropped.
    Total clip duration must never be pushed past {max_duration_ceiling}
    seconds regardless of what you suggest.
+4. DIFFERENT-SPEAKER OPEN: is a face OTHER than the intended speaker
+   dominating the frame AT the proposed clip boundary? If the intended
+   speaker is not yet on screen at the boundary but appears shortly after
+   (within ~3 seconds), set `different_speaker_open` true and
+   `speaker_on_screen_at` to that moment. Do NOT move the start earlier for
+   this — the fix is to start AT the moment the intended speaker is on
+   screen. If the intended speaker never appears within the first ~5
+   seconds, leave `different_speaker_open` false and let check 3 decide.
+5. END-SCENE BLEED: does the final ~1 second of the proposed clip show a
+   person who belongs to the NEXT scene (a different face clearly beginning
+   their own turn) already on screen? If so, set `end_scene_bleed` true and
+   `end_bleed_pullback` to the number of seconds to trim from the END so the
+   clip stops at a clean moment (never 0 when bleeding). If the ending is
+   clean, set both to null/false.
 
 Return only valid JSON, no markdown fences, no commentary:
 {{"approved": <bool>, "narrative_resolved": <bool>, "has_real_hook": <bool>,
   "suggested_start_delta": <number>, "suggested_end_delta": <number>,
-  "reason": "<short>"}}
+  "reason": "<short>", "different_speaker_open": <bool|null>,
+  "speaker_on_screen_at": <number|null>, "end_scene_bleed": <bool|null>,
+  "end_bleed_pullback": <number|null>}}
 """
 
 

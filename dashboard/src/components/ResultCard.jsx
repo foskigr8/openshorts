@@ -623,6 +623,7 @@ export default function ResultCard({ clip, index, jobId, durableUrl, uploadPostK
                 <video
                     ref={videoRef}
                     src={currentVideoUrl}
+                    poster={getApiUrl(`/api/thumbnails/${jobId}/${index}`)}
                     controls
                     className="w-full h-full object-contain"
                     playsInline

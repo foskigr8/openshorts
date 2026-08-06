@@ -30,7 +30,7 @@ import deepseek_worker
 import gemini_pool
 from clip_selection import build_transcript_windows, snap_clip_to_words
 from ffmpeg_utils import (video_encode_args, audio_encode_args, QUALITY,
-                          QUALITY_FAST, METADATA_SCRUB)
+                          QUALITY_FAST, METADATA_SCRUB, gpu_decode_args)
 from pipeline_progress import write_progress as _write_progress
 from pipeline_progress import mark_clip_ready as _mark_clip_ready
 from pipeline_progress import record_stage_durations
@@ -214,6 +214,24 @@ CAMERA_HEAD_Y = float(os.environ.get("CAMERA_HEAD_Y", "0.36"))
 # interpolating at all.
 CAMERA_STYLE = os.environ.get("CAMERA_STYLE", "cut").strip().lower()
 
+# Sub-pixel crop stepping (6-aug-2026). The emitted crop rect is quantized to
+# a 1/supersample grid and the reframe renderer upscales the source by
+# CROP_SUPERSAMPLE before cropping (see reframe_v2.render), so a 1px eased
+# step becomes a 0.5px step at 2x. Whole-pixel crop positions cannot render an
+# eased tail below 1px — they stall and then jump (the follow-shot judder the
+# owner reported: "why is it not stabilized?"). At 2x the grid is 0.5 source
+# px, which reads as smooth motion instead of stall/jump. Cost is near-zero on
+# GPU hosts (scale_cuda) and one extra scale on CPU.
+CROP_SUPERSAMPLE = max(1, int(os.environ.get("CROP_SUPERSAMPLE", "1")))
+
+# Light EMA on committed x-targets (see SmoothedCameraman.update_target):
+# detector box-centres oscillate ±2-5px between detections even for a
+# stationary subject; the micro-move hysteresis holds sub-dead-zone churn, but
+# the band between the dead zone and the safe zone commits instantly. The EMA
+# damps that band without touching cut-time snaps (force_next_update bypasses
+# it) or big-move confirms.
+TARGET_EMA = float(os.environ.get("TARGET_EMA", "0.5"))
+
 # Round-5 spec 2.3: every EASE_*/ZOOM_EASE_* constant below is read ONLY
 # inside the "pan" branch of get_crop_box — with the default
 # CAMERA_STYLE="cut" they are inert. Kept (pan is a supported option) but
@@ -272,13 +290,19 @@ class SmoothedCameraman:
     (user: "much more better but it's not smooth").
     """
     def __init__(self, output_width, output_height, video_width, video_height,
-                 aspect_ratio=ASPECT_RATIO, fps=None):
+                 aspect_ratio=ASPECT_RATIO, fps=None, supersample=None):
         self.output_width = output_width
         self.output_height = output_height
         self.video_width = video_width
         self.video_height = video_height
         self.aspect_ratio = aspect_ratio
         self.fps = float(fps) if fps else 30.0
+        # Emitted crop positions are quantized to a 1/supersample grid so the
+        # 2x render pass (CROP_SUPERSAMPLE) can step sub-pixel. Defaults to the
+        # process-wide setting; the renderer passes its own copy explicitly.
+        self.supersample = max(
+            1, int(supersample or os.environ.get("CROP_SUPERSAMPLE", "1")))
+        self._grid = 1.0 / self.supersample
         self._static_frames = 0  # consecutive frames with zero eased motion
         # A shot must have been locked this long before the camera is allowed
         # to FOLLOW a drifting subject instead of teleporting to them.
@@ -350,6 +374,16 @@ class SmoothedCameraman:
         # still crawling towards the real target after the shot requiring it
         # had already ended (ground-truthed 31-jul-2026).
         self.force_next_update = False
+
+    def _q(self, value):
+        """Quantize a crop position to the 1/supersample grid.
+
+        Grid 1.0 (default) reproduces the historical whole-pixel behavior;
+        grid 0.5 lets the 2x supersampled renderer step half a source pixel,
+        which is what turns an eased tail into smooth motion instead of
+        stall/jump.
+        """
+        return round(value * self.supersample) / self.supersample
 
     def _eased_step(self, current, target, rate, max_step, max_accel, prev_step,
                     snap_eps, min_step=0.0):
@@ -436,6 +470,21 @@ class SmoothedCameraman:
                     return  # not convinced yet — hold the frame
             self._pending_target = None
             self._pending_count = 0
+            # TARGET EMA (6-aug-2026): between the micro-move dead zone and
+            # the jump-confirm safe zone, ordinary detector box-centre wobble
+            # (±2-5px) commits instantly and the chase follows it. Damp with
+            # a light EMA so the committed target tracks the subject's real
+            # trajectory, not the per-detection noise. Cut-time snaps
+            # (force_next_update) bypass this so a subject change lands
+            # exactly, and jump-CONFIRMED big moves commit exactly too — the
+            # confirmation already proved they are real motion, and damping
+            # them just made the follow stop early with the subject outside
+            # the frame (caught by test_the_follow_eventually_arrives).
+            mid_band = (abs(new_center - self.target_center_x)
+                        <= self.safe_zone_radius)
+            if TARGET_EMA < 1.0 and mid_band:
+                new_center = (self.target_center_x
+                              + (new_center - self.target_center_x) * TARGET_EMA)
             self.target_center_x = new_center
 
         # y/zoom follow the accepted target, anchored on the head (see
@@ -556,7 +605,12 @@ class SmoothedCameraman:
                         self.current_center_y, self.target_center_y,
                         LONG_FOLLOW_RATE, LONG_FOLLOW_MAX_STEP,
                         LONG_FOLLOW_ACCEL, self._vy, EASE_SNAP_EPSILON,
-                        min_step=0.0)
+                        # Floor follow steps at the emission grid: below it
+                        # the crop stalls then jumps a whole grid cell, which
+                        # is the follow-shot judder (6-aug-2026). With 2x
+                        # supersampling this floor is 0.5 source px, so the
+                        # smallest visible step is half a pixel, not a stall.
+                        min_step=self._grid)
                     self.current_zoom = self.target_zoom
                     self._vz = 0.0
             elif drifted:
@@ -681,7 +735,7 @@ class SmoothedCameraman:
         # (caught by test_a_fresh_shot_still_re_frames_instantly_on_a_big_move:
         # subject at x=1800 fell outside a crop ending at 1784).
         raw_cx = self.current_center_x + drift_x
-        x1 = int(raw_cx - crop_w * self._place_frac(raw_cx))
+        x1 = self._q(raw_cx - crop_w * self._place_frac(raw_cx))
         # CONTAINMENT WINS OVER COMPOSITION. Near a source edge the camera
         # centre is already clamped, so a thirds offset can walk the crop off
         # the subject (measured: a subject at x=1800 fell outside a crop
@@ -691,14 +745,23 @@ class SmoothedCameraman:
         # placement is only ever applied when the subject still sits inside
         # the frame with margin.
         subj = self.target_center_x
-        x1 = max(int(subj - crop_w * (1.0 - COMPOSE_EDGE_MARGIN)),
-                 min(x1, int(subj - crop_w * COMPOSE_EDGE_MARGIN)))
+        x1 = max(self._q(subj - crop_w * (1.0 - COMPOSE_EDGE_MARGIN)),
+                 min(x1, self._q(subj - crop_w * COMPOSE_EDGE_MARGIN)))
         x1 = max(0, min(x1, self.video_width - crop_w))
         # target_center_y is the HEAD anchor (see CAMERA_HEAD_ANCHOR); place
         # it CAMERA_HEAD_Y down the crop instead of dead centre, so the eyes
         # sit on the top-third line and the subject never looks pushed low.
-        y1 = max(0, min(int(self.current_center_y - crop_h * CAMERA_HEAD_Y),
+        y1 = max(0, min(self._q(self.current_center_y - crop_h * CAMERA_HEAD_Y),
                         self.video_height - crop_h))
+        # CONTAIN THE HEAD (6-aug-2026): a stale/lost detection must never
+        # ship a face-less frame. If the committed head anchor falls outside
+        # the emitted crop (possible when a zoomed crop is clamped at a source
+        # edge while the target drifts), re-center on the anchor instead of
+        # letting the crop walk off the face.
+        hy = self.target_center_y
+        if not (y1 <= hy <= y1 + crop_h):
+            y1 = max(0, min(self._q(hy - crop_h * CAMERA_HEAD_Y),
+                            self.video_height - crop_h))
         return x1, y1, x1 + crop_w, y1 + crop_h
 
 # Active-speaker hysteresis factors in SpeakerTracker: the sticky bonus that
@@ -1349,6 +1412,49 @@ def get_video_resolution(video_path):
     return width, height
 
 
+def _probe_video_specs(path):
+    """True resolution/bitrate of a downloaded file (PART 6 download gate).
+
+    Nothing downstream used to check what yt-dlp actually landed: an HD
+    format string can still produce a low-bitrate stream, and the fallback
+    ladder silently ships ~360p progressive when HD attempts fail. This is
+    the measurement that turns "the quality is low" into "the source is
+    XxY at Z Mbps" — the ceiling the reframe inherits.
+    """
+    try:
+        cap = cv2.VideoCapture(path)
+        if not cap.isOpened():
+            return None
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        cap.release()
+    except Exception:
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    size_mb = round(os.path.getsize(path) / (1024 ** 2), 2)
+    duration = (frames / fps) if fps and frames > 0 else 0.0
+    bitrate_mbps = round(size_mb * 8 / duration, 2) if duration else 0.0
+    return {
+        "width": w, "height": h, "fps": round(fps, 2),
+        "duration_s": round(duration, 2), "size_mb": size_mb,
+        "bitrate_mbps": bitrate_mbps,
+    }
+
+
+def _download_quality_floor(specs):
+    """Is this source below the HD floor? Returns the reason string or None."""
+    min_h = int(os.environ.get("MIN_SOURCE_HEIGHT", "720"))
+    min_b = float(os.environ.get("MIN_SOURCE_BITRATE_Mbps", "1.2"))
+    if specs["height"] < min_h:
+        return (f"height {specs['height']}p < {min_h}p")
+    if specs["bitrate_mbps"] < min_b:
+        return (f"bitrate {specs['bitrate_mbps']} Mbps < {min_b} Mbps")
+    return None
+
+
 # Byte budget for the sanitized video title used as the stem of every derived
 # file. Filesystems cap a name in BYTES (255 on ext4), not characters, and the
 # pipeline decorates this stem: "_clip_10.mp4" (12), "subtitled_<ts>_" (21),
@@ -1562,7 +1668,8 @@ def download_youtube_video(url, output_dir="."):
         + [('ios-spoof', ios_spoof_args, fallback_fmt, None, False)]
         + ([('HD-direct', hd_args, _hd_fmt_for(None), None, True)] if _direct_first else [])
         + ([('HD', hd_args, _hd_fmt_for(_proxy), _proxy, True)] if hd_args else [])
-        + [('fallback', fallback_args, fallback_fmt, _proxy, True)]
+        + [('fallback (LOW-RES PROGRESSIVE)', fallback_args, fallback_fmt,
+            _proxy, True)]
     )
 
     sanitized_title = None
@@ -1612,6 +1719,31 @@ Technical Details: {str(last_err)}
             if f.startswith(sanitized_title) and f.endswith('.mp4'):
                 downloaded_file = os.path.join(output_dir, f)
                 break
+
+    # PART 6 download gate (6-aug-2026): verify what actually landed, log the
+    # true specs, warn loudly when the source is below the HD floor, and
+    # persist the specs next to the file so the job metadata can surface them
+    # (the pipeline merges this into *_metadata.json — see _snap_candidates'
+    # caller). The reframe inherits the source ceiling, so this is the only
+    # place the "quality is low" complaint can actually be fixed or explained.
+    source_specs = _probe_video_specs(downloaded_file)
+    if source_specs:
+        print(f"📐 Source specs: {source_specs['width']}x{source_specs['height']} "
+              f"@ {source_specs['fps']}fps · {source_specs['bitrate_mbps']} Mbps "
+              f"· {source_specs['size_mb']} MiB")
+        reason = _download_quality_floor(source_specs)
+        if reason:
+            print(f"⚠️ LOW-QUALITY SOURCE: {reason} — clips will look soft. "
+                  "This is the uploader's source ceiling (or the download "
+                  "fell back to a pre-merged progressive stream), not the "
+                  "render pipeline.")
+        try:
+            with open(os.path.join(output_dir, "source_specs.json"), "w") as f:
+                json.dump(source_specs, f, indent=2)
+        except OSError as e:
+            print(f"   ⚠️ Could not write source_specs.json ({e})")
+    else:
+        print("⚠️ Could not probe the downloaded video specs.")
 
     if used_proxy and _dl_bytes["total"]:
         # Machine-parseable marker consumed by app.py's log reader for the
@@ -2485,6 +2617,7 @@ def confirm_clip_with_vision(pool, model_name, source_video_path, candidate,
         new_end = candidate["end"] + delta
         if new_end - candidate["start"] <= max_duration_ceiling:
             candidate["end"] = min(float(video_duration), new_end)
+        _apply_boundary_bleed_fixes(candidate, context)
 
     boundaries_moved = candidate["start"] != orig_start or candidate["end"] != orig_end
 
@@ -2518,6 +2651,7 @@ def confirm_clip_with_vision(pool, model_name, source_video_path, candidate,
                 new_end = candidate["end"] + delta
                 if new_end - candidate["start"] <= max_duration_ceiling:
                     candidate["end"] = min(float(video_duration), new_end)
+                _apply_boundary_bleed_fixes(candidate, retry)
             else:
                 reasons.append(f"retry: {retry.get('reason', '(no reason given)')}")
 
@@ -2664,7 +2798,9 @@ def _build_jump_cut_source(source_video_path, keep_spans, workdir):
     segment_paths = []
     for idx, (s, e) in enumerate(keep_spans):
         seg_path = os.path.join(workdir, f"keep_{idx:03d}.mp4")
-        cmd = ['ffmpeg', '-y', '-ss', f'{s:.3f}', '-to', f'{e:.3f}', '-i', source_video_path,
+        cmd = ['ffmpeg', '-y',
+               *gpu_decode_args(),
+               '-ss', f'{s:.3f}', '-to', f'{e:.3f}', '-i', source_video_path,
                *source_logo_crop_vf_args(),
                *video_encode_args(QUALITY_FAST), *audio_encode_args(), seg_path]
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=300)
@@ -2887,6 +3023,92 @@ def _vision_confirm_candidates(shorts, source_video_path, video_duration,
     return approved_shorts
 
 
+_scene_boundary_cache = {}
+
+
+def scene_boundaries_for(video_path):
+    """Cached scene boundaries in seconds for one source video.
+
+    Shared by clip selection (PART 3.2, 6-aug-2026) and the renderer so a
+    scene clamp never re-detects. Returns [(start_s, end_s), ...] or [] when
+    detection fails — the clamp fails open (a boundary problem must never
+    kill a job).
+    """
+    if not video_path:
+        return []
+    try:
+        key = (video_path, os.path.getmtime(video_path),
+               os.path.getsize(video_path))
+    except OSError:
+        return []
+    if key not in _scene_boundary_cache:
+        try:
+            scenes, fps = detect_scenes(video_path)
+            fps = float(fps) or 30.0
+            _scene_boundary_cache[key] = [
+                (float(s.get_frames()) / fps, float(e.get_frames()) / fps)
+                for s, e in scenes]
+        except Exception as e:
+            print(f"⚠️ Scene-boundary clamp unavailable ({e})")
+            _scene_boundary_cache[key] = []
+    return _scene_boundary_cache[key]
+
+
+def _clamp_candidate_end_to_scene(candidate, scene_bounds):
+    """Pull a clip's END back to the last scene boundary at/before it.
+
+    Vision rescue and sentence snapping can extend a clip into the NEXT
+    scene, where a different person is already on screen — the "clip has
+    ended but you still see another person" complaint (6-aug-2026). Only
+    pulls IN, never extends. If no boundary fits inside the clip (or scene
+    data is missing), leaves the boundary untouched rather than truncating
+    a sentence.
+    """
+    if not scene_bounds:
+        return candidate
+    start, end = candidate["start"], candidate["end"]
+    is_long = candidate.get("clip_type") == "long_context"
+    min_duration = 45.0 if is_long else 15.0
+    fits = [b[1] for b in scene_bounds
+            if start + min_duration <= b[1] <= end + 0.05]
+    if fits:
+        candidate["end"] = max(fits)
+    return candidate
+
+
+def _apply_boundary_bleed_fixes(candidate, context):
+    """PART 3.3 (6-aug-2026): apply the two new vision boundary fixes.
+
+    Different-speaker open: another person owns the first frames; move the
+    start LATER to the moment the intended speaker is on screen (the opposite
+    direction of the hook rescue, which only ever pulls earlier).
+
+    End-scene bleed: the next scene's person is already on screen at the end;
+    trim back by the model's suggested pullback.
+
+    Both fix in place, never reject — the bounded retry still judges the
+    corrected boundaries.
+    """
+    if not context:
+        return
+    if context.get("different_speaker_open"):
+        on_screen = float(context.get("speaker_on_screen_at") or 0)
+        if 0.5 < on_screen < 3.0:
+            new_start = candidate["start"] + on_screen
+            if new_start < candidate["end"] - 8.0:
+                candidate["start"] = new_start
+                print(f"   🔀 Different-speaker open: start moved to "
+                      f"{candidate['start']:.1f}s (intended speaker on screen)")
+    if context.get("end_scene_bleed"):
+        pull = float(context.get("end_bleed_pullback") or 0)
+        if pull > 0:
+            new_end = candidate["end"] - pull
+            if new_end - candidate["start"] >= 8.0:
+                candidate["end"] = new_end
+                print(f"   ✂️ End-scene bleed: end pulled back to "
+                      f"{candidate['end']:.1f}s")
+
+
 def _snap_candidates(shorts, words, video_duration):
     """Snap every clip's start/end onto real word boundaries. Long-context
     segments get a higher floor so a full-arc candidate can't legally snap
@@ -2956,6 +3178,9 @@ def get_viral_clips(transcript_result, video_duration, source_video_path=None,
                     if shorts is None:
                         return None
                     _snap_candidates(shorts, words, video_duration)
+                    _scene_bounds = scene_boundaries_for(source_video_path)
+                    for s in shorts:
+                        _clamp_candidate_end_to_scene(s, _scene_bounds)
                     result = {"shorts": shorts,
                               "rejected": skill_result.get("rejected", [])}
                     if skill_result.get("cost_analysis"):
@@ -2993,6 +3218,9 @@ def get_viral_clips(transcript_result, video_duration, source_video_path=None,
         if shorts is None:
             return None
         _snap_candidates(shorts, words, video_duration)
+        _scene_bounds = scene_boundaries_for(source_video_path)
+        for s in shorts:
+            _clamp_candidate_end_to_scene(s, _scene_bounds)
         result = {"shorts": shorts}
         if deepseek_result.get("cost_analysis"):
             result["cost_analysis"] = deepseek_result["cost_analysis"]
@@ -3312,6 +3540,17 @@ if __name__ == '__main__':
             # before starting a fresh run of the same URL.
             clips_data['source_url'] = args.url or ""
             clips_data['source_file'] = os.path.basename(input_video)
+            # PART 6: surface the verified source specs (written by the
+            # download gate) in the job metadata so the dashboard can show
+            # "Source: 1080p · 4.3 Mbps" next to the clips instead of leaving
+            # quality unexplained.
+            _specs_path = os.path.join(output_dir, "source_specs.json")
+            if os.path.exists(_specs_path):
+                try:
+                    with open(_specs_path) as _sf:
+                        clips_data['source_specs'] = json.load(_sf)
+                except (OSError, ValueError):
+                    pass
             metadata_file = os.path.join(output_dir, f"{video_title}_metadata.json")
             # Round-5 spec 4.1: write atomically (tmp + os.replace) so a crash
             # mid-write never leaves a truncated metadata file that every
@@ -3418,6 +3657,7 @@ if __name__ == '__main__':
                         # ffmpeg cut — re-encoding for precision on strict seconds
                         cut_command = [
                             'ffmpeg', '-y',
+                            *gpu_decode_args(),
                             '-ss', str(start),
                             '-to', str(end),
                             '-i', input_video,

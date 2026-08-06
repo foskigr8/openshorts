@@ -725,19 +725,24 @@ def _recover_jobs_from_disk():
                     raw = f.read().strip()
                 owner = int(raw) if raw.isdigit() else (raw or None)
             if ready_clips:
+                persisted = _replay_job_logs(job_id, job_path)
                 jobs[job_id] = {
                     'status': 'completed',
-                    'logs': [_log_entry("♻️ Job recovered from disk after server restart.")],
+                    'logs': ([_log_entry(
+                        "♻️ Job recovered from disk after server restart.")]
+                             + persisted),
                     'output_dir': job_path,
                     'user_id': owner,
                     'result': {'clips': ready_clips, 'cost_analysis': data.get('cost_analysis')},
                 }
             else:
+                persisted = _replay_job_logs(job_id, job_path)
                 jobs[job_id] = {
                     'status': 'failed',
-                    'logs': [_log_entry(
+                    'logs': ([_log_entry(
                         "Job was interrupted before any clip finished rendering "
-                        "(likely a server restart mid-render) and could not be resumed.")],
+                        "(likely a server restart mid-render) and could not be resumed.")]
+                             + persisted),
                     'output_dir': job_path,
                     'user_id': owner,
                     'result': None,
@@ -1392,6 +1397,63 @@ def _log_entry(text):
     return {"ts": time.time(), "text": str(text)}
 
 
+def _job_log_path(job_id, output_dir=None):
+    """On-disk log file for one job (PART 5.2, 6-aug-2026)."""
+    output_dir = (output_dir or jobs.get(job_id, {}).get('output_dir')
+                  or os.path.join(OUTPUT_DIR, job_id))
+    return os.path.join(output_dir, "logs.jsonl")
+
+
+def _persist_job_log(job_id, entry):
+    """Append one log entry to the job's disk log.
+
+    Jobs live in memory, so logs used to vanish on restart/cleanup — the
+    owner's "when a project finishes, the logs should not vanish" complaint
+    (6-aug-2026). This write is the durable copy; _recover_jobs_from_disk
+    replays it after a restart.
+    """
+    try:
+        path = _job_log_path(job_id)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        print(f"⚠️ Could not persist job log for {job_id}: {e}")
+
+
+def _snapshot_job_logs(job_id):
+    """Write the full in-memory log list to logs.json (final state)."""
+    try:
+        path = os.path.join(_job_log_path(job_id), "..", "logs.json")
+        path = os.path.normpath(path)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(jobs.get(job_id, {}).get('logs', []), f, indent=2)
+    except Exception as e:
+        print(f"⚠️ Could not snapshot job logs for {job_id}: {e}")
+
+
+def _replay_job_logs(job_id, output_dir):
+    """Return persisted log entries (logs.jsonl) for a recovered job."""
+    entries = []
+    path = _job_log_path(job_id, output_dir)
+    if not os.path.exists(path):
+        return entries
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except ValueError:
+                    entries.append(_log_entry(line))
+    except OSError:
+        return []
+    return entries
+
+
 def enqueue_output(out, job_id):
     """Reads output from a subprocess and appends it to jobs logs."""
     try:
@@ -1408,7 +1470,9 @@ def enqueue_output(out, job_id):
                     continue
                 print(f"📝 [Job Output] {decoded_line}")
                 if job_id in jobs:
-                    jobs[job_id]['logs'].append(_log_entry(decoded_line))
+                    entry = _log_entry(decoded_line)
+                    jobs[job_id]['logs'].append(entry)
+                    _persist_job_log(job_id, entry)
     except Exception as e:
         print(f"Error reading output for job {job_id}: {e}")
     finally:
@@ -1423,7 +1487,9 @@ async def run_job(job_id, job_data):
     
     jobs[job_id]['status'] = 'processing'
     jobs[job_id]['started_at'] = time.time()
-    jobs[job_id]['logs'].append(_log_entry("Job started by worker."))
+    _entry = _log_entry("Job started by worker.")
+    jobs[job_id]['logs'].append(_entry)
+    _persist_job_log(job_id, _entry)
     print(f"🎬 [run_job] Executing command for {job_id}: {' '.join(cmd)}")
     
     try:
@@ -1485,12 +1551,17 @@ async def run_job(job_id, job_data):
         if jobs[job_id]['status'] == 'cancelled':
             # /api/jobs/{job_id}/cancel already set this and killed the
             # process — the exit code is just "killed", not a real failure.
-            jobs[job_id]['logs'].append(_log_entry("Job cancelled by user."))
+            _entry = _log_entry("Job cancelled by user.")
+            jobs[job_id]['logs'].append(_entry)
+            _persist_job_log(job_id, _entry)
+            _snapshot_job_logs(job_id)
             return
 
         if returncode == 0:
             jobs[job_id]['status'] = 'completed'
-            jobs[job_id]['logs'].append(_log_entry("Process finished successfully."))
+            _entry = _log_entry("Process finished successfully.")
+            jobs[job_id]['logs'].append(_entry)
+            _persist_job_log(job_id, _entry)
             
             # Final HF pass: the poll loop ticks every 2s, so the last clip (or
             # two on a fast job) can finish between the last tick and the
@@ -1529,16 +1600,25 @@ async def run_job(job_id, job_data):
                 jobs[job_id]['result'] = {'clips': clips, 'cost_analysis': cost_analysis}
             else:
                  jobs[job_id]['status'] = 'failed'
-                 jobs[job_id]['logs'].append(_log_entry("No metadata file generated."))
+                 _entry = _log_entry("No metadata file generated.")
+                 jobs[job_id]['logs'].append(_entry)
+                 _persist_job_log(job_id, _entry)
         else:
             jobs[job_id]['status'] = 'failed'
-            jobs[job_id]['logs'].append(_log_entry(_scrub_secrets(f"Process failed with exit code {returncode}")))
+            _entry = _log_entry(_scrub_secrets(
+                f"Process failed with exit code {returncode}"))
+            jobs[job_id]['logs'].append(_entry)
+            _persist_job_log(job_id, _entry)
+        _snapshot_job_logs(job_id)
             
     except Exception as e:
         jobs[job_id]['status'] = 'failed'
         # Exception text can embed URLs with credentials (e.g. the proxy URL
         # inside a yt-dlp/httpx error) — scrub before it reaches client logs.
-        jobs[job_id]['logs'].append(_log_entry(_scrub_secrets(f"Execution error: {str(e)}")))
+        _entry = _log_entry(_scrub_secrets(f"Execution error: {str(e)}"))
+        jobs[job_id]['logs'].append(_entry)
+        _persist_job_log(job_id, _entry)
+        _snapshot_job_logs(job_id)
 
 @app.get("/health")
 async def health():
@@ -1673,6 +1753,7 @@ async def process_endpoint(
     acknowledged: Optional[str] = Form(None),
     output_format: Optional[str] = Form(None),
     force_low_quality: Optional[str] = Form(None),
+    force_new: Optional[str] = Form(None),
     clip_count: Optional[str] = Form(None),
     long_context_clips: Optional[str] = Form(None),
     remove_background_audio: Optional[str] = Form(None),
@@ -1743,6 +1824,7 @@ async def process_endpoint(
         url = body.get("url")
         ack_flag = bool(body.get("acknowledged"))
         force_low = bool(body.get("force_low_quality"))
+        force_new = bool(body.get("force_new"))
         output_format = body.get("output_format")
         body_clip_count = body.get("clip_count")
         if body_clip_count is not None:
@@ -1797,7 +1879,22 @@ async def process_endpoint(
     # already produced playable clips — map to it instead of re-downloading,
     # re-analyzing and re-rendering from scratch. Registers the existing job
     # in memory (same shape as restore) so every edit endpoint works.
-    if url:
+    # 6-aug-2026 (PART 5.1): the owner wants "same link = new run" — reusing
+    # silently landed them back on the finished project. The frontend now
+    # sends force_new=1 on every URL submission; reopening is explicit via
+    # History's "reopen project" (restoreProject). The reuse path stays for
+    # callers that do not pass the flag (backward compat).
+    force_new = str(force_new).lower() in ("1", "true", "yes")
+    if ("application/json" in content_type and not force_new):
+        # JSON bodies arrive after this block's form parsing: peek at the
+        # body now so a JSON force_new=true actually skips reuse (the body is
+        # cached, so the later request.json() still works).
+        try:
+            _body = await request.json()
+            force_new = bool(_body.get("force_new"))
+        except Exception:
+            pass
+    if url and not force_new:
         existing_job = _find_completed_job_for_source(url)
         if existing_job:
             job_path = os.path.join(OUTPUT_DIR, existing_job)
@@ -2099,6 +2196,47 @@ def _job_created_at(job_path):
         return os.path.getmtime(job_path)
     except OSError:
         return time.time()
+
+
+@app.get("/api/thumbnails/{job_id}/{clip_index}")
+async def clip_thumbnail(job_id: str, clip_index: int):
+    """Cached poster frame for a delivered clip (PART 5.3, 6-aug-2026).
+
+    Re-captioning/re-rendering replace the video file, so a gallery entry
+    pointing at the old file can 404 mid-session — the "thumbnails disappear"
+    complaint. This generates one still from the CURRENT canonical clip,
+    caches it as ``clip_{i}_thumb.jpg`` in the job dir, and serves it; the
+    next request is a plain file read.
+    """
+    job_path = os.path.join(OUTPUT_DIR, os.path.basename(job_id))
+    meta = _newest_metadata_file(job_path)
+    if not meta:
+        raise HTTPException(status_code=404, detail="Job not found")
+    try:
+        with open(meta, 'r') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        raise HTTPException(status_code=404, detail="Metadata unreadable")
+    clips = data.get('shorts', [])
+    if clip_index < 0 or clip_index >= len(clips):
+        raise HTTPException(status_code=404, detail="Clip not found")
+    base_name = os.path.basename(meta).replace('_metadata.json', '')
+    canonical = _canonical_clip_file(job_path, base_name, clip_index)
+    video_path = os.path.join(job_path, canonical)
+    if not os.path.exists(video_path):
+        raise HTTPException(status_code=404, detail="Clip file not found")
+    thumb = os.path.join(job_path, f"clip_{clip_index + 1}_thumb.jpg")
+    if not os.path.exists(thumb):
+        cmd = ["ffmpeg", "-y", "-loglevel", "error",
+               "-ss", "1", "-i", video_path,
+               "-frames:v", "1", "-q:v", "3", thumb]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, timeout=60)
+        except Exception as e:
+            print(f"⚠️ Thumbnail regen failed for {job_id}/{clip_index}: {e}")
+            raise HTTPException(status_code=500,
+                                detail="Thumbnail generation failed")
+    return FileResponse(thumb, media_type="image/jpeg")
 
 
 @app.get("/api/storage/{job_id}/{filename}")

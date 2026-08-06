@@ -64,9 +64,21 @@ def _separate_vocals(wav_path, workdir, model="htdemucs"):
 
     `--two-stems=vocals` only reconstructs vocals vs. everything-else, which is
     roughly twice as fast as the full 4-stem split and is all we need.
+    GPU (6-aug-2026, PART 2): Demucs defaults to CUDA when torch sees a GPU,
+    but the device is passed explicitly so a GPU host never falls back to CPU
+    silently — the owner's "CPU pegged while both GPUs sit idle" complaint
+    covered audio separation too.
     """
-    _run(["python3", "-m", "demucs.separate", "--two-stems", "vocals",
-          "-n", model, "-o", workdir, wav_path])
+    cmd = ["python3", "-m", "demucs.separate", "--two-stems", "vocals",
+           "-n", model, "-o", workdir]
+    try:
+        import torch
+        if torch.cuda.is_available():
+            cmd += ["--device", "cuda"]
+    except Exception:
+        pass
+    cmd.append(wav_path)
+    _run(cmd)
     stem = os.path.splitext(os.path.basename(wav_path))[0]
     vocals = os.path.join(workdir, model, stem, "vocals.wav")
     return vocals if os.path.exists(vocals) else None
