@@ -58,6 +58,9 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 | `viral_clip_finder.py` | Stage 3 judgment engine: the viral-clip-finder skill (15 frameworks, 8-axis rubric, 18 anti-patterns, niche playbooks) as a schema-enforced LLM call returning scored clips with cut briefs + rejected candidates |
 | `face_id.py` | Optional named-identity enrichment (InsightFace known-faces DB) that upgrades the transcript to named-speaker input for the skill; fails open |
 | `viral_clip_finder_skill/` | Bundled skill package (SKILL.md + references) consumed by `viral_clip_finder.py` |
+| `hf_storage.py` | HuggingFace Hub clip storage: clips upload as each one finishes so they survive a Kaggle session ending; fails soft when unconfigured |
+| `gpu_affinity.py` | Per-clip-worker GPU assignment (thread-local torch device) so a second GPU is not left idle |
+| `kaggle_smoke_test.py` | Post-boot health check for the Kaggle host — lives in the repo so it improves via `git pull`, not a notebook re-import |
 | `dashboard/src/App.jsx` | Main React component with state management |
 | `dashboard/src/components/TranslateModal.jsx` | Voice dubbing UI with language selection |
 | `dashboard/vite-plugin-seo.js` | Build-time SEO surface: injects crawler-visible homepage content, emits static pages, sitemap.xml and llms.txt |
@@ -118,6 +121,43 @@ engine is the sole Stage 3 path there — `kaggle_bootstrap.sh` prints which.
   nothing matches. `enrich_if_configured` returns the `{label: name}` mapping
   (not the trajectory) because that is what the skill's transcript formatter
   looks speakers up in.
+
+### Kaggle host
+
+`kaggle_bootstrap.sh` brings the stack up natively (no Docker on Kaggle) and
+`kaggle_smoke_test.py` verifies it. The notebook is deliberately thin — secrets,
+clone/pull, then those two files — so changes ship with `git pull` instead of a
+manual `.ipynb` re-import. Things that were silently degrading there:
+
+- **Transcription.** `TRANSCRIBE_BACKEND` chose the backend and defaulted to
+  `whisper`, so setting `ASSEMBLYAI_API_KEY` alone did nothing: 254s of a ~420s
+  job, and no diarization at all (that is `subject_policy`'s `TIER_DIARIZED`
+  evidence). `_select_backend()` now prefers assemblyai when the key is set and
+  the backend is unset; an explicit `TRANSCRIBE_BACKEND` still wins.
+- **Storage.** `/kaggle/working` is wiped at session end. `hf_storage.py`
+  uploads each clip **as it finishes** (not at job end, which loses everything
+  when a session dies mid-job) and records the key in the job metadata;
+  `/api/history` then serves missing files through `/api/storage/{job}/{file}`.
+  HuggingFace, not R2/B2 — neither can be signed up for without a credit card.
+- **Keys.** The dashboard gated its job form on a browser-stored key even when
+  the server had one. `/api/system` now reports `server_keys` (presence only)
+  and the gate respects it.
+- **The second GPU.** Clips render on a ThreadPoolExecutor in ONE process, so
+  `CUDA_VISIBLE_DEVICES` per worker cannot work — it is read once at CUDA init.
+  `gpu_affinity.py` uses the thread-local torch device instead. Only LR-ASD
+  shards; MediaPipe/YOLO stay serialized under `DETECT_LOCK`, so expect a
+  partial gain on multi-clip jobs, not 2×.
+
+### Captions
+
+Placement is chosen **per job** in the submission form, not afterwards in the
+Subtitle modal (which re-encodes every clip). Position and margin are separate
+controls: "bottom but lifted off the edge" is bottom alignment with a larger
+ASS `MarginV`, not a different alignment. `MarginV` only applies to bottom
+alignment — `generate_ass` computes a per-line margin only when
+`ass_alignment == 2` — so the UI offers the raised option there alone.
+UI → `caption_position`/`caption_margin` → `CAPTION_POSITION`/`CAPTION_MARGIN_V`
+→ `subtitles.AUTO_CAPTION_STYLE`.
 
 ### SEO / AI-crawler surface
 

@@ -7,6 +7,16 @@ const SUPPORTED_PLATFORMS = [
     'Facebook', 'Instagram', 'Dailymotion', 'Reddit', 'Streamable',
 ];
 
+// Caption placement presets. Three named choices rather than a pixel slider:
+// this is how the placement problem is actually described ("bottom, but lifted
+// off the edge"), and MarginV is meaningless for middle alignment.
+// 43 is subtitles.SAFE_MARGIN_V, the server-side default.
+const CAPTION_PLACEMENTS = {
+    bottom: { label: 'Bottom', position: 'bottom', margin: 43 },
+    raised: { label: 'Bottom, raised', position: 'bottom', margin: 120 },
+    middle: { label: 'Middle', position: 'middle', margin: null },
+};
+
 const YT_HOST_RE = /(^|\.)(youtube\.com|youtu\.be)$/i;
 
 export default function MediaInput({ onProcess, isProcessing }) {
@@ -30,6 +40,13 @@ export default function MediaInput({ onProcess, isProcessing }) {
     // source clip isn't a real choice for the user to make — both stay
     // fully automatic server-side (no override sent, so the default applies).
     const [captions, setCaptions] = useState(true);
+    // Caption placement, chosen BEFORE processing. Picking it afterwards in the
+    // Subtitle modal re-encodes every clip. Position and margin are separate
+    // controls: "bottom, raised" is bottom alignment with a bigger MarginV.
+    // MarginV only applies to bottom alignment (generate_ass computes a
+    // per-line margin only when ass_alignment == 2), so the raised option
+    // exists for bottom only.
+    const [captionPlacement, setCaptionPlacement] = useState('bottom');
     const [removeBgAudio, setRemoveBgAudio] = useState(false);
     const [showInfo, setShowInfo] = useState(false);
     const infoRef = useRef(null);
@@ -80,6 +97,8 @@ export default function MediaInput({ onProcess, isProcessing }) {
                 outputFormat: outputFormat === 'custom' ? 'custom' : outputFormat,
                 customWidth: customW, customHeight: customH,
                 captions,
+                captionPosition: CAPTION_PLACEMENTS[captionPlacement].position,
+                captionMargin: CAPTION_PLACEMENTS[captionPlacement].margin,
                 // "isolate" = Demucs voice separation, the only mode that
                 // actually removes music. "" = leave the audio untouched.
                 removeBackgroundAudio: removeBgAudio ? 'isolate' : '',
@@ -91,6 +110,8 @@ export default function MediaInput({ onProcess, isProcessing }) {
                 outputFormat: outputFormat === 'custom' ? 'custom' : outputFormat,
                 customWidth: customW, customHeight: customH,
                 captions,
+                captionPosition: CAPTION_PLACEMENTS[captionPlacement].position,
+                captionMargin: CAPTION_PLACEMENTS[captionPlacement].margin,
                 // "isolate" = Demucs voice separation, the only mode that
                 // actually removes music. "" = leave the audio untouched.
                 removeBackgroundAudio: removeBgAudio ? 'isolate' : '',
@@ -349,6 +370,20 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                 className="accent-[var(--color-accent)] cursor-pointer"
                             />
                             Add Captions
+                        </label>
+                        {/* Only meaningful when captions are on. */}
+                        <label className={`flex items-center justify-between gap-2 text-xs ${captions ? 'text-muted' : 'text-muted/40'}`}>
+                            Caption position
+                            <select
+                                value={captionPlacement}
+                                onChange={(e) => setCaptionPlacement(e.target.value)}
+                                disabled={!captions}
+                                className="bg-paper2 border border-rule rounded px-2 py-1 text-xs text-ink2 disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
+                            >
+                                {Object.entries(CAPTION_PLACEMENTS).map(([key, opt]) => (
+                                    <option key={key} value={key}>{opt.label}</option>
+                                ))}
+                            </select>
                         </label>
                         <label
                             className="flex items-center gap-2 text-xs text-muted cursor-pointer select-none"

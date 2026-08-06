@@ -481,3 +481,35 @@ def test_transcribe_media_falls_back_on_assemblyai_exception(monkeypatch):
     monkeypatch.setattr(tb, "_transcribe_with_assemblyai", boom)
     monkeypatch.setattr(tb, "_transcribe_with_whisper", lambda path: sentinel)
     assert tb.transcribe_media("video.mp4") is sentinel
+
+
+# --- Backend selection ------------------------------------------------------
+#
+# Measured on Kaggle 5-aug-2026 (job b86b8c5a): ASSEMBLYAI_API_KEY was set and
+# local whisper ran anyway, because the backend is chosen by TRANSCRIBE_BACKEND
+# and nothing set it. That cost 254s of a ~420s job AND all diarization, which
+# is subject_policy's TIER_DIARIZED framing evidence.
+
+
+def test_explicit_backend_always_wins(monkeypatch):
+    monkeypatch.setenv("TRANSCRIBE_BACKEND", "whisper")
+    monkeypatch.setenv("ASSEMBLYAI_API_KEY", "k")
+    assert tb._select_backend() == "whisper"
+
+
+def test_assemblyai_preferred_when_key_set_and_backend_unset(monkeypatch):
+    monkeypatch.delenv("TRANSCRIBE_BACKEND", raising=False)
+    monkeypatch.setenv("ASSEMBLYAI_API_KEY", "k")
+    assert tb._select_backend() == "assemblyai"
+
+
+def test_whisper_remains_the_default_without_a_key(monkeypatch):
+    monkeypatch.delenv("TRANSCRIBE_BACKEND", raising=False)
+    monkeypatch.delenv("ASSEMBLYAI_API_KEY", raising=False)
+    assert tb._select_backend() == "whisper"
+
+
+def test_blank_backend_is_treated_as_unset(monkeypatch):
+    monkeypatch.setenv("TRANSCRIBE_BACKEND", "   ")
+    monkeypatch.setenv("ASSEMBLYAI_API_KEY", "k")
+    assert tb._select_backend() == "assemblyai"

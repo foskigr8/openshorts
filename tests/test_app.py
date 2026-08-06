@@ -1,4 +1,5 @@
 """Ready-marker gating for in-progress clip surfacing (plan item 6)."""
+import json
 import os
 
 import app
@@ -367,3 +368,250 @@ class TestJobCreatedAt:
 
     def test_missing_directory_does_not_raise(self, tmp_path):
         assert app._job_created_at(str(tmp_path / "nope")) > 0
+
+
+# --- Server-held keys + persistent storage ---------------------------------
+
+
+def _system(monkeypatch, **env):
+    """Call /api/system with a controlled environment."""
+    from fastapi.testclient import TestClient
+    import app as app_mod
+
+    for name in ("GEMINI_API_KEY", "ASSEMBLYAI_API_KEY", "ELEVENLABS_API_KEY",
+                 "UPLOAD_POST_API_KEY", "HF_TOKEN", "HF_STORAGE_REPO"):
+        monkeypatch.delenv(name, raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    return TestClient(app_mod.app).get("/api/system").json()
+
+
+def test_system_reports_which_keys_the_server_holds(monkeypatch):
+    """The dashboard gates its job form on a browser-stored key; on Kaggle the
+    server already has one, so it needs to be able to ask."""
+    body = _system(monkeypatch, GEMINI_API_KEY="k", ASSEMBLYAI_API_KEY="a")
+    assert body["server_keys"]["gemini"] is True
+    assert body["server_keys"]["assemblyai"] is True
+    assert body["server_keys"]["elevenlabs"] is False
+
+
+def test_system_never_leaks_key_material(monkeypatch):
+    """Presence only. /api/system is unauthenticated."""
+    secret = "AIzaSy-super-secret-value"
+    body = _system(monkeypatch, GEMINI_API_KEY=secret)
+    assert secret not in json.dumps(body)
+    assert body["server_keys"]["gemini"] is True
+
+
+def test_system_reports_no_server_keys_on_a_bare_selfhost(monkeypatch):
+    body = _system(monkeypatch)
+    assert body["server_keys"] == {"gemini": False, "assemblyai": False,
+                                   "elevenlabs": False, "upload_post": False}
+
+
+def test_system_reports_storage_backend_state(monkeypatch):
+    body = _system(monkeypatch)
+    assert body["storage_backend"]["configured"] is False
+    body = _system(monkeypatch, HF_TOKEN="t", HF_STORAGE_REPO="u/r")
+    assert body["storage_backend"] == {"provider": "huggingface",
+                                       "configured": True, "repo": "u/r"}
+
+
+def test_history_serves_a_wiped_clip_from_storage(monkeypatch, tmp_path):
+    """The Kaggle case: /kaggle/working was wiped, metadata survived. The clip
+    must still be listed, pointing at the restore endpoint."""
+    from fastapi.testclient import TestClient
+    import app as app_mod
+
+    monkeypatch.setattr(app_mod, "OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setenv("HF_TOKEN", "t")
+    monkeypatch.setenv("HF_STORAGE_REPO", "u/r")
+
+    job_dir = tmp_path / "job-wiped"
+    job_dir.mkdir()
+    (job_dir / "vid_metadata.json").write_text(json.dumps({
+        "shorts": [{"start": 0, "end": 20, "storage_key": "jobs/job-wiped/vid_clip_1.mp4",
+                    "storage_filename": "vid_clip_1.mp4",
+                    "video_title_for_youtube_short": "Kept"}],
+    }))
+    # NOTE: no clip file on disk — that is the point.
+
+    body = TestClient(app_mod.app).get("/api/history").json()
+    entry = [v for v in body["videos"] if v["job_id"] == "job-wiped"]
+    assert len(entry) == 1
+    assert entry[0]["title"] == "Kept"
+    assert entry[0]["view_url"] == "/api/storage/job-wiped/vid_clip_1.mp4"
+    assert entry[0]["storage"] == "huggingface"
+
+
+def test_history_still_hides_a_clip_with_no_local_file_and_no_backup(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+    import app as app_mod
+
+    monkeypatch.setattr(app_mod, "OUTPUT_DIR", str(tmp_path))
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HF_STORAGE_REPO", raising=False)
+
+    job_dir = tmp_path / "job-gone"
+    job_dir.mkdir()
+    (job_dir / "vid_metadata.json").write_text(json.dumps(
+        {"shorts": [{"start": 0, "end": 20}]}))
+
+    body = TestClient(app_mod.app).get("/api/history").json()
+    entries = [v for v in body["videos"] if v["job_id"] == "job-gone"]
+    # Surfaced as a failed job (no media), never as a playable clip.
+    assert all(v["view_url"] == "" for v in entries)
+
+
+def test_restore_endpoint_serves_the_local_file_when_present(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+    import app as app_mod
+
+    monkeypatch.setattr(app_mod, "OUTPUT_DIR", str(tmp_path))
+    job_dir = tmp_path / "job-local"
+    job_dir.mkdir()
+    (job_dir / "clip_1.mp4").write_bytes(b"video-bytes")
+
+    res = TestClient(app_mod.app).get("/api/storage/job-local/clip_1.mp4")
+    assert res.status_code == 200
+    assert res.content == b"video-bytes"
+
+
+def test_restore_endpoint_pulls_from_storage_when_local_is_gone(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+    import app as app_mod
+    import hf_storage
+
+    monkeypatch.setattr(app_mod, "OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setenv("HF_TOKEN", "t")
+    monkeypatch.setenv("HF_STORAGE_REPO", "u/r")
+    (tmp_path / "job-restore").mkdir()
+
+    pulled = []
+
+    def fake_download(key, local_path):
+        pulled.append(key)
+        with open(local_path, "wb") as f:
+            f.write(b"restored")
+        return True
+
+    monkeypatch.setattr(hf_storage, "download_file", fake_download)
+    res = TestClient(app_mod.app).get("/api/storage/job-restore/clip_1.mp4")
+    assert res.status_code == 200
+    assert res.content == b"restored"
+    assert pulled == ["jobs/job-restore/clip_1.mp4"]
+
+
+def test_restore_endpoint_404s_when_the_clip_is_truly_gone(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+    import app as app_mod
+
+    monkeypatch.setattr(app_mod, "OUTPUT_DIR", str(tmp_path))
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    (tmp_path / "job-none").mkdir()
+    res = TestClient(app_mod.app).get("/api/storage/job-none/clip_1.mp4")
+    assert res.status_code == 404
+
+
+def test_restore_endpoint_never_escapes_the_job_directory(monkeypatch, tmp_path):
+    """A traversing filename must not reach a file outside the job dir.
+
+    Two layers stop it: a path with a slash does not match the two-segment
+    route at all (the SPA catch-all answers instead), and anything that does
+    match is basename-d before it touches the filesystem.
+    """
+    from fastapi.testclient import TestClient
+    import app as app_mod
+
+    monkeypatch.setattr(app_mod, "OUTPUT_DIR", str(tmp_path))
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    (tmp_path / "job-safe").mkdir()
+    (tmp_path / "secret.txt").write_text("do not serve me")
+
+    client = TestClient(app_mod.app)
+    for url in ("/api/storage/job-safe/..%2Fsecret.txt",
+                "/api/storage/job-safe/../secret.txt"):
+        assert b"do not serve me" not in client.get(url).content
+
+    # The sibling file exists one level up; asking for it by bare name must
+    # 404 rather than resolve against OUTPUT_DIR.
+    assert client.get("/api/storage/job-safe/secret.txt").status_code == 404
+
+
+def test_restore_endpoint_404s_for_an_unknown_job(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+    import app as app_mod
+
+    monkeypatch.setattr(app_mod, "OUTPUT_DIR", str(tmp_path))
+    res = TestClient(app_mod.app).get("/api/storage/no-such-job/clip_1.mp4")
+    assert res.status_code == 404
+
+
+def test_backup_is_skipped_entirely_when_storage_is_unconfigured(monkeypatch, tmp_path):
+    """A self-host with no HF credentials must behave exactly as before."""
+    import app as app_mod
+    import hf_storage
+
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    calls = []
+    monkeypatch.setattr(hf_storage, "upload_file",
+                        lambda *a, **k: calls.append(a))
+    app_mod.jobs["job-x"] = {"status": "processing", "logs": [],
+                             "output_dir": str(tmp_path)}
+    try:
+        app_mod._hf_backup_ready_clips("job-x", str(tmp_path))
+    finally:
+        app_mod.jobs.pop("job-x", None)
+    assert calls == []
+
+
+def test_storage_key_is_recorded_atomically_in_metadata(monkeypatch, tmp_path):
+    import app as app_mod
+
+    meta = tmp_path / "vid_metadata.json"
+    meta.write_text(json.dumps({"shorts": [{"start": 0, "end": 10},
+                                           {"start": 20, "end": 30}]}))
+    app_mod._hf_record_storage_key(str(tmp_path), 1, "vid_clip_2.mp4",
+                                   "jobs/j/vid_clip_2.mp4")
+    data = json.loads(meta.read_text())
+    assert data["shorts"][1]["storage_key"] == "jobs/j/vid_clip_2.mp4"
+    assert data["shorts"][1]["storage_filename"] == "vid_clip_2.mp4"
+    assert "storage_key" not in data["shorts"][0], "must not touch other clips"
+    assert not list(tmp_path.glob("*.tmp")), "tmp file must be replaced, not left"
+
+
+def test_recording_a_key_for_a_missing_clip_index_is_ignored(tmp_path):
+    import app as app_mod
+
+    meta = tmp_path / "vid_metadata.json"
+    meta.write_text(json.dumps({"shorts": [{"start": 0, "end": 10}]}))
+    app_mod._hf_record_storage_key(str(tmp_path), 9, "x.mp4", "jobs/j/x.mp4")
+    assert json.loads(meta.read_text())["shorts"] == [{"start": 0, "end": 10}]
+
+
+# --- Per-job caption placement ---------------------------------------------
+
+
+def test_caption_margin_parsing_clamps_and_rejects_junk():
+    """Mirrors generate_ass's own 0..200 clamp, so nothing out of range can
+    reach the ASS style line."""
+    from app import _parse_caption_margin
+
+    assert _parse_caption_margin("120") == 120
+    assert _parse_caption_margin(43) == 43
+    assert _parse_caption_margin("9999") == 200
+    assert _parse_caption_margin("-5") == 0
+    assert _parse_caption_margin("") is None       # -> server default
+    assert _parse_caption_margin(None) is None
+    assert _parse_caption_margin("bottom") is None
+
+
+def test_caption_positions_are_the_three_generate_ass_supports():
+    import app as app_mod
+    import subtitles
+
+    assert set(app_mod.CAPTION_POSITIONS) == {"top", "middle", "bottom"}
+    # generate_ass's align_map is the source of truth for what is renderable.
+    for position in app_mod.CAPTION_POSITIONS:
+        assert position in ("top", "middle", "bottom")
+    assert subtitles.AUTO_CAPTION_STYLE["alignment"] in app_mod.CAPTION_POSITIONS

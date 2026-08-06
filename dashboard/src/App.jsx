@@ -752,7 +752,14 @@ function App() {
   // `keysMissing` means "self-host BYOK keys missing" — it never fires on hosted.
   // Upload-Post is only needed for social auto-publishing, not clip generation,
   // so it doesn't gate the main flow — just the Gemini key does.
-  const keysMissing = !billingEnabled && !apiKey;
+  // The server may already hold a Gemini key (a .env on a self-host, Kaggle
+  // Secrets on a Kaggle run). resolve_gemini() in app.py falls back to the
+  // environment, so the backend works — the browser-side gate was the only
+  // thing demanding a key, and it made a correctly-configured Kaggle host ask
+  // for one it was already using. /api/system reports presence only, never a
+  // value. A locally-entered key still wins as an override.
+  const serverHasGeminiKey = !!systemStatus?.server_keys?.gemini;
+  const keysMissing = !billingEnabled && !apiKey && !serverHasGeminiKey;
   const needsPlan = billingEnabled && !isManaged;   // hosted, signed-out or no active plan/trial
 
   // Fresh sign-up: show the welcome plan-choice popup once (AuthContext set the
@@ -845,6 +852,8 @@ function App() {
           captions: data.captions !== false,
           zoom_mode: data.zoomMode || 'auto',
           style_variant: data.styleVariant || 'balanced',
+          caption_position: data.captionPosition || 'bottom',
+          caption_margin: data.captionMargin ?? null,
         });
       } else {
         const formData = new FormData();
@@ -861,6 +870,8 @@ function App() {
         formData.append('captions', data.captions !== false ? 'true' : 'false');
         formData.append('zoom_mode', data.zoomMode || 'auto');
         formData.append('style_variant', data.styleVariant || 'balanced');
+        formData.append('caption_position', data.captionPosition || 'bottom');
+        if (data.captionMargin != null) formData.append('caption_margin', String(data.captionMargin));
         body = formData;
       }
 
@@ -2119,11 +2130,21 @@ function App() {
           </p>
 
           {/* Gemini block */}
-          <div className={`rounded-input p-4 space-y-2 border ${!apiKey ? 'border-rule2' : 'border-rule opacity-70'}`}>
+          <div className={`rounded-input p-4 space-y-2 border ${(!apiKey && !serverHasGeminiKey) ? 'border-rule2' : 'border-rule opacity-70'}`}>
             <p className="text-xs font-medium text-ink flex items-center gap-2">
-              {apiKey ? <Check size={12} className="text-ok" /> : <AlertTriangle size={12} className="text-warn" />}
+              {(apiKey || serverHasGeminiKey) ? <Check size={12} className="text-ok" /> : <AlertTriangle size={12} className="text-warn" />}
               Gemini API Key {apiKey && <span className="text-ok">— set</span>}
+              {!apiKey && serverHasGeminiKey && <span className="text-ok">— using the server's key</span>}
             </p>
+            {/* The server holds a key of its own (a .env, or Kaggle Secrets), so
+                nothing needs to be entered here. The field stays available as a
+                per-browser override. */}
+            {!apiKey && serverHasGeminiKey && (
+              <p className="text-xs text-muted">
+                This deployment is configured with its own Gemini key, so you can start a job right away.
+                Enter a key below only if you want this browser to use a different one.
+              </p>
+            )}
             {!apiKey && (
               <>
                 <ol className="text-xs text-muted space-y-1 list-decimal list-inside">

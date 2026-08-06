@@ -1,5 +1,24 @@
 # Kaggle optimization plan
 
+> **STATUS (6-aug-2026): every finding below is implemented.** Findings 1, 2, 4,
+> 5 and 6 landed as described; Finding 3 was superseded by
+> `PLAN_CAPTIONS_AND_STORAGE.md` (HuggingFace, not R2) and is now implemented
+> there. Two corrections to the plan's own advice, both from reading the code:
+>
+> - **Finding 4 cannot use `CUDA_VISIBLE_DEVICES`.** Clip workers are threads in
+>   one process (`main.py`'s ThreadPoolExecutor), and CUDA reads that variable
+>   once at initialization — setting it per worker does nothing. `gpu_affinity.py`
+>   binds the thread-local torch device instead. Only LR-ASD shards; MediaPipe
+>   and YOLO stay serialized under `DETECT_LOCK`, so the honest expectation is a
+>   partial gain on multi-clip jobs, **not 2×**.
+> - **Finding 1 needed a code change too**, not just the bootstrap export — a
+>   self-host setting `ASSEMBLYAI_API_KEY` in `.env` hit the same trap. See
+>   `transcribe_backends._select_backend`.
+>
+> None of this is measured on a real Kaggle run yet. The plan's own rule stands:
+> **verify by running.** What is verified is the test suite (642 passing) and
+> `kaggle_smoke_test.py`, which reports each of these as PASS/FAIL on the host.
+
 **For the engineer picking this up (DeepSeek or otherwise).**
 Repo: `github.com/foskigr8/openshorts`, branch `session/framing-work`.
 If you do not have repo access, ask the owner to add you — every change below is

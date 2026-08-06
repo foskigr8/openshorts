@@ -35,6 +35,7 @@ from pipeline_progress import write_progress as _write_progress
 from pipeline_progress import mark_clip_ready as _mark_clip_ready
 from pipeline_progress import record_stage_durations
 from hardware_defaults import default_clip_workers
+import gpu_affinity
 from dotenv import load_dotenv
 import json
 
@@ -1705,6 +1706,7 @@ def auto_caption_clip(clip_path, transcript, clip_start, clip_end, general_range
                 border_color=style["border_color"], border_width=border_width,
                 highlight_color=style["highlight_color"], effect=style["effect"],
                 base_opacity=style["base_opacity"], uppercase=style["uppercase"],
+                margin_v=style.get("margin_v", _subs.SAFE_MARGIN_V),
                 general_ranges=general_ranges,
                 speaker_colors=style.get("speaker_colors", False),
                 letter_spacing_ratio=_subs.CAPTION_LETTER_SPACING_RATIO):
@@ -3354,6 +3356,12 @@ if __name__ == '__main__':
             # clip. Renders are mostly ffmpeg subprocesses (parallelize well);
             # detector inference is serialized internally via DETECT_LOCK.
             def _process_one_clip(i, clip):
+                # Bind this worker thread to one GPU. On the measured 2×T4
+                # Kaggle run every concurrent clip ran on GPU 0 while GPU 1 sat
+                # idle; see gpu_affinity for why this is a thread-local torch
+                # device rather than CUDA_VISIBLE_DEVICES. No-op on CPU and
+                # single-GPU hosts.
+                gpu_affinity.assign_worker(i)
                 start = clip['start']
                 end = clip['end']
                 print(f"\n🎬 Processing Clip {i+1}: {start}s - {end}s")
@@ -3488,6 +3496,9 @@ if __name__ == '__main__':
             # CLIP_WORKERS env var always wins.
             clip_workers = max(
                 int(os.environ.get("CLIP_WORKERS") or default_clip_workers()), 1)
+            _gpu_plan = gpu_affinity.describe()
+            if _gpu_plan:
+                print(_gpu_plan)
             shorts = clips_data['shorts']
             _progress_lock = threading.Lock()
             _rendered_count = [0]

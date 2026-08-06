@@ -31,3 +31,7 @@ python_speech_features==0.6
 # rebuilt container came up with no pytest, so `python3 -m pytest tests/`
 # failed and the suite silently stopped being runnable after a restart.
 pytest==8.3.4
+# Persistent clip storage on HuggingFace Hub (hf_storage.py). Kaggle wipes
+# /kaggle/working at session end, so clips rendered there evaporate without
+# a backup; HF was chosen over R2/B2 because it needs no credit card.
+huggingface_hub>=0.23

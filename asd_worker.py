@@ -323,6 +323,16 @@ def score_clip(video_path, detect_faces, identity=None, max_tracks=6,
             return {"per_second": [], "per_second_box": [], "tracks": {},
                     "fps": ASD_VIDEO_FPS}
 
+        # No explicit device: use whatever GPU this clip worker was assigned,
+        # so concurrent clips do not all pile onto GPU 0 (gpu_affinity). Falls
+        # through to ASDScorer's own cuda-if-available choice when nothing was
+        # assigned, which is the single-GPU / CPU behaviour.
+        if device is None:
+            try:
+                import gpu_affinity
+                device = gpu_affinity.current_device()
+            except Exception:
+                device = None
         scorer = ASDScorer(device=device)
         blank = np.zeros((FACE_SIZE, FACE_SIZE), dtype=np.uint8)
         tracks = {}

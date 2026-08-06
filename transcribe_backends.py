@@ -577,6 +577,33 @@ def _has_audio_stream(media_path) -> bool:
         return True  # probe failed — don't block, let the backend try
 
 
+def _select_backend():
+    """Which ASR backend to use.
+
+    TRANSCRIBE_BACKEND wins when set. When it is NOT set but an AssemblyAI key
+    is configured, prefer assemblyai over the historical "whisper" default:
+    supplying the key and getting local whisper anyway is never what anyone
+    means by it, and the cost of the silent default is not just speed. Whisper
+    produces no diarization, and diarization is subject_policy's TIER_DIARIZED
+    evidence — the signal that stops the camera sitting on the wrong person in
+    multi-speaker footage. Measured on Kaggle 5-aug-2026 (job b86b8c5a): 254s
+    of a ~420s job spent in local whisper, with the framing evidence line
+    reading "lip-sync 97%, directed 3%" and diarized at 0%.
+
+    The fallback chain below is unchanged, so an AssemblyAI outage still lands
+    on whisper.
+    """
+    configured = os.environ.get("TRANSCRIBE_BACKEND", "").strip().lower()
+    if configured:
+        return configured
+    if os.environ.get("ASSEMBLYAI_API_KEY", "").strip():
+        print("🎙️ [ASR] ASSEMBLYAI_API_KEY is set and TRANSCRIBE_BACKEND is not "
+              "— using assemblyai (API + diarization). Set "
+              "TRANSCRIBE_BACKEND=whisper to force local transcription.")
+        return "assemblyai"
+    return "whisper"
+
+
 def transcribe_media(media_path):
     """Transcribe with the configured backend, falling back to whisper."""
     # Silent videos (AI-generated clips, muted screen recordings) have no audio
@@ -588,7 +615,7 @@ def transcribe_media(media_path):
             "This video has no audio track. OpenShorts finds viral moments from "
             "speech, so it needs a video with audio.")
 
-    backend = os.environ.get("TRANSCRIBE_BACKEND", "whisper").strip().lower()
+    backend = _select_backend()
 
     if backend == "parakeet":
         try:

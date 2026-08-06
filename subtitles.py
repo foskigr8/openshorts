@@ -269,6 +269,15 @@ def generate_srt(transcript, clip_start, clip_end, output_path, max_chars=20, ma
 # and Reels' own bottom UI — the caption/username block and the music ticker —
 # where they were partly covered on the platform even though the exported file
 # looked fine.
+def _clamp_number(value, lo, hi, default):
+    """Coerce value to float and clamp to [lo, hi]; use default if not numeric."""
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        num = float(default)
+    return max(lo, min(hi, num))
+
+
 SAFE_MARGIN_V = 43
 
 # How far up from the bottom of the (letterboxed) content box captions sit,
@@ -307,6 +316,14 @@ AUTO_CAPTION_STYLE = {
     # having to restyle every clip afterwards.
     "alignment": (os.environ.get("CAPTION_POSITION", "").strip().lower()
                   or "bottom"),
+    # How far up from the frame edge, in ASS MarginV. This is a SEPARATE
+    # control from alignment: "bottom but lifted off the edge" is bottom
+    # alignment with a larger margin, not a different alignment. Only
+    # meaningful for bottom alignment — generate_ass computes a per-line
+    # MarginV only when ass_alignment == 2 — so the UI offers it there alone.
+    # app.py sets CAPTION_MARGIN_V per job from the submission form.
+    "margin_v": _clamp_number(os.environ.get("CAPTION_MARGIN_V", ""),
+                              0, 200, SAFE_MARGIN_V),
     "font_name": "Montserrat ExtraBold",
     # 44 was tuned for the old multi-word-block style, where several words
     # shared one line. With a single word filling the whole line now, the
@@ -665,15 +682,6 @@ def hex_to_ass_color(hex_color, opacity=1.0, fallback="FFFFFF"):
     b = int(hex_digits[4:6], 16)
     alpha = round((1.0 - opacity) * 255)
     return f"&H{alpha:02X}{b:02X}{g:02X}{r:02X}"
-
-
-def _clamp_number(value, lo, hi, default):
-    """Coerce value to float and clamp to [lo, hi]; use default if not numeric."""
-    try:
-        num = float(value)
-    except (TypeError, ValueError):
-        num = float(default)
-    return max(lo, min(hi, num))
 
 
 def _sanitize_font_name(name):

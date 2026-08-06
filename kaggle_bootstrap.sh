@@ -170,6 +170,14 @@ fi
 # whisper fallback path, which fetches its model from HF; unauthenticated
 # requests are rate-limited and slower.
 [ -n "${HF_TOKEN:-}" ] && echo "    HF_TOKEN: set" || echo "    HF_TOKEN: unset (HF downloads rate-limited)"
+# Persistent storage. /kaggle/working is wiped when the session ends (12h cap,
+# and it dies sooner often enough), so without this every clip is lost.
+if [ -n "${HF_TOKEN:-}" ] && [ -n "${HF_STORAGE_REPO:-}" ]; then
+    echo "    storage: huggingface -> $HF_STORAGE_REPO (clips upload as they finish)"
+else
+    echo "    storage: NOT configured — clips are wiped when this session ends."
+    echo "      Set HF_TOKEN (a *write* token) + HF_STORAGE_REPO=<user>/openshorts-clips."
+fi
 # Where burned-in captions sit: bottom (default), middle or top.
 echo "    CAPTION_POSITION: ${CAPTION_POSITION:-bottom}"
 if [ -n "${YOUTUBE_COOKIES:-}" ] && [ ! -s cookies.txt ]; then

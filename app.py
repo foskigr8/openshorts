@@ -24,6 +24,7 @@ from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel
 from s3_uploader import upload_job_artifacts, list_all_clips, upload_actor_to_s3, list_actor_gallery, upload_video_to_gallery, list_video_gallery
+import hf_storage
 
 load_dotenv()
 
@@ -529,6 +530,106 @@ def _collect_ready_clips(output_dir, base_name, clips, job_id):
             clip['video_url'] = f"/videos/{job_id}/{clip_filename}"
             ready.append(clip)
     return ready
+
+
+# Caption placement, chosen per job at submit time.
+CAPTION_POSITIONS = ("top", "middle", "bottom")
+
+
+def _parse_caption_margin(value):
+    """Clamp a requested caption MarginV to the range generate_ass accepts.
+
+    Returns None when nothing usable was sent, which leaves subtitles.py on its
+    SAFE_MARGIN_V default. The clamp mirrors generate_ass's own (0..200) so an
+    out-of-range value can never reach the ASS style line.
+    """
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return int(max(0, min(200, float(value))))
+    except (TypeError, ValueError):
+        return None
+
+
+_hf_lock = threading.Lock()
+
+
+def _hf_record_storage_key(output_dir, clip_index, filename, key):
+    """Write one clip's storage key into the job metadata, atomically.
+
+    Read-modify-write under a lock, then tmp + os.replace — the same atomic
+    write main.py uses, because a crash mid-write leaves a truncated metadata
+    file that every consumer treats as authoritative. Uploads only start after
+    a clip is rendered, which is after main.py's single metadata write, so the
+    two never contend for the file in practice.
+    """
+    with _hf_lock:
+        try:
+            paths = _sorted_metadata(glob.glob(os.path.join(output_dir, "*_metadata.json")))
+            if not paths:
+                return
+            with open(paths[0], 'r') as f:
+                data = json.load(f)
+            shorts = data.get('shorts') or []
+            if clip_index >= len(shorts):
+                return
+            shorts[clip_index]['storage_key'] = key
+            shorts[clip_index]['storage_filename'] = filename
+            tmp = paths[0] + ".tmp"
+            with open(tmp, 'w') as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, paths[0])
+        except Exception as e:
+            print(f"⚠️ HF storage: could not record key for clip "
+                  f"{clip_index + 1} ({type(e).__name__}: {e})")
+
+
+def _hf_backup_ready_clips(job_id, output_dir):
+    """Upload every newly-finished clip to HuggingFace. Non-blocking, no-op
+    when unconfigured.
+
+    Runs from the poll loop, so a clip is backed up WHILE the job is still
+    going. Uploading at job end (what the S3 path does) loses everything when
+    a Kaggle session dies mid-job, which it eventually will — there is a 12h
+    cap and /kaggle/working is wiped with it.
+
+    Each clip is scheduled at most once per process; failures are logged by
+    hf_storage and deliberately not retried here, because the job must not be
+    held up by a backup.
+    """
+    if not hf_storage.configured() or job_id not in jobs:
+        return
+    scheduled = jobs[job_id].setdefault('_hf_scheduled', set())
+    try:
+        paths = _sorted_metadata(glob.glob(os.path.join(output_dir, "*_metadata.json")))
+        if not paths:
+            return
+        with open(paths[0], 'r') as f:
+            data = json.load(f)
+        base_name = os.path.basename(paths[0]).replace('_metadata.json', '')
+        clips = data.get('shorts') or []
+    except Exception:
+        return
+
+    from pipeline_progress import clip_ready_marker
+    loop = asyncio.get_event_loop()
+    for i, _clip in enumerate(clips):
+        filename = _canonical_clip_file(output_dir, base_name, i)
+        if filename in scheduled:
+            continue
+        clip_path = os.path.join(output_dir, filename)
+        marker = clip_ready_marker(output_dir, f"{base_name}_clip_{i+1}.mp4")
+        if not (os.path.exists(marker) and os.path.exists(clip_path)
+                and os.path.getsize(clip_path) > 0):
+            continue
+        scheduled.add(filename)
+        key = hf_storage.job_key(job_id, filename)
+
+        def _upload(path=clip_path, key=key, index=i, name=filename):
+            if hf_storage.upload_file(path, key):
+                _hf_record_storage_key(output_dir, index, name, key)
+
+        loop.run_in_executor(None, _upload)
 
 
 def _strip_burned_captions(output_dir, filename):
@@ -1372,6 +1473,13 @@ async def run_job(job_id, job_data):
                 # Ignore read errors during processing
                 pass
 
+            # Back up finished clips as they land, not at job end — see
+            # _hf_backup_ready_clips. No-op unless HF storage is configured.
+            try:
+                _hf_backup_ready_clips(job_id, output_dir)
+            except Exception as e:
+                print(f"⚠️ HF storage: backup pass failed ({type(e).__name__}: {e})")
+
         returncode = process.returncode
 
         if jobs[job_id]['status'] == 'cancelled':
@@ -1384,6 +1492,14 @@ async def run_job(job_id, job_data):
             jobs[job_id]['status'] = 'completed'
             jobs[job_id]['logs'].append(_log_entry("Process finished successfully."))
             
+            # Final HF pass: the poll loop ticks every 2s, so the last clip (or
+            # two on a fast job) can finish between the last tick and the
+            # process exiting. Already-scheduled clips are skipped.
+            try:
+                _hf_backup_ready_clips(job_id, output_dir)
+            except Exception as e:
+                print(f"⚠️ HF storage: final backup pass failed ({type(e).__name__}: {e})")
+
             # Self-host: silent AWS S3 backup. Cloud mode stores to R2 instead
             # (see _archive_managed_job), so skip the redundant/paid AWS upload.
             if not BILLING_ENABLED:
@@ -1494,12 +1610,34 @@ async def system_status():
     # displays.
     active_jobs = sum(1 for j in jobs.values() if j.get('status') == 'processing')
 
+    # Which keys the SERVER already holds. Presence only — never a value, a
+    # prefix or a length, because this endpoint is unauthenticated.
+    #
+    # The dashboard is built for self-hosters who keep keys in the browser, so
+    # it gates the job form on a localStorage key even when the server has one
+    # of its own. On Kaggle (keys arrive as Kaggle Secrets) that made the UI
+    # demand a key the backend was already using. resolve_gemini() falls back
+    # to the env, so the gate was the only thing standing in the way.
+    #
+    # Managed-key deployments report the entitlement path as "present" too: a
+    # billed user never needs to supply a key either. This is deliberately not
+    # per-user — it answers "does this deployment need YOU to bring a key", not
+    # "who are you".
+    server_keys = {
+        "gemini": bool(os.environ.get("GEMINI_API_KEY")) or BILLING_ENABLED,
+        "assemblyai": bool(os.environ.get("ASSEMBLYAI_API_KEY")),
+        "elevenlabs": bool(os.environ.get("ELEVENLABS_API_KEY")),
+        "upload_post": bool(os.environ.get("UPLOAD_POST_API_KEY")) or BILLING_ENABLED,
+    }
+
     return {
         "backend": True,
         "cookies": cookies,
         "gpu": gpu,
         "storage": storage,
         "queue": {"active": active_jobs},
+        "server_keys": server_keys,
+        "storage_backend": hf_storage.status(),
     }
 
 @app.get("/api/config")
@@ -1542,7 +1680,9 @@ async def process_endpoint(
     custom_height: Optional[str] = Form(None),
     captions: Optional[str] = Form(None),
     zoom_mode: Optional[str] = Form(None),
-    style_variant: Optional[str] = Form(None)
+    style_variant: Optional[str] = Form(None),
+    caption_position: Optional[str] = Form(None),
+    caption_margin: Optional[str] = Form(None)
 ):
     api_key = await resolve_gemini(request)
     if not api_key:
@@ -1587,6 +1727,14 @@ async def process_endpoint(
     style_variant = str(style_variant or "balanced").strip().lower()
     if style_variant not in ("balanced", "high_energy", "story_driven"):
         style_variant = "balanced"
+    # Caption placement is chosen per JOB, before processing: picking it
+    # afterwards in the Subtitle modal means re-encoding every clip. Position
+    # and margin are different controls — "bottom but lifted off the edge" is
+    # bottom alignment with a bigger MarginV, not another alignment.
+    caption_position = str(caption_position or "bottom").strip().lower()
+    if caption_position not in CAPTION_POSITIONS:
+        caption_position = "bottom"
+    caption_margin_v = _parse_caption_margin(caption_margin)
 
     # Handle JSON body manually for URL payload
     content_type = request.headers.get("content-type", "")
@@ -1627,6 +1775,10 @@ async def process_endpoint(
             zoom_mode = body.get("zoom_mode")
         if body.get("style_variant") in ("balanced", "high_energy", "story_driven"):
             style_variant = body.get("style_variant")
+        if body.get("caption_position") in CAPTION_POSITIONS:
+            caption_position = body.get("caption_position")
+        if body.get("caption_margin") is not None:
+            caption_margin_v = _parse_caption_margin(body.get("caption_margin"))
 
     # Normalize output format (auto = keep pipeline default).
     if output_format not in ("vertical", "horizontal", "square", "custom"):
@@ -1774,6 +1926,10 @@ async def process_endpoint(
         env["AUTO_CAPTIONS"] = "0"
     if zoom_mode != "auto":
         env["SCENE_STRATEGY_OVERRIDE"] = zoom_mode
+    if captions_on:
+        env["CAPTION_POSITION"] = caption_position
+        if caption_margin_v is not None:
+            env["CAPTION_MARGIN_V"] = str(caption_margin_v)
 
     print(f"[attestation] job={job_id} ip={attestation['ip']} source={attestation['source']} ack=true")
 
@@ -1945,6 +2101,52 @@ def _job_created_at(job_path):
         return time.time()
 
 
+@app.get("/api/storage/{job_id}/{filename}")
+async def restore_from_storage(job_id: str, filename: str, request: Request):
+    """Serve a clip whose local file is gone by restoring it from HF storage.
+
+    This is what makes History survive a Kaggle session ending: the local file
+    is wiped with /kaggle/working, but the metadata still carries the storage
+    key. The repo is private, so the file cannot be linked to directly — the
+    server holds the token and streams it.
+
+    Restores into the job directory, so the next request is served locally by
+    the normal /videos mount.
+    """
+    safe_name = os.path.basename(filename)
+    job_dir = os.path.join(OUTPUT_DIR, os.path.basename(job_id))
+    if not os.path.isdir(job_dir):
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    owner = await _request_owner_id(request)
+    owner_path = os.path.join(job_dir, ".owner")
+    if os.path.exists(owner_path):
+        try:
+            raw = open(owner_path).read().strip()
+            job_owner = int(raw) if raw.isdigit() else (raw or None)
+        except Exception:
+            job_owner = None
+        if job_owner is not None and job_owner != owner:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+    local_path = os.path.join(job_dir, safe_name)
+    if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
+        return FileResponse(local_path, media_type="video/mp4")
+
+    if not hf_storage.configured():
+        raise HTTPException(status_code=404, detail="Clip is no longer on disk")
+
+    key = hf_storage.job_key(job_id, safe_name)
+    loop = asyncio.get_event_loop()
+    ok = await loop.run_in_executor(
+        None, hf_storage.download_file, key, local_path)
+    if not ok or not os.path.exists(local_path):
+        raise HTTPException(
+            status_code=404,
+            detail="Clip is not on disk and could not be restored from storage")
+    return FileResponse(local_path, media_type="video/mp4")
+
+
 @app.get("/api/history")
 async def list_history(request: Request):
     """Every clip still on disk, newest job first — the durable history view.
@@ -2040,9 +2242,33 @@ async def list_history(request: Request):
             playable = 0
             for i, clip in enumerate(clips):
                 filename = _canonical_clip_file(job_path, base_name, i)
-                if not os.path.exists(os.path.join(job_path, filename)):
+                local_exists = os.path.exists(os.path.join(job_path, filename))
+                # A clip missing locally but present in HF storage is still
+                # playable — that is the whole point of the backup. This is the
+                # path a fresh Kaggle session takes: /kaggle/working was wiped,
+                # the metadata survived in the mounted output dir, and the
+                # restore endpoint pulls the file back on demand.
+                stored_name = clip.get("storage_filename") or filename
+                restorable = bool(clip.get("storage_key")) and hf_storage.configured()
+                if not local_exists and not restorable:
                     continue
                 playable += 1
+                if not local_exists:
+                    videos.append({
+                        "id": f"{job_id}_{i}",
+                        "job_id": job_id,
+                        "title": (clip.get("title")
+                                  or clip.get("video_title_for_youtube_short")
+                                  or base_name),
+                        "created_at": created_at,
+                        "status": job_status,
+                        "duration": max(0.0, float(clip.get("end") or 0) - float(clip.get("start") or 0)),
+                        "size_bytes": 0,
+                        "storage": "huggingface",
+                        "view_url": f"/api/storage/{job_id}/{stored_name}",
+                        "download_url": f"/api/storage/{job_id}/{stored_name}",
+                    })
+                    continue
                 videos.append({
                     "id": f"{job_id}_{i}",
                     "job_id": job_id,

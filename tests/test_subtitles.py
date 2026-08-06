@@ -628,3 +628,87 @@ class TestFilterQuoting:
     def test_plain_path_untouched(self):
         from subtitles import _escape_ffmpeg_filter_value
         assert _escape_ffmpeg_filter_value("/out/subs_0_123.ass") == "/out/subs_0_123.ass"
+
+
+class TestCaptionPlacement:
+    """Per-job caption placement (CAPTION_POSITION / CAPTION_MARGIN_V).
+
+    Position and margin are separate controls: "bottom but lifted off the edge"
+    is bottom alignment with a larger MarginV, not a different alignment. The
+    ASS style line ends with `...,Alignment,MarginL,MarginR,MarginV,Encoding`.
+    """
+
+    def _transcript(self):
+        return {"segments": [{"start": 0, "end": 99, "text": "",
+                              "words": [_w(" one", 0.0, 0.3), _w(" two", 0.3, 0.6)]}]}
+
+    def _style_line(self, content):
+        return next(l for l in content.splitlines() if l.startswith("Style: Default,"))
+
+    def _alignment_and_margin(self, content):
+        fields = self._style_line(content).split(",")
+        # ...,Alignment,MarginL,MarginR,MarginV,Encoding
+        return int(fields[-5]), int(fields[-2])
+
+    def _render(self, tmp_path, **kwargs):
+        from subtitles import generate_ass
+        out = tmp_path / "subs.ass"
+        assert generate_ass(self._transcript(), 0, 10, str(out), **kwargs) is True
+        return out.read_text(encoding="utf-8-sig")
+
+    def test_bottom_is_the_default(self, tmp_path):
+        from subtitles import SAFE_MARGIN_V
+        alignment, margin = self._alignment_and_margin(self._render(tmp_path))
+        assert alignment == 2                      # ASS bottom-centre
+        assert margin == int(SAFE_MARGIN_V)
+
+    def test_bottom_raised_keeps_alignment_and_lifts_the_margin(self, tmp_path):
+        alignment, margin = self._alignment_and_margin(
+            self._render(tmp_path, alignment="bottom", margin_v=120))
+        assert alignment == 2
+        assert margin == 120
+
+    def test_middle_alignment(self, tmp_path):
+        alignment, _ = self._alignment_and_margin(
+            self._render(tmp_path, alignment="middle"))
+        assert alignment == 5
+
+    def test_top_alignment(self, tmp_path):
+        alignment, _ = self._alignment_and_margin(
+            self._render(tmp_path, alignment="top"))
+        assert alignment == 8
+
+    def test_an_invalid_position_falls_back_to_bottom(self, tmp_path):
+        alignment, _ = self._alignment_and_margin(
+            self._render(tmp_path, alignment="sideways"))
+        assert alignment == 2
+
+    def test_margin_is_clamped_into_range(self, tmp_path):
+        _, margin = self._alignment_and_margin(
+            self._render(tmp_path, alignment="bottom", margin_v=9999))
+        assert margin == 200
+        _, margin = self._alignment_and_margin(
+            self._render(tmp_path, alignment="bottom", margin_v=-50))
+        assert margin == 0
+
+    def test_auto_style_reads_the_per_job_env(self, monkeypatch):
+        """app.py sets these per job; main.py runs as a fresh subprocess, so
+        module-import-time resolution is per job in practice."""
+        import importlib
+        import subtitles
+
+        monkeypatch.setenv("CAPTION_POSITION", "middle")
+        monkeypatch.setenv("CAPTION_MARGIN_V", "120")
+        reloaded = importlib.reload(subtitles)
+        try:
+            assert reloaded.AUTO_CAPTION_STYLE["alignment"] == "middle"
+            assert reloaded.AUTO_CAPTION_STYLE["margin_v"] == 120
+        finally:
+            monkeypatch.delenv("CAPTION_POSITION", raising=False)
+            monkeypatch.delenv("CAPTION_MARGIN_V", raising=False)
+            importlib.reload(subtitles)
+
+    def test_auto_style_defaults_without_env(self):
+        import subtitles
+        assert subtitles.AUTO_CAPTION_STYLE["alignment"] == "bottom"
+        assert subtitles.AUTO_CAPTION_STYLE["margin_v"] == subtitles.SAFE_MARGIN_V

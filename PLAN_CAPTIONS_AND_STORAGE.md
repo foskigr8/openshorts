@@ -1,5 +1,23 @@
 # Plan: per-job caption placement + HuggingFace persistent storage
 
+> **STATUS (6-aug-2026): both parts implemented.** Part 1 follows the
+> `captions`/`zoom_mode` pattern exactly (`MediaInput.jsx` → `/api/process` →
+> `CAPTION_POSITION`/`CAPTION_MARGIN_V` → `subtitles.AUTO_CAPTION_STYLE`).
+> Part 2 is `hf_storage.py` + per-clip upload from `app.py`'s poll loop +
+> `/api/storage/{job_id}/{filename}` for restore. Notes on where the
+> implementation differs from the text below:
+>
+> - The history fallback emits `/api/storage/...`, not a raw HF URL: the repo is
+>   **private**, so its resolve URL needs an Authorization header and cannot be
+>   put in a browser `src`. The server holds the token and streams the file,
+>   restoring it to disk so the next request is served locally.
+> - `_clamp_number` had to move ABOVE `AUTO_CAPTION_STYLE` in `subtitles.py`
+>   (it is now used at import time). Still one clamp, as instructed.
+>
+> Not yet done, and it needs a real run: verification steps 3 and 4 (clips
+> appearing in the HF repo mid-job, and History surviving a session restart).
+> Tests cover the logic with a stubbed `HfApi`; they cannot prove the round trip.
+
 **Audience:** implementing engineer (DeepSeek).
 **Repo:** `github.com/foskigr8/openshorts`, branch `session/framing-work`.
 If you lack repo access, ask the owner to add you — every change is in this repo.
