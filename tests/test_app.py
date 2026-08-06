@@ -615,3 +615,50 @@ def test_caption_positions_are_the_three_generate_ass_supports():
     for position in app_mod.CAPTION_POSITIONS:
         assert position in ("top", "middle", "bottom")
     assert subtitles.AUTO_CAPTION_STYLE["alignment"] in app_mod.CAPTION_POSITIONS
+
+
+def test_job_logs_download_serves_local_persisted_log(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+    import app as app_mod
+
+    job_id = "log-local-test"
+    job_dir = tmp_path / job_id
+    job_dir.mkdir()
+    (job_dir / "logs.jsonl").write_text(
+        '{"ts": 1700000000, "text": "local line"}\n')
+    monkeypatch.setattr(app_mod, "OUTPUT_DIR", str(tmp_path))
+    res = TestClient(app_mod.app).get(f"/api/jobs/{job_id}/logs")
+    assert res.status_code == 200
+    assert "local line" in res.text
+    assert "logs.txt" in res.headers.get("content-disposition", "")
+
+
+def test_job_logs_download_falls_back_to_hf_storage(monkeypatch, tmp_path):
+    """6-aug-2026: a wiped Kaggle session must still download the log."""
+    import json
+    from fastapi.testclient import TestClient
+    import app as app_mod
+
+    job_id = "log-restore-test"
+    monkeypatch.setattr(app_mod, "OUTPUT_DIR", str(tmp_path))
+
+    class _FakeHF:
+        @staticmethod
+        def configured():
+            return True
+
+        @staticmethod
+        def job_key(job_id, filename):
+            return f"jobs/{job_id}/{filename}"
+
+        @staticmethod
+        def download_file(key, local_path):
+            with open(local_path, "w") as f:
+                f.write(json.dumps({"ts": 1700000000,
+                                    "text": "hello from hf"}) + "\n")
+            return True
+
+    monkeypatch.setattr(app_mod, "hf_storage", _FakeHF)
+    res = TestClient(app_mod.app).get(f"/api/jobs/{job_id}/logs")
+    assert res.status_code == 200
+    assert "hello from hf" in res.text

@@ -631,6 +631,20 @@ def _hf_backup_ready_clips(job_id, output_dir):
 
         loop.run_in_executor(None, _upload)
 
+    # PART 5.2 (6-aug-2026): the JOB LOG is part of the durable record too.
+    # A Kaggle session wipes /kaggle/working when it ends, so the local
+    # logs.jsonl dies with it — that is exactly how the owner lost the run's
+    # log. Backing it up here means it survives the session, and the download
+    # endpoint falls back to the HF copy on a fresh session.
+    log_key = hf_storage.job_key(job_id, "logs.jsonl")
+    if log_key not in scheduled:
+        log_path = _job_log_path(job_id, output_dir)
+        if os.path.exists(log_path) and os.path.getsize(log_path) > 0:
+            scheduled.add(log_key)
+            loop.run_in_executor(
+                None,
+                lambda p=log_path, k=log_key: hf_storage.upload_file(p, k))
+
 
 def _strip_burned_captions(output_dir, filename):
     """Walk ``subtitled_<ts>_`` prefixes back to the file without burned captions.
@@ -2295,6 +2309,20 @@ async def job_logs_download(job_id: str):
     """
     job_path = os.path.join(OUTPUT_DIR, os.path.basename(job_id))
     entries = _replay_job_logs(job_id, job_path)
+    if not entries and hf_storage.configured():
+        # Fresh Kaggle session: the local log was wiped with /kaggle/working,
+        # but _hf_backup_ready_clips stored it in the backup repo. Restore it
+        # on demand so the log is never unrecoverable.
+        try:
+            import tempfile
+            with tempfile.TemporaryDirectory(prefix="joblog_") as _td:
+                _tmp = os.path.join(_td, "logs.jsonl")
+                if (hf_storage.download_file(
+                        hf_storage.job_key(job_id, "logs.jsonl"), _tmp)
+                        and os.path.exists(_tmp)):
+                    entries = _replay_job_logs(job_id, _td)
+        except Exception as e:
+            print(f"⚠️ Could not restore logs from storage for {job_id}: {e}")
     if not entries:
         entries = jobs.get(job_id, {}).get('logs', [])
     if not entries:
