@@ -1,4 +1,7 @@
-# Plan: fix the OpenShorts pipeline — the complete problem register
+# 99 Problems and a Fix Ain't 1
+
+**The OpenShorts problem register — every problem reported, none of them
+confirmed fixed.**
 
 **Audience:** the implementing engineer (Gemini).
 **Repo:** `github.com/foskigr8/openshorts`, branch `session/framing-work`.
