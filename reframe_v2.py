@@ -30,7 +30,8 @@ import face_id
 import gpu_affinity
 
 from ffmpeg_utils import (video_encode_args, gpu_decode_args,
-                          gpu_render_available, QUALITY_FAST, METADATA_SCRUB)
+                          gpu_render_available, QUALITY, QUALITY_FAST,
+                          METADATA_SCRUB)
 
 ANALYSIS_MAX_WIDTH = 640
 
@@ -2976,9 +2977,28 @@ def _run(cmd):
                    stderr=subprocess.PIPE, timeout=1800)
 
 
+def caption_output_args(ass_filter, captioned_output, encode_tier=QUALITY):
+    """Second-output args for the one-pass clean+captioned render (PART 6.4).
+
+    The reframe pass used to write the clean clip and then burn_subtitles
+    decoded it AGAIN and re-encoded it — an extra full generation of loss
+    plus a second ffmpeg process. With these args the same ffmpeg invocation
+    encodes BOTH files from the same reframed frames: the clean clip exactly
+    as before, and the captioned clip with the ass filter applied. The
+    captioned file therefore loses one generation instead of two.
+    """
+    return [
+        "-map", "[v]", "-map", "0:a?",
+        "-vf", ass_filter,
+        *video_encode_args(encode_tier), "-c:a", "copy", *METADATA_SCRUB,
+        "-movflags", "+faststart", captioned_output,
+    ]
+
+
 def render(input_video, final_output_video, aspect_ratio,
           transcript=None, clip_start=0.0, clip_end=None,
-          focus_directives=None, primary_subject_x=None):
+          focus_directives=None, primary_subject_x=None,
+          ass_filter=None, captioned_output=None):
     """Full v2 reframe of one clip. Raises on failure (caller falls back).
 
     Unified 3:4-consistent crop (see UNIFIED_CROP_RATIO): ONE composition
@@ -3273,37 +3293,39 @@ def render(input_video, final_output_video, aspect_ratio,
             not split_info and gpu_render_available()
             and os.environ.get("GPU_FILTERS", "1").strip().lower()
             not in ("0", "false", "no"))
+
+        # PART 6.4 (6-aug-2026): one ffmpeg process encodes BOTH outputs —
+        # the clean clip (unchanged, still needed for re-styling) and the
+        # captioned clip with the ass filter applied to the same frames, so
+        # the captioned file is not re-encoded from the clean one.
+        def _final_cmd(graph, decode_args):
+            cmd = [
+                "ffmpeg", "-y", "-loglevel", "error",
+                *decode_args, "-i", input_video,
+                "-filter_complex", graph, "-map", "[v]", "-map", "0:a?",
+                *video_encode_args(QUALITY_FAST), "-c:a", "copy",
+                *METADATA_SCRUB, "-movflags", "+faststart",
+                final_output_video,
+            ]
+            if ass_filter and captioned_output:
+                cmd += caption_output_args(ass_filter, captioned_output)
+            return cmd
+
         if use_gpu_graph:
             gpu_graph = unified_filtergraph_gpu(
                 out_w, out_h, crop_w * ss, crop_h * ss, cmd_path,
                 int(round(initial_x * ss)),
                 initial_y=int(round(initial_y * ss)), supersample=ss)
             try:
-                _run([
-                    "ffmpeg", "-y", "-loglevel", "error",
-                    *gpu_decode_args(device=worker_gpu, output_format=True),
-                    "-i", input_video,
-                    "-filter_complex", gpu_graph, "-map", "[v]", "-map", "0:a?",
-                    *video_encode_args(QUALITY_FAST), "-c:a", "copy",
-                    *METADATA_SCRUB, "-movflags", "+faststart",
-                    final_output_video,
-                ])
+                _run(_final_cmd(
+                    gpu_graph,
+                    gpu_decode_args(device=worker_gpu, output_format=True)))
             except Exception as e:
                 print(f"   ⚠️ GPU filtergraph failed "
                       f"({type(e).__name__}: {e}) — retrying with the CPU graph")
                 use_gpu_graph = False
         if not use_gpu_graph:
-            _run([
-                "ffmpeg", "-y", "-loglevel", "error",
-                *gpu_decode_args(device=worker_gpu), "-i", input_video,
-                "-filter_complex", graph, "-map", "[v]", "-map", "0:a?",
-                *video_encode_args(QUALITY_FAST), "-c:a", "copy",
-                *METADATA_SCRUB,
-                # +faststart moves the moov atom to the front so the browser
-                # <video> can start playing before the whole file downloads.
-                "-movflags", "+faststart",
-                final_output_video,
-            ])
+            _run(_final_cmd(graph, gpu_decode_args(device=worker_gpu)))
     finally:
         import shutil
         shutil.rmtree(workdir, ignore_errors=True)

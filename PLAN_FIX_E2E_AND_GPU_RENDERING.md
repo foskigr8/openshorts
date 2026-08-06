@@ -33,6 +33,14 @@
 >   the floor (`ALLOW_LOW_QUALITY_SOURCE=1` is the escape hatch) instead of
 >   shipping soft clips with a warning. The HD format string also accepts
 >   vp9/av01 streams when avc1 HD is unavailable.
+> - **PART 6.4 now implemented (one-pass captions):** the reframe render
+>   encodes the clean clip AND the captioned clip from the same reframed
+>   frames (single ffmpeg invocation, ass filter on the second output), so
+>   the captioned file loses one generation instead of two and the separate
+>   caption-burn process is gone. The old post-render burn remains the
+>   automatic fallback whenever a watermark or audio cleanup runs, or when
+>   the v1 engine takes over — file conventions (clean original +
+>   subtitled_<ts>_<clip> canonical) are unchanged.
 > - Kaggle notebook env cell: set `GPU_RENDER=1`, `CROP_SUPERSAMPLE=2` on the
 >   T4 host and confirm the probe line appears in the job log.
 >

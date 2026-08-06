@@ -1860,21 +1860,15 @@ def finalize_clip_passthrough(input_video, final_output_video):
     return True, []
 
 
-def auto_caption_clip(clip_path, transcript, clip_start, clip_end, general_ranges=None):
-    """Burn the default caption style onto a finished clip.
+def prepare_caption_burn(clip_path, transcript, clip_start, clip_end,
+                         general_ranges=None):
+    """Generate one clip's caption ASS + output naming (PART 6.4).
 
-    Captions are mandatory for short-form to land, but they were opt-in behind a
-    modal and only 9% of delivered clips ever got them (prod audit, 25-jul-2026).
-    So every clip now ships captioned by default.
-
-    The captioned file is written ALONGSIDE the clip as
-    ``subtitled_<ts>_<clip>.mp4`` — the same convention /api/subtitle uses — so
-    the untouched original stays on disk and re-styling from the modal replaces
-    the captions instead of burning a second layer over them.
-
-    Returns the captioned path, or None when captions were skipped (silent
-    video, no words in range, AUTO_CAPTIONS=0, or any failure — a caption
-    problem must never cost the user the clip they already paid for).
+    Returns ``(ass_path, out_path, ass_filter)`` — everything the render or
+    the standalone burn needs — or None when captions are skipped (silent
+    video, no words in range, AUTO_CAPTIONS=0, or any failure). Extracted
+    from auto_caption_clip so the render pass can fold the burn in (one
+    encode from the reframed frames) instead of re-encoding the clean clip.
     """
     if os.environ.get("AUTO_CAPTIONS", "1").strip() == "0":
         return None
@@ -1932,11 +1926,44 @@ def auto_caption_clip(clip_path, transcript, clip_start, clip_end, general_range
             print("   ℹ️ No words in range — clip ships without captions.")
             return None
 
+        return ass_path, out_path, _subs.ass_filter_string(ass_path)
+    except Exception as e:
+        print(f"   ⚠️ Auto-captions failed ({type(e).__name__}: {e}) — "
+              f"delivering the clip without them.")
+        return None
+
+
+def auto_caption_clip(clip_path, transcript, clip_start, clip_end,
+                      general_ranges=None):
+    """Burn the default caption style onto a finished clip.
+
+    Captions are mandatory for short-form to land, but they were opt-in behind a
+    modal and only 9% of delivered clips ever got them (prod audit, 25-jul-2026).
+    So every clip now ships captioned by default.
+
+    The captioned file is written ALONGSIDE the clip as
+    ``subtitled_<ts>_<clip>.mp4`` — the same convention /api/subtitle uses — so
+    the untouched original stays on disk and re-styling from the modal replaces
+    the captions instead of burning a second layer over them.
+
+    Returns the captioned path, or None when captions were skipped (silent
+    video, no words in range, AUTO_CAPTIONS=0, or any failure — a caption
+    problem must never cost the user the clip they already paid for).
+    """
+    prep = prepare_caption_burn(clip_path, transcript, clip_start, clip_end,
+                                general_ranges)
+    if prep is None:
+        return None
+    ass_path, out_path, _vf = prep
+    try:
+        import subtitles as _subs
+        style = _subs.AUTO_CAPTION_STYLE
         _subs.burn_subtitles(
             clip_path, ass_path, out_path,
             alignment=style["alignment"], fontsize=style["font_size"],
             font_name=style["font_name"], font_color=style["font_color"],
-            border_color=style["border_color"], border_width=border_width)
+            border_color=style["border_color"],
+            border_width=_subs.auto_stroke_width(style["font_size"]))
         print(f"   💬 Captions burned: {os.path.basename(out_path)}")
         return out_path
     except Exception as e:
@@ -1948,7 +1975,7 @@ def auto_caption_clip(clip_path, transcript, clip_start, clip_end, general_range
 def render_clip(input_video, final_output_video, output_format="auto",
                 transcript=None, clip_start=0.0, clip_end=None,
                 focus_directives=None, primary_subject_x=None,
-                custom_aspect=None):
+                custom_aspect=None, ass_filter=None, captioned_output=None):
     """Route a cut clip through the right renderer for the chosen output format.
     vertical/auto -> 9:16 reframe, square -> 1:1 reframe, horizontal -> keep.
 
@@ -1970,7 +1997,9 @@ def render_clip(input_video, final_output_video, output_format="auto",
     return process_video_to_vertical(input_video, final_output_video, aspect_ratio=aspect,
                                      transcript=transcript, clip_start=clip_start, clip_end=clip_end,
                                      focus_directives=focus_directives,
-                                     primary_subject_x=primary_subject_x)
+                                     primary_subject_x=primary_subject_x,
+                                     ass_filter=ass_filter,
+                                     captioned_output=captioned_output)
 
 
 # Watermark geometry, as fractions of the clip width/height.
@@ -2040,7 +2069,8 @@ def apply_watermark(video_path):
 
 def process_video_to_vertical(input_video, final_output_video, aspect_ratio=ASPECT_RATIO,
                               transcript=None, clip_start=0.0, clip_end=None,
-                              focus_directives=None, primary_subject_x=None):
+                              focus_directives=None, primary_subject_x=None,
+                              ass_filter=None, captioned_output=None):
     """
     Core logic to reframe a horizontal video to a target aspect ratio using
     scene detection and Active Speaker Tracking (MediaPipe).
@@ -2059,7 +2089,9 @@ def process_video_to_vertical(input_video, final_output_video, aspect_ratio=ASPE
             result = reframe_v2.render(input_video, final_output_video, aspect_ratio,
                                        transcript=transcript, clip_start=clip_start, clip_end=clip_end,
                                        focus_directives=focus_directives,
-                                       primary_subject_x=primary_subject_x)
+                                       primary_subject_x=primary_subject_x,
+                                       ass_filter=ass_filter,
+                                       captioned_output=captioned_output)
             print(f"   ⏱️ Reframe v2 total: {time.time() - t0:.1f}s")
             return result
         except Exception as e:
@@ -3771,13 +3803,38 @@ if __name__ == '__main__':
                     focus_directives = scene_ctx["directives"]
                     primary_subject_x = scene_ctx.get("primary_subject_x")
 
+                    # PART 6.4 (6-aug-2026): when nothing needs a post-render
+                    # pass (no watermark, no audio cleanup), fold the caption
+                    # burn INTO the render — one encode from the reframed
+                    # frames instead of re-encoding the clean clip. The v2
+                    # render letterboxes every frame into the same content
+                    # box, so the caption ranges are known before rendering
+                    # (the whole clip qualifies). Any prep failure, v1
+                    # fallback, watermark or audio-cleanup path falls back to
+                    # the existing post-render burn.
+                    _cap_prep = None
+                    if (os.environ.get("WATERMARK") != "1"
+                            and not remove_background_audio):
+                        try:
+                            _cap_prep = prepare_caption_burn(
+                                clip_final_path, clip_transcript,
+                                render_clip_start, render_clip_end,
+                                general_ranges=[(0.0, render_clip_end
+                                                 - render_clip_start)])
+                        except Exception as e:
+                            print(f"   ⚠️ Caption prep failed ({e}) — "
+                                  "falling back to the post-render burn")
+                            _cap_prep = None
+
                     success, general_ranges = render_clip(
                         clip_temp_path, clip_final_path, output_format,
                         transcript=clip_transcript, clip_start=render_clip_start,
                         clip_end=render_clip_end,
                         focus_directives=focus_directives,
                         primary_subject_x=primary_subject_x,
-                        custom_aspect=output_aspect)
+                        custom_aspect=output_aspect,
+                        ass_filter=_cap_prep[2] if _cap_prep else None,
+                        captioned_output=_cap_prep[1] if _cap_prep else None)
                     if success and os.environ.get("WATERMARK") == "1":
                         apply_watermark(clip_final_path)
                     if success:
@@ -3815,10 +3872,23 @@ if __name__ == '__main__':
                                     os.remove(clip_final_path + ".voice.mp4")
                                 except OSError:
                                     pass
-                        # Captions after, so they sit on top of the watermark and
-                        # the canonical file stays clean for re-styling.
-                        auto_caption_clip(clip_final_path, clip_transcript, render_clip_start,
-                                         render_clip_end, general_ranges=general_ranges)
+                        # Captions: the single-pass render wrote the
+                        # subtitled file alongside the clean one; otherwise
+                        # (v1 fallback, watermark, or audio-cleanup path)
+                        # burn after, as before. The canonical file that
+                        # app.py serves is the newest subtitled_* file either
+                        # way, and the clean original stays for re-styling.
+                        _captioned = (os.path.exists(_cap_prep[1])
+                                      and os.path.getsize(_cap_prep[1]) > 0
+                                      if _cap_prep else False)
+                        if _captioned:
+                            print(f"   💬 Captions burned (single-pass): "
+                                  f"{os.path.basename(_cap_prep[1])}")
+                        else:
+                            auto_caption_clip(
+                                clip_final_path, clip_transcript,
+                                render_clip_start, render_clip_end,
+                                general_ranges=general_ranges)
                         # Only now — captions burned (or deliberately skipped) and
                         # the file fully written — is the clip safe to surface.
                         # app.py's poll loop gates on this marker.

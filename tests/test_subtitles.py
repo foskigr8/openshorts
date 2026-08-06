@@ -3,6 +3,7 @@ import re
 from subtitles import (
     merge_continuation_words,
     generate_srt,
+    ass_filter_string,
     hex_to_ass_color,
     _sanitize_font_name,
     _clamp_number,
@@ -10,6 +11,12 @@ from subtitles import (
     _caption_width_compaction,
     CAPTION_MAX_WIDTH_EM,
 )
+
+
+def test_ass_filter_string_escapes_for_the_filtergraph():
+    vf = ass_filter_string("/tmp/subs_1_123.ass")
+    assert vf.startswith("ass='/tmp/subs_1_123.ass'")
+    assert "fontsdir=" in vf
 
 
 def _w(text, start, end, speaker=None):

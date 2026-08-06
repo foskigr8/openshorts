@@ -710,6 +710,14 @@ def _sanitize_font_name(name):
 # font isn't bundled (e.g. a user-selected system font in the subtitle modal).
 _FONTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 
+
+def ass_filter_string(ass_path):
+    """-vf value for burning an ASS file (shared by burn_subtitles and the
+    one-pass render fold, PART 6.4)."""
+    safe_srt_path = _escape_ffmpeg_filter_value(ass_path)
+    safe_fonts_dir = _escape_ffmpeg_filter_value(_FONTS_DIR)
+    return f"ass='{safe_srt_path}':fontsdir='{safe_fonts_dir}'"
+
 # Rough advances (em) for a typical bold sans in uppercase; used only when
 # the requested font has no bundled metrics. Average bold-sans cap is ~0.72.
 _GENERIC_ADVANCE_MAP = {
@@ -846,16 +854,13 @@ def burn_subtitles(video_path, srt_path, output_path, alignment=2, fontsize=16,
         f"Bold=1"
     )
 
-    # Let libass see the fonts bundled with the app (e.g. Anton for Impact)
-    # even when the system fontconfig has no cache for them.
-    fonts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
-    safe_fonts_dir = _escape_ffmpeg_filter_value(fonts_dir)
-
     if str(srt_path).lower().endswith('.ass'):
         # ASS files (karaoke style) carry their own styles; force_style would
         # override the per-word color tags.
-        vf = f"ass='{safe_srt_path}':fontsdir='{safe_fonts_dir}'"
+        vf = ass_filter_string(srt_path)
     else:
+        safe_srt_path = _escape_ffmpeg_filter_value(srt_path)
+        safe_fonts_dir = _escape_ffmpeg_filter_value(_FONTS_DIR)
         vf = (f"subtitles='{safe_srt_path}':fontsdir='{safe_fonts_dir}'"
               f":charenc=UTF-8:force_style='{style_string}'")
 
