@@ -2481,19 +2481,30 @@ async def list_history(request: Request):
                     "download_url": f"/videos/{job_id}/{filename}",
                 })
             if job_status == "processing" and playable == 0:
-                job_status = "failed"
-                # Keep the job visible in history (the rail's Failed filter is
-                # only real if failures surface): one entry with no media, so
-                # the UI can render a "failed" tile instead of a broken player.
-                videos.append({
-                    "id": f"{job_id}_0",
-                    "job_id": job_id,
-                    "title": (clips[0].get("title") if clips else None) or base_name,
-                    "created_at": created_at,
-                    "status": job_status,
-                    "view_url": "",
-                    "download_url": "",
-                })
+                if has_progress:
+                    # Job is actively processing/queued — keep status as processing
+                    # so the UI shows an animated rendering/scanning tile instead of failed
+                    videos.append({
+                        "id": f"{job_id}_0",
+                        "job_id": job_id,
+                        "title": (clips[0].get("title") if clips else None) or base_name,
+                        "created_at": created_at,
+                        "status": "processing",
+                        "view_url": "",
+                        "download_url": "",
+                    })
+                else:
+                    job_status = "failed"
+                    # Legacy job without progress tracking that yielded no clips
+                    videos.append({
+                        "id": f"{job_id}_0",
+                        "job_id": job_id,
+                        "title": (clips[0].get("title") if clips else None) or base_name,
+                        "created_at": created_at,
+                        "status": job_status,
+                        "view_url": "",
+                        "download_url": "",
+                    })
             elif job_status == "processing" and playable > 0 and not has_progress:
                 # A legacy job (no progress.json) that produced clips is done.
                 job_status = "completed"
