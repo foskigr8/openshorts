@@ -233,8 +233,20 @@ def _po_token():
             except Exception:
                 continue
 
-    # Last resort: if the provider was built but nobody started it, start it
-    # ourselves and wait for it.
+    # If we have a candidate base (fresh probe or stale .env value), confirm it
+    # is actually alive before trusting it — the bootstrap cell and this cell
+    # are different processes, and the provider it started can have died in
+    # between (Kaggle cells don't share a process tree).
+    if base:
+        try:
+            with urllib.request.urlopen(f"{base}/ping", timeout=5) as r:
+                if r.status == 200:
+                    return True, f"provider responding at {base}"
+        except Exception:
+            base = ""  # stale — fall through to (re)start it ourselves
+
+    # Last resort: if the provider was built but isn't answering (never
+    # started, or died since), start/restart it ourselves and wait for it.
     if not base:
         pot_dir = os.environ.get("POT_DIR", "/kaggle/working/bgutil-provider")
         main_js = os.path.join(pot_dir, "server", "build", "main.js")
@@ -273,10 +285,10 @@ def _po_token():
                         crash_info = " | last log: " + (lines[-1].strip() if lines else "(empty)")
                 return False, (f"server built ({main_js}) but failed to start"
                                f"{crash_info}")
+        else:
+            return False, ("no BGUTIL_BASE_URL and no provider build found — "
+                           "downloads run with no PO token and will likely hit the bot wall")
 
-    if not base:
-        return False, ("no BGUTIL_BASE_URL — downloads run with no PO token and "
-                       "will likely hit the bot wall")
     try:
         with urllib.request.urlopen(f"{base}/ping", timeout=5) as r:
             if r.status == 200:

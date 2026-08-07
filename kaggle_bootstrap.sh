@@ -275,8 +275,8 @@ else
         if _pot_ping; then
             echo "    provider already running on :$POT_PORT"
         else
-            nohup node "$POT_DIR/server/build/main.js" --port "$POT_PORT" \
-                > "$LOG_DIR/bgutil.log" 2>&1 &
+            setsid nohup node "$POT_DIR/server/build/main.js" --port "$POT_PORT" \
+                < /dev/null > "$LOG_DIR/bgutil.log" 2>&1 &
             BGUTIL_PID=$!
             echo "    started provider (pid=$BGUTIL_PID), waiting for it..."
             for _ in $(seq 1 20); do
