@@ -1571,14 +1571,34 @@ def download_youtube_video(url, output_dir=".", require_hd=False):
     # other attempt silently ran with no PO token at all (visible in yt-dlp's
     # debug log as "[pot:...] Script path doesn't exist").
     _bgutil_http = os.environ.get("BGUTIL_BASE_URL", "").strip()
+    # Fallback: read from .env (bootstrap writes it but env vars don't cross
+    # process boundaries — e.g. Kaggle's bash cell → Python kernel).
+    if not _bgutil_http:
+        _env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+        if os.path.isfile(_env_file):
+            with open(_env_file) as _f:
+                for _line in _f:
+                    _line = _line.strip()
+                    if _line.startswith("BGUTIL_BASE_URL="):
+                        _v = _line.split("=", 1)[1].strip().strip('"').strip("'")
+                        if _v:
+                            _bgutil_http = _v
+                            os.environ["BGUTIL_BASE_URL"] = _bgutil_http
+                            break
+    # Auto-detect: probe loopback addresses on the default port.
     if not _bgutil_http:
         try:
-            import urllib.request
-            req = urllib.request.Request("http://127.0.0.1:4416/ping", method="GET")
-            with urllib.request.urlopen(req, timeout=1) as resp:
-                if resp.status == 200:
-                    _bgutil_http = "http://127.0.0.1:4416"
-                    os.environ["BGUTIL_BASE_URL"] = _bgutil_http
+            import urllib.request as _ur
+            for _addr in ("127.0.0.1", "[::1]"):
+                try:
+                    _req = _ur.Request(f"http://{_addr}:4416/ping", method="GET")
+                    with _ur.urlopen(_req, timeout=1) as resp:
+                        if resp.status == 200:
+                            _bgutil_http = f"http://{_addr}:4416"
+                            os.environ["BGUTIL_BASE_URL"] = _bgutil_http
+                            break
+                except Exception:
+                    continue
         except Exception:
             pass
     _bgutil_script = os.environ.get("BGUTIL_SCRIPT_PATH", "").strip()

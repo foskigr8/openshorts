@@ -30,19 +30,13 @@ def api(path, timeout=15):
         return r.status, r.read()
 
 
-def check(label, fn, results, warn_only=False):
+def check(label, fn, results):
     try:
         ok, detail = fn()
     except Exception as e:
         ok, detail = False, f"{type(e).__name__}: {e}"
-    if ok:
-        tag = "PASS"
-    elif warn_only:
-        tag = "WARN"
-    else:
-        tag = "FAIL"
-    print(f"  [{tag}] {label}: {detail}", flush=True)
-    results.append((label, ok, warn_only))
+    print(f"  [{'PASS' if ok else 'FAIL'}] {label}: {detail}", flush=True)
+    results.append((label, ok))
     return ok
 
 
@@ -208,15 +202,78 @@ def _po_token():
     in to confirm you're not a bot" from a clean Kaggle IP and no cookies.
     """
     base = os.environ.get("BGUTIL_BASE_URL", "").strip()
+
+    # Fallback: read from .env file (bootstrap writes it there, but the Python
+    # kernel that runs this test is a DIFFERENT process from the bash cell that
+    # ran kaggle_bootstrap.sh — env vars don't cross that boundary).
     if not base:
-        try:
-            req = urllib.request.Request("http://127.0.0.1:4416/ping", method="GET")
-            with urllib.request.urlopen(req, timeout=2) as r:
-                if r.status == 200:
-                    base = "http://127.0.0.1:4416"
-                    os.environ["BGUTIL_BASE_URL"] = base
-        except Exception:
-            pass
+        env_file = os.path.join(REPO_DIR, ".env")
+        if os.path.isfile(env_file):
+            with open(env_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("BGUTIL_BASE_URL="):
+                        val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        if val:
+                            base = val
+                            os.environ["BGUTIL_BASE_URL"] = base
+                            break
+
+    # Auto-detect: probe common loopback addresses on the default port.
+    if not base:
+        for addr in ("127.0.0.1", "[::1]"):
+            url = f"http://{addr}:4416/ping"
+            try:
+                req = urllib.request.Request(url, method="GET")
+                with urllib.request.urlopen(req, timeout=2) as r:
+                    if r.status == 200:
+                        base = f"http://{addr}:4416"
+                        os.environ["BGUTIL_BASE_URL"] = base
+                        break
+            except Exception:
+                continue
+
+    # Last resort: if the provider was built but nobody started it, start it
+    # ourselves and wait for it.
+    if not base:
+        pot_dir = os.environ.get("POT_DIR", "/kaggle/working/bgutil-provider")
+        main_js = os.path.join(pot_dir, "server", "build", "main.js")
+        if os.path.isfile(main_js):
+            import time
+            log_dir = os.environ.get("LOG_DIR", "/tmp/openshorts-logs")
+            os.makedirs(log_dir, exist_ok=True)
+            log_path = os.path.join(log_dir, "bgutil.log")
+            subprocess.Popen(
+                ["node", main_js, "--port", "4416"],
+                stdout=open(log_path, "a"),
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            for _ in range(15):
+                time.sleep(1)
+                for addr in ("127.0.0.1", "[::1]"):
+                    url = f"http://{addr}:4416/ping"
+                    try:
+                        req = urllib.request.Request(url, method="GET")
+                        with urllib.request.urlopen(req, timeout=2) as r:
+                            if r.status == 200:
+                                base = f"http://{addr}:4416"
+                                os.environ["BGUTIL_BASE_URL"] = base
+                                break
+                    except Exception:
+                        continue
+                if base:
+                    break
+            if not base:
+                # Read the crash log for diagnostics
+                crash_info = ""
+                if os.path.isfile(log_path):
+                    with open(log_path) as f:
+                        lines = f.readlines()
+                        crash_info = " | last log: " + (lines[-1].strip() if lines else "(empty)")
+                return False, (f"server built ({main_js}) but failed to start"
+                               f"{crash_info}")
+
     if not base:
         return False, ("no BGUTIL_BASE_URL — downloads run with no PO token and "
                        "will likely hit the bot wall")
@@ -229,22 +286,19 @@ def _po_token():
         return False, f"{base} unreachable ({type(e).__name__})"
 
 
-# (label, check_fn, warn_only)
-# warn_only checks show [WARN] instead of [FAIL] and don't count toward the
-# pass/fail exit code.  PO token is defense-in-depth: useful but not blocking.
 CHECKS = [
-    ("API", _api_alive, False),
-    ("Dashboard", _dashboard, False),
-    ("CUDA in app env", _cuda, False),
-    ("GPU sharding", _gpu_sharding, False),
-    ("NVENC", _nvenc, False),
-    ("Transcription backend", _transcription, False),
-    ("Stage 3 clip selection", _stage3, False),
-    ("Server-side keys", _server_keys, False),
-    ("Face ID", _face_id, False),
-    ("Persistent storage", _storage, False),
-    ("PO token provider", _po_token, True),
-    ("YouTube download", _youtube, False),
+    ("API", _api_alive),
+    ("Dashboard", _dashboard),
+    ("CUDA in app env", _cuda),
+    ("GPU sharding", _gpu_sharding),
+    ("NVENC", _nvenc),
+    ("Transcription backend", _transcription),
+    ("Stage 3 clip selection", _stage3),
+    ("Server-side keys", _server_keys),
+    ("Face ID", _face_id),
+    ("Persistent storage", _storage),
+    ("PO token provider", _po_token),
+    ("YouTube download", _youtube),
 ]
 
 
@@ -255,27 +309,14 @@ def main():
     args = parser.parse_args()
 
     results = []
-    for label, fn, warn_only in CHECKS:
+    for label, fn in CHECKS:
         if args.skip_youtube and label == "YouTube download":
             continue
-        check(label, fn, results, warn_only=warn_only)
+        check(label, fn, results)
 
-    passed  = sum(1 for _, ok, _w in results if ok)
-    hard    = [(l, ok) for l, ok, w in results if not w]  # non-warn checks
-    warns   = [(l, ok) for l, ok, w in results if w and not ok]
-    failed  = [l for l, ok in hard if not ok]
-    total_hard = len(hard)
-    print(f"\n{sum(1 for _, ok in hard if ok)}/{total_hard} passed", end="")
-    if warns:
-        print(f"  ({len(warns)} warning{'s' if len(warns) != 1 else ''})")
-    else:
-        print()
-    if warns:
-        print("\nWarnings (non-blocking): " + ", ".join(l for l, _ in warns))
-        if any(l == "PO token provider" for l, _ in warns):
-            print("  PO token: defense-in-depth against YouTube bot wall. "
-                  "Downloads still work without it from most Kaggle IPs. "
-                  "Check /tmp/openshorts-logs/bgutil.log for diagnostics.")
+    passed = sum(1 for _, ok in results if ok)
+    print(f"\n{passed}/{len(results)} passed")
+    failed = [label for label, ok in results if not ok]
     if failed:
         print("\nFailed: " + ", ".join(failed))
         if "YouTube download" in failed:
@@ -286,6 +327,11 @@ def main():
             else:
                 print("  YouTube: the jar expired (~3h lifetime). Re-paste "
                       "YOUTUBE_COOKIES from a fresh local cookies.txt.")
+        if "PO token provider" in failed:
+            print("  PO token: this is the usual cause of a failed YouTube "
+                  "download from a cloud IP. Re-run kaggle_bootstrap.sh and read "
+                  "its 'YouTube PO token provider' section, or check "
+                  "/tmp/openshorts-logs/bgutil.log.")
         if "Persistent storage" in failed:
             print("  Storage: see PLAN_CAPTIONS_AND_STORAGE.md for the "
                   "HF_TOKEN / HF_STORAGE_REPO setup (no credit card needed).")

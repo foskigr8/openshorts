@@ -235,7 +235,7 @@ else
         rm -rf "$POT_DIR"
         if git clone --depth 1 -q https://github.com/Brainicism/bgutil-ytdlp-pot-provider "$POT_DIR" \
             && (cd "$POT_DIR/server" && npm install --include=dev --ignore-scripts=false --no-audit --no-fund > "$LOG_DIR/bgutil_install.log" 2>&1) \
-            && (cd "$POT_DIR/server" && npm rebuild canvas >> "$LOG_DIR/bgutil_install.log" 2>&1 || true) \
+            && (cd "$POT_DIR/server" && npm rebuild >> "$LOG_DIR/bgutil_install.log" 2>&1 || true) \
             && (cd "$POT_DIR/server" && (./node_modules/.bin/tsc || npx --yes tsc) > "$LOG_DIR/bgutil_tsc.log" 2>&1); then
             echo "    provider built"
         else
@@ -244,8 +244,35 @@ else
     else
         echo "    provider already built"
     fi
+
+    # Pre-flight: verify the canvas native addon actually loads.
+    # If it doesn't, the server will crash on startup.
     if [ -f "$POT_DIR/server/build/main.js" ]; then
-        if curl -s --max-time 3 "http://127.0.0.1:$POT_PORT/ping" >/dev/null 2>&1; then
+        if ! (cd "$POT_DIR/server" && node -e "require('canvas')" 2>/dev/null); then
+            echo "    canvas addon broken — rebuilding..."
+            (cd "$POT_DIR/server" && npm rebuild canvas >> "$LOG_DIR/bgutil_install.log" 2>&1)
+            if (cd "$POT_DIR/server" && node -e "require('canvas')" 2>/dev/null); then
+                echo "    canvas fixed after rebuild"
+            else
+                echo "    canvas still broken — server will likely crash"
+                echo "    see $LOG_DIR/bgutil_install.log for details"
+            fi
+        else
+            echo "    canvas addon: ok"
+        fi
+    fi
+
+    # Helper: check if the server is responding on any loopback address.
+    # The server binds to [::] (IPv6 all-interfaces) which also accepts IPv4
+    # on dual-stack systems, but some Kaggle instances might only have one.
+    _pot_ping() {
+        curl -s --max-time 3 "http://127.0.0.1:$POT_PORT/ping" >/dev/null 2>&1 && return 0
+        curl -s --max-time 3 "http://[::1]:$POT_PORT/ping" >/dev/null 2>&1 && return 0
+        return 1
+    }
+
+    if [ -f "$POT_DIR/server/build/main.js" ]; then
+        if _pot_ping; then
             echo "    provider already running on :$POT_PORT"
         else
             nohup node "$POT_DIR/server/build/main.js" --port "$POT_PORT" \
@@ -253,7 +280,7 @@ else
             BGUTIL_PID=$!
             echo "    started provider (pid=$BGUTIL_PID), waiting for it..."
             for _ in $(seq 1 20); do
-                curl -s --max-time 2 "http://127.0.0.1:$POT_PORT/ping" >/dev/null 2>&1 && break
+                _pot_ping && break
                 # Check if process died
                 if ! kill -0 "$BGUTIL_PID" 2>/dev/null; then
                     echo "    provider process died — check $LOG_DIR/bgutil.log:"
@@ -263,8 +290,13 @@ else
                 sleep 1
             done
         fi
-        if curl -s --max-time 3 "http://127.0.0.1:$POT_PORT/ping" >/dev/null 2>&1; then
-            export BGUTIL_BASE_URL="http://127.0.0.1:$POT_PORT"
+        if _pot_ping; then
+            # Figure out which address actually responded for the URL
+            if curl -s --max-time 2 "http://127.0.0.1:$POT_PORT/ping" >/dev/null 2>&1; then
+                export BGUTIL_BASE_URL="http://127.0.0.1:$POT_PORT"
+            else
+                export BGUTIL_BASE_URL="http://[::1]:$POT_PORT"
+            fi
             grep -q "BGUTIL_BASE_URL=" .env 2>/dev/null && sed -i "s|BGUTIL_BASE_URL=.*|BGUTIL_BASE_URL=\"$BGUTIL_BASE_URL\"|" .env || echo "BGUTIL_BASE_URL=\"$BGUTIL_BASE_URL\"" >> .env
             echo "    provider responding — BGUTIL_BASE_URL=$BGUTIL_BASE_URL"
         else
