@@ -2918,7 +2918,7 @@ def _build_jump_cut_source(source_video_path, keep_spans, workdir):
                *gpu_decode_args(device=gpu_affinity.current_device()),
                '-ss', f'{s:.3f}', '-to', f'{e:.3f}', '-i', source_video_path,
                *source_logo_crop_vf_args(),
-               *video_encode_args(QUALITY_FAST), *audio_encode_args(), seg_path]
+               *video_encode_args(QUALITY_FAST, device=gpu_affinity.current_device()), *audio_encode_args(), seg_path]
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=300)
         segment_paths.append(seg_path)
 
@@ -3779,7 +3779,7 @@ if __name__ == '__main__':
                             '-to', str(end),
                             '-i', input_video,
                             *source_logo_crop_vf_args(),
-                            *video_encode_args(QUALITY_FAST),
+                            *video_encode_args(QUALITY_FAST, device=gpu_affinity.current_device()),
                             *audio_encode_args(),
                             clip_temp_path
                         ]

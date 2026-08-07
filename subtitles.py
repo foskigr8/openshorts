@@ -881,7 +881,7 @@ def burn_subtitles(video_path, srt_path, output_path, alignment=2, fontsize=16,
         '-i', video_path,
         '-vf', vf,
         '-c:a', 'copy',
-        *video_encode_args(QUALITY),
+        *video_encode_args(QUALITY, device=gpu_affinity.current_device()),
         *METADATA_SCRUB,
         '-movflags', '+faststart',
         output_path

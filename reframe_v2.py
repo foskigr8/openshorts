@@ -3303,7 +3303,7 @@ def render(input_video, final_output_video, aspect_ratio,
                 "ffmpeg", "-y", "-loglevel", "error",
                 *decode_args, "-i", input_video,
                 "-filter_complex", graph, "-map", "[v]", "-map", "0:a?",
-                *video_encode_args(QUALITY_FAST), "-c:a", "copy",
+                *video_encode_args(QUALITY_FAST, device=worker_gpu), "-c:a", "copy",
                 *METADATA_SCRUB, "-movflags", "+faststart",
                 final_output_video,
             ]

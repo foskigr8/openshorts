@@ -262,7 +262,7 @@ def reset_encoder_cache():
         _announced = False
 
 
-def video_encode_args(tier=QUALITY):
+def video_encode_args(tier=QUALITY, device=None):
     """Return the codec/quality args for one encode, honoring FFMPEG_ENCODER."""
     global _announced
     if tier not in _X264_ARGS:
@@ -281,4 +281,8 @@ def video_encode_args(tier=QUALITY):
         print(f"🎞️ [Encoder] video encoder: {'h264_nvenc' if use_nvenc else 'libx264'} "
               f"(FFMPEG_ENCODER={mode})")
 
-    return list((_NVENC_ARGS if use_nvenc else _X264_ARGS)[tier])
+    args = list((_NVENC_ARGS if use_nvenc else _X264_ARGS)[tier])
+    if use_nvenc and device is not None:
+        gpu_idx = str(device).split(":", 1)[1] if (isinstance(device, str) and ":" in str(device)) else str(device)
+        args = ["-gpu", gpu_idx] + args
+    return args
