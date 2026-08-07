@@ -2456,6 +2456,16 @@ async def list_history(request: Request):
     owner = await _request_owner_id(request)
     videos = []
     known_job_ids = set()
+    # Fetched once and reused below for two purposes: recovering a job whose
+    # local dir exists but has no metadata (below), and listing jobs never
+    # seen locally at all (end of function) — one HF listing call instead of
+    # a call per job.
+    hf_listing = {}
+    if hf_storage.configured():
+        try:
+            hf_listing = hf_storage.list_job_files()
+        except Exception as e:
+            print(f"⚠️ HF listing failed ({type(e).__name__}: {e})")
     try:
         job_ids = os.listdir(OUTPUT_DIR)
     except FileNotFoundError:
@@ -2488,12 +2498,47 @@ async def list_history(request: Request):
         _meta = _newest_metadata_file(job_path)
         json_files = [_meta] if _meta else []
         if not json_files:
-            # A job that died BEFORE the analysis step ever wrote metadata.
-            # It can still hold the entire downloaded source video (hundreds of
-            # MB), and skipping it here meant it appeared nowhere in the UI —
-            # so there was no way to see it, and no way to delete it. The disk
-            # just filled up invisibly. Surface it as a failed project carrying
-            # its real on-disk size so it can be reviewed and removed.
+            # No metadata locally — but this may be a LEGACY job (clips
+            # uploaded to HF before metadata.json backup existed — PART 5.3
+            # shipped 7-aug-2026, so anything rendered before that has clips
+            # in storage with nothing to restore a title from). A restored
+            # video file landing in this dir (playing a clip, a thumbnail
+            # regen) makes os.listdir() see it for the first time and used to
+            # permanently misreport it as "died before analysis" even though the
+            # clips are fine — confirmed 7-aug-2026, a job that played
+            # correctly turned permanently into "Failed · No clips" the
+            # moment History was opened. If HF has real clip files for this
+            # job_id, treat it as restorable, not dead.
+            hf_files = hf_listing.get(job_id, [])
+            hf_clips = sorted(
+                f for f in hf_files
+                if "_clip_" in f
+                and not f.startswith(("autosubs_", "temp_", "hook_", "subtitled_0_")))
+            if hf_clips:
+                known_job_ids.add(job_id)  # handled here; skip the tail loop too
+                for i, name in enumerate(hf_clips):
+                    title = re.sub(r"^subtitled_\d+_", "", name)
+                    title = re.sub(r"_clip_\d+\.mp4$", "", title)
+                    videos.append({
+                        "id": f"{job_id}_{i}",
+                        "job_id": job_id,
+                        "title": title,
+                        "created_at": datetime.fromtimestamp(
+                            _job_created_at(job_path), tz=timezone.utc).isoformat(),
+                        "status": "completed",
+                        "duration": 0,
+                        "size_bytes": 0,
+                        "storage": "huggingface",
+                        "view_url": f"/api/storage/{job_id}/{name}",
+                        "download_url": f"/api/storage/{job_id}/{name}",
+                    })
+                continue
+            # Genuinely dead: it can still hold the entire downloaded source
+            # video (hundreds of MB), and skipping it here meant it appeared
+            # nowhere in the UI — so there was no way to see it, and no way
+            # to delete it. The disk just filled up invisibly. Surface it as
+            # a failed project carrying its real on-disk size so it can be
+            # reviewed and removed.
             total = 0
             biggest = None
             for root, _dirs, files in os.walk(job_path):
@@ -2635,9 +2680,9 @@ async def list_history(request: Request):
     # backup repo still holds every finished clip. Rebuild entries from the
     # repo so previous projects are visible again and playable via the
     # on-demand restore endpoint.
-    if hf_storage.configured():
+    if hf_listing:
         try:
-            for job_id, filenames in hf_storage.list_job_files().items():
+            for job_id, filenames in hf_listing.items():
                 if job_id in known_job_ids:
                     continue
                 clips = sorted(

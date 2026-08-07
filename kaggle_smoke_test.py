@@ -158,8 +158,18 @@ def _youtube():
     have_cookies = os.path.exists(os.path.join(REPO_DIR, "cookies.txt"))
     if have_cookies:
         cmd[3:3] = ["--cookies", "cookies.txt"]
+    # This check measures the plain/cookie-based path in isolation. _po_token
+    # (run right before this in the same process) sets BGUTIL_BASE_URL in
+    # os.environ as a side effect of its own check — inherited here by
+    # default, it silently activates the bgutil-ytdlp-pot-provider plugin for
+    # a call that was never built or tested against it, and a PO-token-path
+    # failure then reads as "YouTube download broken" when it's actually just
+    # this check picking up state from an unrelated one (confirmed 7-aug-2026:
+    # this passed before PO token was fixed, then broke the moment it started
+    # working). Strip it so this test's env matches what it always tested.
+    env = {k: v for k, v in os.environ.items() if k != "BGUTIL_BASE_URL"}
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
-                       cwd=REPO_DIR)
+                       cwd=REPO_DIR, env=env)
     title = (r.stdout or "").strip().splitlines()[-1] if r.stdout.strip() else ""
     if title:
         how = "with cookies" if have_cookies else "anonymously (no cookie jar needed)"
