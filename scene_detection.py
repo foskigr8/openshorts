@@ -107,13 +107,28 @@ def _detect_pyscenedetect(video_path):
 # --- TransNetV2 engine ------------------------------------------------------
 
 def _get_tn2_model():
+    """Lazily build the shared model — LOCKED (7-aug-2026).
+
+    Clip workers each get their own GPU via gpu_affinity, and scene detection
+    for concurrent clips used to race here: two worker threads (cuda:0 and
+    cuda:1) could both see ``_tn2_model is None`` before either finished
+    constructing, "auto" resolving to whichever device that thread currently
+    had — producing the exact "weight is on cuda:0, different from other
+    tensors on cuda:1" crash seen in production (confirmed 7-aug-2026: 2xT4,
+    CLIP_GPUS=0,1). _model_device_guard only pins INFERENCE to the model's
+    device; it can't fix a model that was torn across two devices during
+    construction. The lock makes construction atomic, at the one-time cost
+    of the second worker briefly waiting instead of racing.
+    """
     global _tn2_model
     if _tn2_model is None:
-        from transnetv2_pytorch import TransNetV2
-        device = os.environ.get("TRANSNETV2_DEVICE", "auto")
-        model = TransNetV2(device=device)
-        model.eval()
-        _tn2_model = model
+        with _TN2_LOCK:
+            if _tn2_model is None:
+                from transnetv2_pytorch import TransNetV2
+                device = os.environ.get("TRANSNETV2_DEVICE", "auto")
+                model = TransNetV2(device=device)
+                model.eval()
+                _tn2_model = model
     return _tn2_model
 
 
