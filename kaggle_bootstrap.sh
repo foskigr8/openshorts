@@ -226,8 +226,8 @@ else
         echo "    building the provider (~1-2 min, first run only)"
         rm -rf "$POT_DIR"
         if git clone --depth 1 -q https://github.com/Brainicism/bgutil-ytdlp-pot-provider "$POT_DIR" \
-            && (cd "$POT_DIR/server" && npm install --no-audit --no-fund > "$LOG_DIR/bgutil_install.log" 2>&1) \
-            && (cd "$POT_DIR/server" && npx --yes tsc > "$LOG_DIR/bgutil_tsc.log" 2>&1); then
+            && (cd "$POT_DIR/server" && npm install --include=dev --no-audit --no-fund > "$LOG_DIR/bgutil_install.log" 2>&1) \
+            && (cd "$POT_DIR/server" && (./node_modules/.bin/tsc || npx --yes typescript tsc) > "$LOG_DIR/bgutil_tsc.log" 2>&1); then
             echo "    provider built"
         else
             echo "    provider build FAILED — check $LOG_DIR/bgutil_install.log and $LOG_DIR/bgutil_tsc.log"
