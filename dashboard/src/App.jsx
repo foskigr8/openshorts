@@ -847,7 +847,13 @@ function App() {
           clip_count: data.clipCount ?? null,
           long_context_clips: data.longContextClips || 0,
           remove_background_audio: data.removeBackgroundAudio || '',
-          force_new: true,
+          // 7-aug-2026: reversed back to reuse-by-default. force_new:true was
+          // set 6-aug-2026 because reuse silently landed on a finished project
+          // with no way to force a fresh run — but the owner now wants the
+          // opposite tradeoff: resubmitting a URL that already has clips
+          // (locally or restorable from HF storage) should pull them back
+          // instantly instead of re-downloading/re-analyzing/re-rendering.
+          force_new: false,
           custom_width: data.outputFormat === 'custom' ? data.customWidth : null,
           custom_height: data.outputFormat === 'custom' ? data.customHeight : null,
           captions: data.captions !== false,

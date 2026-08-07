@@ -3128,7 +3128,7 @@ def _build_word_list(transcript_result):
 
 
 def _vision_confirm_candidates(shorts, source_video_path, video_duration,
-                               transcript_result):
+                               transcript_result, output_dir=None):
     """Gemini Vision confirmation pass shared by every Stage 3 engine.
 
     Each candidate gets a rough-cut upload + context/sync review (see
@@ -3143,8 +3143,19 @@ def _vision_confirm_candidates(shorts, source_video_path, video_duration,
         return shorts
     model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
     print(f"👁️  Vision-confirming {len(shorts)} candidate(s) across a pool of {len(pool)} key(s)...")
+    # This step can run 1-3 min PER CANDIDATE on a small key pool (each of
+    # visual/context/retry is a Gemini video upload+inference call). Without
+    # a progress update in here, "analyzing narrative arcs" from before this
+    # loop sits frozen the whole time and reads as a hang (confirmed
+    # 7-aug-2026: a 1-hour source with a starved key pool looked "vanished").
+    if output_dir:
+        _write_progress(output_dir, "analyze",
+                        note=f"reviewing candidate 1/{len(shorts)}...")
     approved_shorts = []
-    for s in shorts:
+    for idx, s in enumerate(shorts):
+        if output_dir and idx > 0:
+            _write_progress(output_dir, "analyze",
+                            note=f"reviewing candidate {idx + 1}/{len(shorts)}...")
         try:
             approved = confirm_clip_with_vision(
                 pool, model_name, source_video_path, s, video_duration, transcript_result)
@@ -3271,7 +3282,8 @@ def _snap_candidates(shorts, words, video_duration):
 
 
 def get_viral_clips(transcript_result, video_duration, source_video_path=None,
-                    clip_count=None, long_context_count=0, style_variant="balanced"):
+                    clip_count=None, long_context_count=0, style_variant="balanced",
+                    output_dir=None):
     """Stage 3 — viral moment selection, engine-selectable.
 
     Default (VIRAL_ENGINE=auto) runs the packaged viral-clip-finder skill
@@ -3320,7 +3332,8 @@ def get_viral_clips(transcript_result, video_duration, source_video_path=None,
                     for s in shorts:
                         _extend_start_for_preceding_question(s, transcript_result)
                     shorts = _vision_confirm_candidates(
-                        shorts, source_video_path, video_duration, transcript_result)
+                        shorts, source_video_path, video_duration, transcript_result,
+                        output_dir=output_dir)
                     if shorts is None:
                         return None
                     _snap_candidates(shorts, words, video_duration)
@@ -3360,7 +3373,8 @@ def get_viral_clips(transcript_result, video_duration, source_video_path=None,
             _extend_start_for_preceding_question(s, transcript_result)
 
         shorts = _vision_confirm_candidates(
-            shorts, source_video_path, video_duration, transcript_result)
+            shorts, source_video_path, video_duration, transcript_result,
+            output_dir=output_dir)
         if shorts is None:
             return None
         _snap_candidates(shorts, words, video_duration)
@@ -3664,7 +3678,8 @@ if __name__ == '__main__':
                                          source_video_path=input_video,
                                          clip_count=args.clip_count,
                                          long_context_count=args.long_context_clips,
-                                         style_variant=args.style_variant)
+                                         style_variant=args.style_variant,
+                                         output_dir=output_dir)
         else:
             clips_data = get_visual_clips(input_video, duration)
         _stage_durations["analyze"] = time.time() - _stage_t0

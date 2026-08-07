@@ -56,6 +56,35 @@ export default function HistoryTab({ onReopenProject, search = '' }) {
     return entries;
   }, [videos, filter, search, projects]);
 
+  // Day-bucketed section headers ("Today", "Yesterday", then a date) so a
+  // library with weeks of runs reads as a timeline instead of one long,
+  // undifferentiated grid — the ask was "organized with time", not just
+  // newest-first, which /api/history already guaranteed on its own.
+  const dayLabel = (iso) => {
+    if (!iso) return 'Undated';
+    const d = new Date(iso);
+    const today = new Date();
+    const yesterday = new Date(today);
+    yesterday.setDate(today.getDate() - 1);
+    const sameDay = (a, b) => a.toDateString() === b.toDateString();
+    if (sameDay(d, today)) return 'Today';
+    if (sameDay(d, yesterday)) return 'Yesterday';
+    return d.toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
+  };
+  const dayGroups = useMemo(() => {
+    const buckets = [];
+    let last = null;
+    for (const entry of groups) {
+      const label = dayLabel(entry[1][0]?.created_at);
+      if (label !== last) {
+        buckets.push({ label, entries: [] });
+        last = label;
+      }
+      buckets[buckets.length - 1].entries.push(entry);
+    }
+    return buckets;
+  }, [groups]);
+
   const FILTERS = ['all', 'completed', 'processing', 'failed'];
   const storage = system?.storage;
   const storagePct = storage ? Math.min(100, Math.max(0, storage.pct || 0)) : null;
@@ -153,8 +182,14 @@ export default function HistoryTab({ onReopenProject, search = '' }) {
         </div>
       )}
 
-      <div className="space-y-10">
-        {groups.map(([jobId, vids]) => {
+      <div className="space-y-12">
+        {dayGroups.map(({ label, entries }) => (
+        <div key={label}>
+          <h2 className="readout uppercase tracking-wider text-muted mb-4 pb-1.5 border-b border-rule">
+            {label}
+          </h2>
+          <div className="space-y-10">
+        {entries.map(([jobId, vids]) => {
           const project = projects[jobId];
           return (
             <section key={jobId}>
@@ -248,6 +283,9 @@ export default function HistoryTab({ onReopenProject, search = '' }) {
             </section>
           );
         })}
+          </div>
+        </div>
+        ))}
       </div>
     </div>
   );

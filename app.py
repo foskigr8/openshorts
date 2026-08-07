@@ -465,11 +465,18 @@ def _newest_metadata_file(job_path):
     """Newest ``*_metadata.json`` in a job dir, or None.
 
     Convenience wrapper over _sorted_metadata for callers that want a single
-    path rather than the ordered list.
+    path rather than the ordered list. Falls back to a plain ``metadata.json``
+    (the name used when metadata is restored from HF storage — PART 5.3 —
+    which has no base_name prefix to glob on) so a job rebuilt after a
+    Kaggle wipe is still found here, not just by the dedup lookup that
+    fetched it.
     """
     try:
         matches = _sorted_metadata(glob.glob(os.path.join(job_path, "*_metadata.json")))
-        return matches[0] if matches else None
+        if matches:
+            return matches[0]
+        plain = os.path.join(job_path, "metadata.json")
+        return plain if os.path.exists(plain) else None
     except OSError:
         return None
 
@@ -481,7 +488,7 @@ def _sorted_metadata(matches):
 
 
 def _find_completed_job_for_source(source_url):
-    """job_id of a completed on-disk job for the same source URL, or None.
+    """job_id of a completed job for the same source URL, or None.
 
     Round-5 feature ("if the clip already exists, just map it"): re-submitting
     the same YouTube URL must not re-download/re-analyze/re-render from
@@ -493,7 +500,7 @@ def _find_completed_job_for_source(source_url):
     try:
         job_ids = os.listdir(OUTPUT_DIR)
     except FileNotFoundError:
-        return None
+        job_ids = []
     for job_id in job_ids:
         job_path = os.path.join(OUTPUT_DIR, job_id)
         meta = _newest_metadata_file(job_path)
@@ -514,6 +521,38 @@ def _find_completed_job_for_source(source_url):
                     and os.path.getsize(os.path.join(job_path, filename)) > 0
                     and os.path.exists(marker)):
                 return job_id
+
+    # HF fallback (7-aug-2026): on a fresh Kaggle session OUTPUT_DIR is wiped,
+    # so the scan above always misses — the same URL got fully re-downloaded
+    # and re-rendered every session even though the clips already existed in
+    # storage. metadata.json now backs up to HF alongside each clip (PART
+    # 5.3), so it can be checked here too. Bounded to jobs not already seen
+    # locally; stops at the first source_url match.
+    if hf_storage.configured():
+        try:
+            known = set(job_ids)
+            for job_id, filenames in hf_storage.list_job_files().items():
+                if job_id in known or "metadata.json" not in filenames:
+                    continue
+                meta_local = os.path.join(OUTPUT_DIR, job_id, "metadata.json")
+                os.makedirs(os.path.dirname(meta_local), exist_ok=True)
+                if not hf_storage.download_file(
+                        hf_storage.job_key(job_id, "metadata.json"), meta_local):
+                    continue
+                try:
+                    with open(meta_local, 'r') as f:
+                        data = json.load(f)
+                except Exception:
+                    continue
+                if data.get('source_url') != source_url:
+                    continue
+                # At least one clip must actually be restorable from storage.
+                clips = data.get('shorts', [])
+                if any(c.get('storage_key') for c in clips) or any(
+                        "_clip_" in f for f in filenames):
+                    return job_id
+        except Exception as e:
+            print(f"⚠️ HF dedup lookup failed ({type(e).__name__}: {e})")
     return None
 
 
@@ -1937,10 +1976,19 @@ async def process_endpoint(
                 base_name = os.path.basename(meta).replace('_metadata.json', '')
                 clips = data.get('shorts', [])
                 for i, clip in enumerate(clips):
-                    if not clip.get('video_url'):
+                    if clip.get('video_url'):
+                        continue
+                    filename = (_canonical_clip_file(job_path, base_name, i)
+                                if base_name != "metadata.json" else None)
+                    if filename and os.path.exists(os.path.join(job_path, filename)):
+                        clip['video_url'] = f"/videos/{existing_job}/{filename}"
+                    elif clip.get('storage_key'):
+                        # HF-only restore (PART 5.3): base_name is unknown
+                        # (metadata.json has no filename prefix to derive it
+                        # from), but the clip's own storage_filename is exact.
                         clip['video_url'] = (
-                            f"/videos/{existing_job}/"
-                            f"{_canonical_clip_file(job_path, base_name, i)}")
+                            f"/api/storage/{existing_job}/"
+                            f"{clip.get('storage_filename') or filename}")
                 jobs[existing_job] = {
                     'status': 'completed',
                     'logs': [_log_entry(
