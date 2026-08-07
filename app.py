@@ -2478,7 +2478,15 @@ async def list_history(request: Request):
         if job_owner is not None and job_owner != owner:
             continue
 
-        json_files = _sorted_metadata(glob.glob(os.path.join(job_path, "*_metadata.json")))
+        # _newest_metadata_file also matches a plain metadata.json (PART 5.3:
+        # what HF-restored jobs get downloaded as) — a raw "*_metadata.json"
+        # glob here missed it, so a job whose clips were playing fine flipped
+        # to "Failed" with a garbled filename title the moment ANYTHING in
+        # this request (this function's own HF fallback below, a thumbnail
+        # restore, the dedup lookup) pulled that file down and made the job
+        # dir visible to os.listdir() for the first time (confirmed 7-aug-2026).
+        _meta = _newest_metadata_file(job_path)
+        json_files = [_meta] if _meta else []
         if not json_files:
             # A job that died BEFORE the analysis step ever wrote metadata.
             # It can still hold the entire downloaded source video (hundreds of
@@ -2535,7 +2543,16 @@ async def list_history(request: Request):
                     pass
             playable = 0
             for i, clip in enumerate(clips):
-                filename = _canonical_clip_file(job_path, base_name, i)
+                # base_name has no real prefix to reconstruct from when this
+                # metadata came from the plain-named HF restore (PART 5.3) —
+                # _canonical_clip_file would build a filename that never
+                # matches what's actually on disk, making an already-local,
+                # already-playing clip register as missing. storage_filename
+                # (recorded verbatim at upload time) is the ground truth here.
+                if base_name == "metadata.json" and clip.get("storage_filename"):
+                    filename = clip["storage_filename"]
+                else:
+                    filename = _canonical_clip_file(job_path, base_name, i)
                 local_exists = os.path.exists(os.path.join(job_path, filename))
                 # A clip missing locally but present in HF storage is still
                 # playable — that is the whole point of the backup. This is the
@@ -2553,7 +2570,7 @@ async def list_history(request: Request):
                         "job_id": job_id,
                         "title": (clip.get("title")
                                   or clip.get("video_title_for_youtube_short")
-                                  or base_name),
+                                  or (base_name if base_name != "metadata.json" else "Short")),
                         "created_at": created_at,
                         "status": job_status,
                         "duration": max(0.0, float(clip.get("end") or 0) - float(clip.get("start") or 0)),
@@ -2571,7 +2588,7 @@ async def list_history(request: Request):
                     # "the AI isn't doing the creative part" (round-4 teardown).
                     "title": (clip.get("title")
                               or clip.get("video_title_for_youtube_short")
-                              or base_name),
+                              or (base_name if base_name != "metadata.json" else "Short")),
                     "created_at": created_at,
                     "status": job_status,
                     "duration": max(0.0, float(clip.get("end") or 0) - float(clip.get("start") or 0)),
