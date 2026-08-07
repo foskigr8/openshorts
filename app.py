@@ -2239,6 +2239,12 @@ async def clip_thumbnail(job_id: str, clip_index: int):
     canonical = _canonical_clip_file(job_path, base_name, clip_index)
     video_path = os.path.join(job_path, canonical)
     if not os.path.exists(video_path):
+        if hf_storage.configured():
+            try:
+                await restore_from_storage(job_id, canonical, request)
+            except Exception:
+                pass
+    if not os.path.exists(video_path):
         raise HTTPException(status_code=404, detail="Clip file not found")
     thumb = os.path.join(job_path, f"clip_{clip_index + 1}_thumb.jpg")
     if not os.path.exists(thumb):
@@ -2254,6 +2260,21 @@ async def clip_thumbnail(job_id: str, clip_index: int):
     return FileResponse(thumb, media_type="image/jpeg")
 
 
+@app.get("/videos/{job_id}/{filename}")
+async def serve_or_restore_video(job_id: str, filename: str, request: Request):
+    """Serve local clip if present on disk; otherwise transparently restore from HF storage.
+
+    Prevents 404s in the UI when Kaggle restarts and wipes /kaggle/working.
+    """
+    safe_job = os.path.basename(job_id)
+    safe_name = os.path.basename(filename)
+    local_path = os.path.join(OUTPUT_DIR, safe_job, safe_name)
+    if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
+        return FileResponse(local_path, media_type="video/mp4")
+    # Local file missing — restore on-demand from Hugging Face storage!
+    return await restore_from_storage(job_id, filename, request)
+
+
 @app.get("/api/storage/{job_id}/{filename}")
 async def restore_from_storage(job_id: str, filename: str, request: Request):
     """Serve a clip whose local file is gone by restoring it from HF storage.
@@ -2263,13 +2284,12 @@ async def restore_from_storage(job_id: str, filename: str, request: Request):
     key. The repo is private, so the file cannot be linked to directly — the
     server holds the token and streams it.
 
-    Restores into the job directory, so the next request is served locally by
-    the normal /videos mount.
+    Restores into the job directory, so subsequent requests are served locally.
     """
     safe_name = os.path.basename(filename)
-    job_dir = os.path.join(OUTPUT_DIR, os.path.basename(job_id))
-    if not os.path.isdir(job_dir):
-        raise HTTPException(status_code=404, detail="Job not found")
+    safe_job = os.path.basename(job_id)
+    job_dir = os.path.join(OUTPUT_DIR, safe_job)
+    os.makedirs(job_dir, exist_ok=True)
 
     owner = await _request_owner_id(request)
     owner_path = os.path.join(job_dir, ".owner")
@@ -2293,7 +2313,22 @@ async def restore_from_storage(job_id: str, filename: str, request: Request):
     loop = asyncio.get_event_loop()
     ok = await loop.run_in_executor(
         None, hf_storage.download_file, key, local_path)
-    if not ok or not os.path.exists(local_path):
+    
+    # Fallback search if exact filename key layout differs slightly in repo
+    if not ok or not os.path.exists(local_path) or os.path.getsize(local_path) == 0:
+        try:
+            job_files = await loop.run_in_executor(None, hf_storage.list_job_files)
+            files = job_files.get(safe_job, []) or job_files.get(job_id, [])
+            for f in files:
+                if safe_name in f or f.endswith(safe_name) or safe_name.endswith(os.path.basename(f)):
+                    alt_key = hf_storage.job_key(job_id, f)
+                    ok = await loop.run_in_executor(None, hf_storage.download_file, alt_key, local_path)
+                    if ok and os.path.exists(local_path) and os.path.getsize(local_path) > 0:
+                        break
+        except Exception as ex:
+            print(f"⚠️ Fallback HF restore search failed for {job_id}/{safe_name}: {ex}")
+
+    if not ok or not os.path.exists(local_path) or os.path.getsize(local_path) == 0:
         raise HTTPException(
             status_code=404,
             detail="Clip is not on disk and could not be restored from storage")
