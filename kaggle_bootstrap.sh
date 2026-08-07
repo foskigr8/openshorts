@@ -218,6 +218,14 @@ elif ! command -v npm >/dev/null 2>&1; then
     echo "    no npm — cannot build the provider; YouTube may hit the bot wall"
 else
     say "YouTube PO token provider"
+    # System deps for the 'canvas' npm package (native addon).
+    # Without these, canvas fails to compile and the server crashes on startup.
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get install -y -qq libcairo2-dev libjpeg-dev libpango1.0-dev \
+            libgif-dev build-essential g++ pkg-config > "$LOG_DIR/bgutil_deps.log" 2>&1 \
+            && echo "    system deps for canvas: installed" \
+            || echo "    system deps for canvas: install failed (continuing)"
+    fi
     # yt-dlp nightly + the plugin that talks to the provider. The plugin is what
     # makes yt-dlp aware of the token at all.
     pip install -q --upgrade --pre "yt-dlp[default]" bgutil-ytdlp-pot-provider 2>&1 | tail -2 || \
@@ -226,8 +234,9 @@ else
         echo "    building the provider (~1-2 min, first run only)"
         rm -rf "$POT_DIR"
         if git clone --depth 1 -q https://github.com/Brainicism/bgutil-ytdlp-pot-provider "$POT_DIR" \
-            && (cd "$POT_DIR/server" && npm install --include=dev --no-audit --no-fund > "$LOG_DIR/bgutil_install.log" 2>&1) \
-            && (cd "$POT_DIR/server" && (./node_modules/.bin/tsc || npx --yes typescript tsc) > "$LOG_DIR/bgutil_tsc.log" 2>&1); then
+            && (cd "$POT_DIR/server" && npm install --include=dev --ignore-scripts=false --no-audit --no-fund > "$LOG_DIR/bgutil_install.log" 2>&1) \
+            && (cd "$POT_DIR/server" && npm rebuild canvas >> "$LOG_DIR/bgutil_install.log" 2>&1 || true) \
+            && (cd "$POT_DIR/server" && (./node_modules/.bin/tsc || npx --yes tsc) > "$LOG_DIR/bgutil_tsc.log" 2>&1); then
             echo "    provider built"
         else
             echo "    provider build FAILED — check $LOG_DIR/bgutil_install.log and $LOG_DIR/bgutil_tsc.log"
@@ -241,8 +250,16 @@ else
         else
             nohup node "$POT_DIR/server/build/main.js" --port "$POT_PORT" \
                 > "$LOG_DIR/bgutil.log" 2>&1 &
-            for _ in $(seq 1 15); do
+            BGUTIL_PID=$!
+            echo "    started provider (pid=$BGUTIL_PID), waiting for it..."
+            for _ in $(seq 1 20); do
                 curl -s --max-time 2 "http://127.0.0.1:$POT_PORT/ping" >/dev/null 2>&1 && break
+                # Check if process died
+                if ! kill -0 "$BGUTIL_PID" 2>/dev/null; then
+                    echo "    provider process died — check $LOG_DIR/bgutil.log:"
+                    tail -5 "$LOG_DIR/bgutil.log" 2>/dev/null | sed 's/^/    /'
+                    break
+                fi
                 sleep 1
             done
         fi
@@ -253,6 +270,7 @@ else
         else
             echo "    provider did not come up (see $LOG_DIR/bgutil.log)"
             echo "    downloads will run without a PO token"
+            [ -f "$LOG_DIR/bgutil.log" ] && echo "    last 5 lines of bgutil.log:" && tail -5 "$LOG_DIR/bgutil.log" | sed 's/^/      /'
         fi
     fi
 fi

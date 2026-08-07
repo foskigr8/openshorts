@@ -30,13 +30,19 @@ def api(path, timeout=15):
         return r.status, r.read()
 
 
-def check(label, fn, results):
+def check(label, fn, results, warn_only=False):
     try:
         ok, detail = fn()
     except Exception as e:
         ok, detail = False, f"{type(e).__name__}: {e}"
-    print(f"  [{'PASS' if ok else 'FAIL'}] {label}: {detail}", flush=True)
-    results.append((label, ok))
+    if ok:
+        tag = "PASS"
+    elif warn_only:
+        tag = "WARN"
+    else:
+        tag = "FAIL"
+    print(f"  [{tag}] {label}: {detail}", flush=True)
+    results.append((label, ok, warn_only))
     return ok
 
 
@@ -223,19 +229,22 @@ def _po_token():
         return False, f"{base} unreachable ({type(e).__name__})"
 
 
+# (label, check_fn, warn_only)
+# warn_only checks show [WARN] instead of [FAIL] and don't count toward the
+# pass/fail exit code.  PO token is defense-in-depth: useful but not blocking.
 CHECKS = [
-    ("API", _api_alive),
-    ("Dashboard", _dashboard),
-    ("CUDA in app env", _cuda),
-    ("GPU sharding", _gpu_sharding),
-    ("NVENC", _nvenc),
-    ("Transcription backend", _transcription),
-    ("Stage 3 clip selection", _stage3),
-    ("Server-side keys", _server_keys),
-    ("Face ID", _face_id),
-    ("Persistent storage", _storage),
-    ("PO token provider", _po_token),
-    ("YouTube download", _youtube),
+    ("API", _api_alive, False),
+    ("Dashboard", _dashboard, False),
+    ("CUDA in app env", _cuda, False),
+    ("GPU sharding", _gpu_sharding, False),
+    ("NVENC", _nvenc, False),
+    ("Transcription backend", _transcription, False),
+    ("Stage 3 clip selection", _stage3, False),
+    ("Server-side keys", _server_keys, False),
+    ("Face ID", _face_id, False),
+    ("Persistent storage", _storage, False),
+    ("PO token provider", _po_token, True),
+    ("YouTube download", _youtube, False),
 ]
 
 
@@ -246,14 +255,27 @@ def main():
     args = parser.parse_args()
 
     results = []
-    for label, fn in CHECKS:
+    for label, fn, warn_only in CHECKS:
         if args.skip_youtube and label == "YouTube download":
             continue
-        check(label, fn, results)
+        check(label, fn, results, warn_only=warn_only)
 
-    passed = sum(1 for _, ok in results if ok)
-    print(f"\n{passed}/{len(results)} passed")
-    failed = [label for label, ok in results if not ok]
+    passed  = sum(1 for _, ok, _w in results if ok)
+    hard    = [(l, ok) for l, ok, w in results if not w]  # non-warn checks
+    warns   = [(l, ok) for l, ok, w in results if w and not ok]
+    failed  = [l for l, ok in hard if not ok]
+    total_hard = len(hard)
+    print(f"\n{sum(1 for _, ok in hard if ok)}/{total_hard} passed", end="")
+    if warns:
+        print(f"  ({len(warns)} warning{'s' if len(warns) != 1 else ''})")
+    else:
+        print()
+    if warns:
+        print("\nWarnings (non-blocking): " + ", ".join(l for l, _ in warns))
+        if any(l == "PO token provider" for l, _ in warns):
+            print("  PO token: defense-in-depth against YouTube bot wall. "
+                  "Downloads still work without it from most Kaggle IPs. "
+                  "Check /tmp/openshorts-logs/bgutil.log for diagnostics.")
     if failed:
         print("\nFailed: " + ", ".join(failed))
         if "YouTube download" in failed:
@@ -264,11 +286,6 @@ def main():
             else:
                 print("  YouTube: the jar expired (~3h lifetime). Re-paste "
                       "YOUTUBE_COOKIES from a fresh local cookies.txt.")
-        if "PO token provider" in failed:
-            print("  PO token: this is the usual cause of a failed YouTube "
-                  "download from a cloud IP. Re-run kaggle_bootstrap.sh and read "
-                  "its 'YouTube PO token provider' section, or check "
-                  "/tmp/openshorts-logs/bgutil.log.")
         if "Persistent storage" in failed:
             print("  Storage: see PLAN_CAPTIONS_AND_STORAGE.md for the "
                   "HF_TOKEN / HF_STORAGE_REPO setup (no credit card needed).")
