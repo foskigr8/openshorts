@@ -167,12 +167,21 @@ async def resolve_gemini_pool(request: Request) -> List[str]:
     header (comma-separated, from the Settings "extra keys" list) plus
     whatever ``resolve_gemini`` would have returned alone (the primary
     ``X-Gemini-Key`` header, else the env fallback) — deduplicated, primary
-    key first. Returns an empty list if nothing is configured; callers should
-    treat that the same as "no Gemini key" (existing behavior).
+    key first. Self-host also falls back to the server-side ``GEMINI_API_KEYS``
+    env var when the browser sent no header, mirroring resolve_gemini's env
+    fallback for the primary key — a Kaggle Secret named GEMINI_API_KEYS
+    used to silently do nothing unless the SAME keys were also pasted into
+    the dashboard's browser Settings, which nothing documented and nobody
+    would guess (confirmed 7-aug-2026: "pool of 1 key(s)" despite 5 keys set
+    as a Kaggle Secret). Returns an empty list if nothing is configured;
+    callers should treat that the same as "no Gemini key" (existing behavior).
     """
     primary = await resolve_gemini(request)
     extra_header = request.headers.get("X-Gemini-Keys", "")
     extra = [k.strip() for k in extra_header.split(",") if k.strip()]
+    if not extra and not BILLING_ENABLED:
+        extra = [k.strip() for k in
+                 (os.environ.get("GEMINI_API_KEYS") or "").split(",") if k.strip()]
     pool = []
     if primary:
         pool.append(primary)
