@@ -631,6 +631,14 @@ def _hf_backup_ready_clips(job_id, output_dir):
 
         loop.run_in_executor(None, _upload)
 
+    # PART 5.3 (7-aug-2026): the metadata itself is part of the durable record.
+    # Without it, a fresh Kaggle session that rebuilds History purely from the
+    # HF file listing has no titles to show — only raw clip filenames, which
+    # is the "naming is wrong" complaint. Re-uploaded on every pass (cheap,
+    # it's a few KB) so it stays current as titles/captions get edited.
+    meta_key = hf_storage.job_key(job_id, "metadata.json")
+    loop.run_in_executor(None, hf_storage.upload_file, paths[0], meta_key)
+
     # PART 5.2 (6-aug-2026): the JOB LOG is part of the durable record too.
     # A Kaggle session wipes /kaggle/working when it ends, so the local
     # logs.jsonl dies with it — that is exactly how the owner lost the run's
@@ -2214,7 +2222,7 @@ def _job_created_at(job_path):
 
 
 @app.get("/api/thumbnails/{job_id}/{clip_index}")
-async def clip_thumbnail(job_id: str, clip_index: int):
+async def clip_thumbnail(job_id: str, clip_index: int, request: Request):
     """Cached poster frame for a delivered clip (PART 5.3, 6-aug-2026).
 
     Re-captioning/re-rendering replace the video file, so a gallery entry
@@ -2563,16 +2571,37 @@ async def list_history(request: Request):
                     if "_clip_" in f
                     and not f.startswith(("autosubs_", "temp_", "hook_",
                                           "subtitled_0_")))
+                # Real titles live in the backed-up metadata.json (PART 5.3)
+                # — filename parsing was a fallback for jobs backed up before
+                # that existed, and reads as "the AI isn't doing its job".
+                shorts_meta = []
+                if "metadata.json" in filenames:
+                    meta_local = os.path.join(OUTPUT_DIR, job_id, "metadata.json")
+                    if hf_storage.download_file(
+                            hf_storage.job_key(job_id, "metadata.json"), meta_local):
+                        try:
+                            with open(meta_local, 'r') as f:
+                                shorts_meta = json.load(f).get('shorts', [])
+                        except Exception:
+                            shorts_meta = []
                 for i, name in enumerate(clips):
-                    title = re.sub(r"^subtitled_\d+_", "", name)
-                    title = re.sub(r"_clip_\d+\.mp4$", "", title)
+                    title = None
+                    duration = 0
+                    if i < len(shorts_meta):
+                        title = (shorts_meta[i].get('title')
+                                 or shorts_meta[i].get('video_title_for_youtube_short'))
+                        duration = max(0.0, float(shorts_meta[i].get('end') or 0)
+                                       - float(shorts_meta[i].get('start') or 0))
+                    if not title:
+                        title = re.sub(r"^subtitled_\d+_", "", name)
+                        title = re.sub(r"_clip_\d+\.mp4$", "", title)
                     videos.append({
                         "id": f"{job_id}_{i}",
                         "job_id": job_id,
                         "title": title,
                         "created_at": "",
                         "status": "completed",
-                        "duration": 0,
+                        "duration": duration,
                         "size_bytes": 0,
                         "storage": "huggingface",
                         "view_url": f"/api/storage/{job_id}/{name}",
