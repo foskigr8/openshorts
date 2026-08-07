@@ -203,6 +203,15 @@ def _po_token():
     """
     base = os.environ.get("BGUTIL_BASE_URL", "").strip()
     if not base:
+        try:
+            req = urllib.request.Request("http://127.0.0.1:4416/ping", method="GET")
+            with urllib.request.urlopen(req, timeout=2) as r:
+                if r.status == 200:
+                    base = "http://127.0.0.1:4416"
+                    os.environ["BGUTIL_BASE_URL"] = base
+        except Exception:
+            pass
+    if not base:
         return False, ("no BGUTIL_BASE_URL — downloads run with no PO token and "
                        "will likely hit the bot wall")
     try:

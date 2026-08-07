@@ -226,11 +226,11 @@ else
         echo "    building the provider (~1-2 min, first run only)"
         rm -rf "$POT_DIR"
         if git clone --depth 1 -q https://github.com/Brainicism/bgutil-ytdlp-pot-provider "$POT_DIR" \
-            && (cd "$POT_DIR/server" && npm install --silent --no-audit --no-fund >/dev/null 2>&1) \
-            && (cd "$POT_DIR/server" && npx --yes tsc >/dev/null 2>&1); then
+            && (cd "$POT_DIR/server" && npm install --no-audit --no-fund > "$LOG_DIR/bgutil_install.log" 2>&1) \
+            && (cd "$POT_DIR/server" && npx --yes tsc > "$LOG_DIR/bgutil_tsc.log" 2>&1); then
             echo "    provider built"
         else
-            echo "    provider build FAILED — downloads will run without a PO token"
+            echo "    provider build FAILED — check $LOG_DIR/bgutil_install.log and $LOG_DIR/bgutil_tsc.log"
         fi
     else
         echo "    provider already built"
@@ -248,6 +248,7 @@ else
         fi
         if curl -s --max-time 3 "http://127.0.0.1:$POT_PORT/ping" >/dev/null 2>&1; then
             export BGUTIL_BASE_URL="http://127.0.0.1:$POT_PORT"
+            grep -q "BGUTIL_BASE_URL=" .env 2>/dev/null && sed -i "s|BGUTIL_BASE_URL=.*|BGUTIL_BASE_URL=\"$BGUTIL_BASE_URL\"|" .env || echo "BGUTIL_BASE_URL=\"$BGUTIL_BASE_URL\"" >> .env
             echo "    provider responding — BGUTIL_BASE_URL=$BGUTIL_BASE_URL"
         else
             echo "    provider did not come up (see $LOG_DIR/bgutil.log)"

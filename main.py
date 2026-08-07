@@ -1571,6 +1571,16 @@ def download_youtube_video(url, output_dir=".", require_hd=False):
     # other attempt silently ran with no PO token at all (visible in yt-dlp's
     # debug log as "[pot:...] Script path doesn't exist").
     _bgutil_http = os.environ.get("BGUTIL_BASE_URL", "").strip()
+    if not _bgutil_http:
+        try:
+            import urllib.request
+            req = urllib.request.Request("http://127.0.0.1:4416/ping", method="GET")
+            with urllib.request.urlopen(req, timeout=1) as resp:
+                if resp.status == 200:
+                    _bgutil_http = "http://127.0.0.1:4416"
+                    os.environ["BGUTIL_BASE_URL"] = _bgutil_http
+        except Exception:
+            pass
     _bgutil_script = os.environ.get("BGUTIL_SCRIPT_PATH", "").strip()
     if _bgutil_http:
         _pot_args = {'youtubepot-bgutilhttp': {'base_url': [_bgutil_http]}}
