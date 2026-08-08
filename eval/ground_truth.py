@@ -11,12 +11,20 @@ File format (JSON), hand-authored per video:
     {
       "video": "ptb_raw.mp4",
       "speaker_names": {"A": "host", "B": "guest_1", "C": "guest_2"},
+      "track_names": {"0": "host", "1": "guest_1"},
       "notes": "optional free text"
     }
 
 `speaker_names` only needs entries for labels that actually speak in the
 span being evaluated. A label with no entry is left as its diarization
 letter (still useful for matching, just less readable in reports).
+
+`track_names` is the SAME kind of one-time label, for the ASD bake-off
+(eval/asd_bakeoff.py): after running face_spine.build_face_spine on a span,
+watch it once and note which face_spine track id is which person — using
+the SAME names as speaker_names so the two map together. JSON object keys
+are always strings, so track ids are written as "0", "1", ... here even
+though face_spine's own dict keys are ints; load_track_names converts back.
 """
 from __future__ import annotations
 
@@ -35,6 +43,29 @@ def load_speaker_names(path):
     except (OSError, json.JSONDecodeError):
         return {}
     return dict(data.get("speaker_names") or {})
+
+
+def load_track_names(path):
+    """{0: "host", ...} from a ground-truth JSON file's "track_names" key,
+    with string keys converted back to the ints face_spine.py uses. Same
+    fail-open behavior as load_speaker_names: missing file/key -> {}, and a
+    non-integer key is skipped (not raised) since a hand-edited JSON file is
+    the likeliest source of a typo here, and a bake-off run failing outright
+    on one bad key is worse than ignoring it and scoring what is labeled.
+    """
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    raw = data.get("track_names") or {}
+    result = {}
+    for k, v in raw.items():
+        try:
+            result[int(k)] = v
+        except (TypeError, ValueError):
+            continue
+    return result
 
 
 def per_second_speaker_from_transcript(segments, clip_start, clip_end, speaker_names=None):
