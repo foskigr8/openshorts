@@ -1057,7 +1057,16 @@ def _context_check_once(pool, model_name, source_video_path, candidate,
     except gemini_worker.GeminiBlockedError:
         raise
     except Exception as e:
-        pool.mark_bad(key)
+        # Only a hard failure (bad key, policy issue, malformed response)
+        # blacklists the key for the rest of the run. A transient 429/503/
+        # quota error is exactly that — transient — and Gemini's own quota
+        # windows are per-minute; permanently dropping a key on the FIRST
+        # rate-limit hit is how a small pool degrades to "every candidate
+        # after the first few fails open with no real check" over the
+        # course of one job (this is what "the quota is killing me" was:
+        # not the calls being slow, the pool silently going empty).
+        if not gemini_pool.is_transient_error(e):
+            pool.mark_bad(key)
         print(f"⚠️ Vision context/sync check failed: {e}")
         return None
     finally:
@@ -1127,7 +1136,8 @@ def analyze_scene_context(pool, model_name, clip_path, clip_duration,
     except gemini_worker.GeminiBlockedError:
         return []
     except Exception as e:
-        pool.mark_bad(key)
+        if not gemini_pool.is_transient_error(e):  # see confirm_clip_with_vision's twin
+            pool.mark_bad(key)
         print(f"⚠️ Scene-context direction failed: {e}")
         return []
 
@@ -1215,7 +1225,8 @@ def confirm_clip_with_vision(pool, model_name, source_video_path, candidate,
         except gemini_worker.GeminiBlockedError:
             raise
         except Exception as e:
-            pool.mark_bad(key)
+            if not gemini_pool.is_transient_error(e):  # see confirm_clip_with_vision's twin
+                pool.mark_bad(key)
             print(f"⚠️ Vision visual/audio check failed: {e}")
 
     def _run_context():
@@ -1649,26 +1660,54 @@ def _vision_confirm_candidates(shorts, source_video_path, video_duration,
     if not pool:
         return shorts
     model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
-    print(f"👁️  Vision-confirming {len(shorts)} candidate(s) across a pool of {len(pool)} key(s)...")
-    # This step can run 1-3 min PER CANDIDATE on a small key pool (each of
-    # visual/context/retry is a Gemini video upload+inference call). Without
-    # a progress update in here, "analyzing narrative arcs" from before this
-    # loop sits frozen the whole time and reads as a hang (confirmed
-    # 7-aug-2026: a 1-hour source with a starved key pool looked "vanished").
+    # Candidates run CONCURRENTLY, bounded by key-pool size: this is the
+    # whole reason gemini_pool.py exists ("Spreads concurrent candidate-clip
+    # confirmation calls ... across multiple keys so a single key's rate
+    # limit doesn't serialize the whole job" — its own docstring). Before
+    # this fix the outer loop over candidates was serial, so a pool of N
+    # keys never actually ran more than 1 candidate's checks at a time; a
+    # 1-hour source with 8-15 candidates at 1-3 min each is where "it loops
+    # for so long" comes from (confirmed 8-aug-2026 — a real run, not a
+    # hypothetical). Each candidate itself still fans out visual+context in
+    # parallel inside confirm_clip_with_vision, so worker count is capped at
+    # the pool size, not len(shorts): more threads than keys just contend
+    # for the same keys with no throughput gain.
+    workers = max(1, min(len(pool), len(shorts)))
+    print(f"👁️  Vision-confirming {len(shorts)} candidate(s) across a pool of "
+          f"{len(pool)} key(s) ({workers} concurrent)...")
     if output_dir:
         _write_progress(output_dir, "analyze",
-                        note=f"reviewing candidate 1/{len(shorts)}...")
-    approved_shorts = []
-    for idx, s in enumerate(shorts):
-        if output_dir and idx > 0:
-            _write_progress(output_dir, "analyze",
-                            note=f"reviewing candidate {idx + 1}/{len(shorts)}...")
+                        note=f"reviewing {len(shorts)} candidate(s) "
+                             f"({workers} at a time)...")
+
+    def _confirm_one(s):
         try:
-            approved = confirm_clip_with_vision(
+            return confirm_clip_with_vision(
                 pool, model_name, source_video_path, s, video_duration, transcript_result)
         except gemini_worker.GeminiBlockedError as e:
             print(f"🚫 Vision confirm blocked: {e} — dropping this candidate")
-            approved = False
+            return False
+
+    # Order is preserved (results collected by original index, not
+    # completion order) — candidate order can carry meaning downstream
+    # (e.g. the selector's own ranking), and parallelizing must not
+    # reshuffle it.
+    verdicts = [None] * len(shorts)
+    _done = [0]
+    _done_lock = threading.Lock()
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_confirm_one, s): i for i, s in enumerate(shorts)}
+        for future in as_completed(futures):
+            idx = futures[future]
+            verdicts[idx] = future.result()
+            if output_dir:
+                with _done_lock:
+                    _done[0] += 1
+                    _write_progress(output_dir, "analyze",
+                                    note=f"reviewed {_done[0]}/{len(shorts)} candidate(s)...")
+
+    approved_shorts = []
+    for s, approved in zip(shorts, verdicts):
         if approved:
             approved_shorts.append(s)
         else:

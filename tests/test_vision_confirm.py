@@ -429,3 +429,161 @@ def test_untagged_candidate_defaults_to_the_tight_hook_reviewer(monkeypatch):
     main.confirm_clip_with_vision(pool, "m", "v.mp4", _candidate(), 300.0, _transcript())
     joined = "\n".join(p for p in models.calls if "OPENING FRAME" not in p)
     assert "REAL HOOK / CONTEXT RESCUE" in joined
+
+
+# --- concurrency + transient-error handling (8-aug-2026 fix) --------------
+# `_vision_confirm_candidates` used to loop over candidates SERIALLY despite
+# gemini_pool.py existing specifically to let concurrent calls spread across
+# keys — on a 1-hour source with 8-15 candidates at 1-3 min each, that's
+# where "it loops for so long" came from. Fixed to run candidates concurrently,
+# bounded by pool size. Separately, `mark_bad` used to blacklist a key on ANY
+# exception including ordinary transient 429/quota errors, which silently
+# drained a small pool over one job. Both fixes are covered here.
+
+class TestTransientErrorDoesNotBlacklistTheKey:
+
+    def test_transient_429_does_not_mark_key_bad(self, monkeypatch):
+        class _BoomFiles:
+            def upload(self, file):
+                raise RuntimeError("429 RESOURCE_EXHAUSTED: quota exceeded")
+
+        class _BoomClient:
+            def __init__(self, api_key=None, http_options=None):
+                self.files = _BoomFiles()
+                self.models = None
+
+        monkeypatch.setattr(main.genai, "Client", _BoomClient)
+        pool = gemini_pool.GeminiKeyPool(["key1"])
+        candidate = _candidate()
+        approved = main.confirm_clip_with_vision(
+            pool, "model", "video.mp4", candidate, 100.0, _transcript())
+        assert approved is True  # still fails open
+        assert "key1" not in pool._bad  # but the key survives for later candidates
+
+    def test_non_transient_error_still_marks_key_bad(self, monkeypatch):
+        # Unchanged behavior for a real failure (bad key, malformed response,
+        # anything that isn't a rate-limit/overload signature).
+        class _BoomFiles:
+            def upload(self, file):
+                raise RuntimeError("upload failed")
+
+        class _BoomClient:
+            def __init__(self, api_key=None, http_options=None):
+                self.files = _BoomFiles()
+                self.models = None
+
+        monkeypatch.setattr(main.genai, "Client", _BoomClient)
+        pool = gemini_pool.GeminiKeyPool(["key1"])
+        candidate = _candidate()
+        approved = main.confirm_clip_with_vision(
+            pool, "model", "video.mp4", candidate, 100.0, _transcript())
+        assert approved is True
+        assert "key1" in pool._bad
+
+
+
+def _patch_pool_from_env(monkeypatch, pool):
+    """`_vision_confirm_candidates` builds its own pool via
+    gemini_pool.pool_from_env() internally -- it takes no pool argument --
+    so tests must patch env resolution itself, not pass a pool in."""
+    monkeypatch.setattr(main.gemini_pool, "pool_from_env", lambda: pool)
+
+
+class TestVisionConfirmCandidatesRunsConcurrently:
+    """_vision_confirm_candidates is the outer loop over ALL candidates for a
+    job (confirm_clip_with_vision, tested above, is a single candidate)."""
+
+    def test_runs_candidates_concurrently_not_one_at_a_time(self, monkeypatch):
+        import threading
+        import time as time_mod
+
+        in_flight = []
+        max_concurrent = [0]
+        lock = threading.Lock()
+
+        def _fake_confirm(pool, model_name, source_video_path, candidate,
+                          video_duration, transcript_result, max_duration_ceiling=180.0):
+            with lock:
+                in_flight.append(1)
+                max_concurrent[0] = max(max_concurrent[0], len(in_flight))
+            time_mod.sleep(0.05)  # real sleep here (not main.time.sleep) to force overlap
+            with lock:
+                in_flight.pop()
+            return True
+
+        monkeypatch.setattr(main, "confirm_clip_with_vision", _fake_confirm)
+        pool = gemini_pool.GeminiKeyPool(["key1", "key2", "key3", "key4"])
+        _patch_pool_from_env(monkeypatch, pool)
+        shorts = [_candidate(start=float(i), end=float(i) + 10) for i in range(4)]
+        result = main._vision_confirm_candidates(shorts, "video.mp4", 1000.0, _transcript())
+
+        assert len(result) == 4
+        # With a serial loop this would never exceed 1. A pool of 4 keys and
+        # 4 candidates should overlap.
+        assert max_concurrent[0] > 1, "candidates ran one at a time, not concurrently"
+
+    def test_worker_count_is_bounded_by_pool_size_not_candidate_count(self, monkeypatch):
+        import threading
+
+        peak = [0]
+        current = [0]
+        lock = threading.Lock()
+
+        def _fake_confirm(pool, model_name, source_video_path, candidate,
+                          video_duration, transcript_result, max_duration_ceiling=180.0):
+            import time as time_mod
+            with lock:
+                current[0] += 1
+                peak[0] = max(peak[0], current[0])
+            time_mod.sleep(0.03)
+            with lock:
+                current[0] -= 1
+            return True
+
+        monkeypatch.setattr(main, "confirm_clip_with_vision", _fake_confirm)
+        pool = gemini_pool.GeminiKeyPool(["key1", "key2"])  # only 2 keys
+        _patch_pool_from_env(monkeypatch, pool)
+        shorts = [_candidate(start=float(i), end=float(i) + 10) for i in range(6)]  # 6 candidates
+        main._vision_confirm_candidates(shorts, "video.mp4", 1000.0, _transcript())
+
+        assert peak[0] <= 2, f"ran {peak[0]} at once with only 2 keys in the pool"
+
+    def test_output_order_matches_input_order_even_when_completion_order_differs(self, monkeypatch):
+        import threading
+
+        # Candidate 0 finishes LAST on purpose (blocks on an Event that
+        # candidate 2 sets), to prove the result list isn't just
+        # as_completed() order.
+        release_first = threading.Event()
+
+        def _fake_confirm(pool, model_name, source_video_path, candidate,
+                          video_duration, transcript_result, max_duration_ceiling=180.0):
+            if candidate["start"] == 0.0:
+                release_first.wait(timeout=2.0)
+            if candidate["start"] == 20.0:
+                release_first.set()
+            return True
+
+        monkeypatch.setattr(main, "confirm_clip_with_vision", _fake_confirm)
+        pool = gemini_pool.GeminiKeyPool(["key1", "key2", "key3"])
+        _patch_pool_from_env(monkeypatch, pool)
+        shorts = [_candidate(start=0.0, end=10.0),
+                  _candidate(start=10.0, end=20.0),
+                  _candidate(start=20.0, end=30.0)]
+        result = main._vision_confirm_candidates(shorts, "video.mp4", 1000.0, _transcript())
+
+        assert [s["start"] for s in result] == [0.0, 10.0, 20.0]
+
+    def test_progress_notes_report_completed_count(self, monkeypatch):
+        notes = []
+        monkeypatch.setattr(main, "_write_progress",
+                            lambda output_dir, stage, note=None, **kw: notes.append(note))
+        monkeypatch.setattr(main, "confirm_clip_with_vision",
+                            lambda *a, **kw: True)
+        pool = gemini_pool.GeminiKeyPool(["key1", "key2"])
+        _patch_pool_from_env(monkeypatch, pool)
+        shorts = [_candidate(start=float(i), end=float(i) + 10) for i in range(3)]
+        main._vision_confirm_candidates(shorts, "video.mp4", 1000.0, _transcript(),
+                                        output_dir="/tmp/fake_output")
+        assert any("3" in (n or "") for n in notes)  # total count surfaced somewhere
+        assert notes  # at least the initial + completion notes were written
