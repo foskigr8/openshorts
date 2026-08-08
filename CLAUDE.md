@@ -72,6 +72,21 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 | `dashboard/vite-plugin-seo.js` | Build-time SEO surface: injects crawler-visible homepage content, emits static pages, sitemap.xml and llms.txt |
 | `dashboard/seo/data.js` | Single source of truth for pricing, pipeline and competitor facts used by every generated page |
 
+### Framing engines (what actually runs)
+
+Reframing is engine-selectable per job via `REFRAME_ENGINE` (default `v2`).
+MediaPipe/YOLOv8 appear in v1/v2 only — the v3 rebuild deliberately replaces
+the face detector with `face_spine.py`'s SCRFD/ByteTrack/ArcFace chain.
+
+| engine | tools | behavior |
+|---|---|---|
+| `v1` (legacy) | MediaPipe faces + `SmoothedCameraman` | per-frame reactive crop loop; kept only as v2's safety net |
+| `v2` (default) | MediaPipe faces + YOLOv8 bodies + LR-ASD lips | per-scene crop, one ffmpeg-native render pass, letterboxed into a fixed 3:4 content band |
+| `v3` (rebuild) | `face_spine.py` (SCRFD + ByteTrack + ArcFace) + LR-ASD + UNISAL saliency (`vendor/pyautoflip`) + `shot_planner.py` | plans the whole shot list up front — one static crop per shot (jitter is structurally impossible), saliency-aware aim within containment, fail-loud `validate_composition` |
+
+See `MASTER_PLAN_FRAMING_REBUILD.md` for why MediaPipe/YOLO were replaced and
+how each v3 decision was tested.
+
 ### Viral Clip Finder (Stage 3 engine)
 
 Stage 3 ("find viral moments") is engine-selectable via `VIRAL_ENGINE`:

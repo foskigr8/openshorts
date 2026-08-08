@@ -392,3 +392,205 @@ def test_degenerate_crop_raises():
 
     with pytest.raises(CompositionError, match="degenerate"):
         validate_composition([shot], FRAME_W, FRAME_H)
+
+
+# ─── Phase 5: render wiring ──────────────────────────────────────────────────
+
+from reframe_v3 import (  # noqa: E402
+    ComposedShot,
+    _aspect_tuple,
+    _compose_shot,
+    _directive_dicts,
+    _integer_crop,
+    _regular_filtergraph,
+    _speaker_shares,
+    _track_nearest_x,
+    attention_shifted_crop,
+)
+from shot_planner import SHOT_REACTION, SHOT_SINGLE, SHOT_WIDE, Shot  # noqa: E402
+
+
+def _spine_two_tracks():
+    """Two people present for the whole clip: speaker-ish at x=200, other at x=1400."""
+    return {
+        1: {"frames": [0.0, 1.0, 2.0], "boxes": [(200.0, 400.0, 120.0, 120.0)] * 3},
+        2: {"frames": [0.0, 1.0, 2.0], "boxes": [(1400.0, 400.0, 120.0, 120.0)] * 3},
+    }
+
+
+def _saliency_at(box, frame_h=1080, frame_w=1920):
+    sal = np.zeros((frame_h, frame_w), dtype=np.float32)
+    x, y, w, h = (int(v) for v in box)
+    sal[y:y + h, x:x + w] = 1.0
+    return sal
+
+
+def test_attention_shifted_crop_pulls_right_within_slack():
+    """A reaction beside the speaker shifts the crop right, never losing containment."""
+    frame_w, frame_h = 1920, 1080
+    subject = (200.0, 400.0, 120.0, 120.0)
+    base = crop_rect_containing(subject, frame_w, frame_h, VERTICAL_9_16)
+    shifted = attention_shifted_crop(base, subject, 0.7604, frame_w, frame_h)
+
+    assert shifted[0] > base[0]  # pulled toward the reaction
+    assert contains(shifted, subject)
+    assert shifted[2] == base[2] and shifted[3] == base[3]  # aspect untouched
+
+
+def test_attention_shifted_crop_pulls_left_within_slack():
+    frame_w, frame_h = 1920, 1080
+    subject = (1600.0, 400.0, 120.0, 120.0)
+    base = crop_rect_containing(subject, frame_w, frame_h, VERTICAL_9_16)
+    shifted = attention_shifted_crop(base, subject, 0.1, frame_w, frame_h)
+
+    assert shifted[0] < base[0]
+    assert contains(shifted, subject)
+
+
+def test_attention_shifted_crop_neutral_when_attention_on_subject():
+    """Attention centred on the subject leaves the base composition alone."""
+    frame_w, frame_h = 1920, 1080
+    subject = (200.0, 400.0, 120.0, 120.0)
+    base = crop_rect_containing(subject, frame_w, frame_h, VERTICAL_9_16)
+    attention_x = (subject[0] + subject[2] / 2.0) / frame_w
+    shifted = attention_shifted_crop(base, subject, attention_x, frame_w, frame_h)
+
+    assert shifted[0] == pytest.approx(base[0])
+
+
+def test_attention_shifted_crop_full_frame_has_no_slack():
+    frame_w, frame_h = 1920, 1080
+    full = (0.0, 0.0, float(frame_w), float(frame_h))
+    base = crop_rect_containing(full, frame_w, frame_h, VERTICAL_9_16)
+    shifted = attention_shifted_crop(base, full, 1.0, frame_w, frame_h)
+
+    assert shifted == base
+
+
+def test_compose_wide_shot_without_subjects_is_a_neutral_hold():
+    """The planner emits WIDE shots on purpose (leading unbound seconds); v3
+    must render them as a full-height centre crop, not fail the clip."""
+    shot = Shot(0.0, 3.0, SHOT_WIDE, [], None)
+    composed = _compose_shot(shot, {}, [None, None, None],
+                             np.zeros((1080, 1920), dtype=np.float32),
+                             1920, 1080, VERTICAL_9_16)
+
+    assert composed.layout == LAYOUT_SINGLE
+    assert composed.subjects == []
+    assert composed.crop is not None
+    x, y, w, h = composed.crop
+    assert w / h == pytest.approx(VERTICAL_9_16)
+    assert x >= 0 and y >= 0 and x + w <= 1920 and y + h <= 1080
+    validate_composition([composed], 1920, 1080, VERTICAL_9_16)
+
+
+def test_compose_wide_shot_uses_provided_rect():
+    shot = Shot(0.0, 3.0, SHOT_WIDE, [], (100.0, 200.0, 405.0, 720.0))
+    composed = _compose_shot(shot, {}, [None, None, None],
+                             np.zeros((1080, 1920), dtype=np.float32),
+                             1920, 1080, VERTICAL_9_16)
+
+    assert composed.crop == (100.0, 200.0, 405.0, 720.0)
+    validate_composition([composed], 1920, 1080, VERTICAL_9_16)
+
+
+def test_compose_shot_bystander_bright_spot_cannot_pull_the_crop():
+    """A bright visual blob on a bystander is suppressed below the attention
+    floor, so the crop stays on the speaker instead of being dragged away."""
+    shot = Shot(0.0, 3.0, SHOT_SINGLE, [1], None)
+    spine = _spine_two_tracks()
+    saliency = _saliency_at((1400.0, 400.0, 120.0, 120.0))  # on the bystander
+    composed = _compose_shot(shot, spine, [1, 1, 1], saliency, 1920, 1080, VERTICAL_9_16)
+
+    speaker = spine[1]["boxes"][0]
+    assert contains(composed.crop, speaker)
+    # Attention stayed on the speaker, so the crop is the base composition.
+    base = crop_rect_containing(speaker, 1920, 1080, VERTICAL_9_16)
+    assert abs(composed.crop[0] - base[0]) <= 1.0
+
+
+def test_compose_reaction_shot_pulls_toward_the_reaction():
+    """Pop-the-balloon case: a bright visual off the reactor's face (the
+    balloon) shifts the crop toward it while the reactor stays fully in shot."""
+    shot = Shot(0.0, 3.0, SHOT_REACTION, [2], None)
+    spine = _spine_two_tracks()
+    saliency = _saliency_at((1600.0, 300.0, 100.0, 100.0))  # the balloon, off-face
+    composed = _compose_shot(shot, spine, [1, 1, 1], saliency, 1920, 1080, VERTICAL_9_16)
+
+    reactor = spine[2]["boxes"][0]
+    assert contains(composed.crop, reactor)
+    base = crop_rect_containing(reactor, 1920, 1080, VERTICAL_9_16)
+    assert composed.crop[0] > base[0]  # frame moved right, toward the reaction
+
+
+def test_compose_reaction_shot_no_reaction_stays_on_subject():
+    shot = Shot(0.0, 3.0, SHOT_REACTION, [2], None)
+    spine = _spine_two_tracks()
+    saliency = _saliency_at(spine[2]["boxes"][0])  # attention on the reactor itself
+    composed = _compose_shot(shot, spine, [1, 1, 1], saliency, 1920, 1080, VERTICAL_9_16)
+
+    reactor = spine[2]["boxes"][0]
+    base = crop_rect_containing(reactor, 1920, 1080, VERTICAL_9_16)
+    assert contains(composed.crop, reactor)
+    assert abs(composed.crop[0] - base[0]) <= 1.0
+
+
+def test_speaker_shares_fractions():
+    active = [1, 1, 2, 2, 1]
+    shot = Shot(0.0, 5.0, SHOT_SINGLE, [1, 2], None)
+    assert _speaker_shares(active, shot) == [0.6, 0.4]
+
+
+def test_track_nearest_x_picks_the_key_subject():
+    tracks = _spine_two_tracks()
+    assert _track_nearest_x(tracks, 0.75, 1920) == 2
+    assert _track_nearest_x(tracks, 0.12, 1920) == 1
+    assert _track_nearest_x(tracks, 0.5, 1920) is None  # outside tolerance
+    assert _track_nearest_x(tracks, None, 1920) is None
+
+
+def test_integer_crop_is_even_and_in_frame():
+    rect = (100.3, 50.7, 400.2, 300.9)
+    x, y, w, h = _integer_crop(rect, 1920, 1080)
+    assert w % 2 == 0 and h % 2 == 0
+    assert x >= 0 and y >= 0 and x + w <= 1920 and y + h <= 1080
+    # The integer crop still covers the validated rect's region.
+    assert x <= 100 and y <= 50 and x + w >= 500 and y + h >= 351
+
+
+def test_regular_filtergraph_concats_every_shot():
+    shots = [
+        ComposedShot(0.0, 2.0, LAYOUT_SINGLE, (100.0, 0.0, 405.0, 720.0), []),
+        ComposedShot(2.0, 4.0, LAYOUT_SINGLE, (700.0, 0.0, 405.0, 720.0), []),
+    ]
+    graph = _regular_filtergraph(shots, 1920, 1080, 405, 720)
+    assert graph.count("trim=") == 2
+    assert graph.count("crop=") == 2
+    assert "concat=n=2:v=1:a=0[v]" in graph
+
+
+def test_directive_dicts_accepts_dicts_and_models():
+    raw = [{"start": 1.0, "end": 2.0, "x_position": 0.5, "reason": "causing_reaction"}]
+    assert _directive_dicts(raw) == raw
+
+    class _Stub:
+        start, end, x_position, reason = 1.0, 2.0, 0.5, "referenced"
+
+    assert _directive_dicts([_Stub()]) == [
+        {"start": 1.0, "end": 2.0, "x_position": 0.5, "reason": "referenced"}
+    ]
+
+    class _Model:
+        def model_dump(self):
+            return {"start": 0.0, "end": 1.0, "x_position": 0.2, "reason": "speaking"}
+
+    assert _directive_dicts([_Model()]) == [
+        {"start": 0.0, "end": 1.0, "x_position": 0.2, "reason": "speaking"}
+    ]
+    assert _directive_dicts([{"start": 1.0}]) == []  # incomplete -> dropped
+
+
+def test_aspect_tuple_maps_float_to_integer_ratio():
+    assert _aspect_tuple(9.0 / 16.0) == (9, 16)
+    assert _aspect_tuple(1.0) == (1, 1)
+    assert abs(_aspect_tuple(0.75)[0] / _aspect_tuple(0.75)[1] - 0.75) < 1e-6

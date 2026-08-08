@@ -319,6 +319,16 @@ the smoke test and follow whichever specific branch it reports.
 
 ### 4c. The notebook doesn't exercise the real pipeline or this session's work
 
+**Status (8-aug-2026): owner decision — the notebook is workflow-only.**
+The render/comparison test cells were removed from `openshorts_kaggle.ipynb`
+entirely: the notebook now runs secrets → clone → bootstrap → smoke test and
+prints the public studio URL, and rendering is tested through the real app
+workflow, not notebook scaffolding. The old test cell called
+`reframe_v2.render(..., 0.75)` directly — 3:4, not the shipped 9:16 format,
+and with no transcript — so removing it also removed a wrong-format test path.
+The v2-vs-v3 comparison described below is still the right acceptance method
+(§9 item 5), just done via the app rather than a notebook cell.
+
 `openshorts_kaggle.ipynb` cell 8 (the "end-to-end render test") does this:
 ```python
 SRC = "/kaggle/working/test.mp4"          # manually uploaded, not downloaded
@@ -380,9 +390,20 @@ watching a real render — see §4c point 2 and §6's own note on this.
 
 ## 6. Phase 5 — the one thing left: wire it into the renderer
 
-**Everything above is a tested library that nothing calls yet.** The
-renderer still runs the old per-frame engine (`reframe_v2`) for every clip.
-This section is the actual remaining implementation work.
+**Status (8-aug-2026): implemented.** `reframe_v3.render` exists and the
+`REFRAME_ENGINE=v3` branch is wired into `main.py` (uncommitted as of this
+note; `git status` shows `main.py`, `reframe_v3.py`,
+`openshorts_kaggle.ipynb`, `tests/test_reframe_v3.py` modified). What §6
+describes below is the design the implementation follows; the remaining
+validation is §9 item 5 — watching a real render on Kaggle. Two fixes beyond
+the original §6 spec shipped with it: WIDE shots (planner-produced, no
+subjects) render as a full-height centre hold instead of failing, and the
+per-shot attention map now actually nudges the crop within containment slack
+(previously it was computed and discarded — the reaction case had no effect).
+
+The renderer still runs the old per-frame engine (`reframe_v2`) by default;
+`REFRAME_ENGINE=v3` opts into the new one. The rest of this section is the
+design the implementation follows.
 
 ### 6.1 The hook point already exists
 

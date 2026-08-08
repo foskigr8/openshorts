@@ -258,6 +258,36 @@ def union_box(*boxes: Box) -> Optional[Box]:
     return x0, y0, x1 - x0, y1 - y0
 
 
+def attention_shifted_crop(crop: Rect, subject: Box, attention_x: float,
+                           frame_w: int, frame_h: int) -> Rect:
+    """Shift a crop horizontally toward the attention centre, never losing
+    containment or the target aspect.
+
+    `crop` is the base composition (subject contained, aspect-correct).
+    Containment fixes the crop's x to [sx + sw - cw, sx] (the subject's left
+    edge must not move past the crop's left edge, and its right edge must not
+    move past the crop's right edge); the frame fixes it to [0, frame_w - cw].
+    The crop centre is moved toward `attention_x` (normalized 0-1) within the
+    overlap of those two ranges, so a reaction beside the speaker pulls the
+    frame toward where a human eye actually looks while the speaker stays
+    fully in shot. No feasible shift (e.g. the crop already spans the frame)
+    returns the base crop unchanged.
+
+    Vertical placement is deliberately left untouched: `DEFAULT_HEAD_Y` is a
+    footage-tuned aesthetic, and the failure mode this exists for — a
+    reaction happening beside the speaker — is horizontal.
+    """
+    cx, cy, cw, ch = crop
+    sx, sy, sw, sh = subject
+    lo = max(0.0, sx + sw - cw)                  # subject right edge inside
+    hi = min(float(frame_w - cw), sx)            # subject left edge inside
+    if hi <= lo:
+        return crop
+    target = attention_x * frame_w - cw / 2.0
+    new_x = min(max(target, lo), hi)
+    return new_x, cy, cw, ch
+
+
 # ---------------------------------------------------------------------------
 # Layout decision: one crop, a two-shot, or a split screen
 # ---------------------------------------------------------------------------
@@ -433,3 +463,364 @@ def validate_composition(shots: Sequence[ComposedShot], frame_w: int, frame_h: i
             f"{len(problems)} composition violation(s):\n  "
             + "\n  ".join(problems)
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: clip analysis, static composition, and rendering
+# ---------------------------------------------------------------------------
+
+def _duration_and_size(video_path: str) -> Tuple[float, float, int, int]:
+    """Read the source facts needed by the planner without importing main."""
+    import cv2
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video for v3 reframing: {video_path}")
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0)
+    frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    cap.release()
+    if width <= 0 or height <= 0 or frames <= 0:
+        raise RuntimeError(f"Video has no readable frames: {video_path}")
+    return frames / fps, fps, width, height
+
+
+def _directive_dicts(directives) -> List[dict]:
+    """Accept both FocusDirective models and the planner's plain dict contract."""
+    result = []
+    for directive in directives or []:
+        if isinstance(directive, dict):
+            value = dict(directive)
+        elif hasattr(directive, "model_dump"):
+            value = directive.model_dump()
+        else:
+            value = {name: getattr(directive, name) for name in
+                     ("start", "end", "x_position", "reason")
+                     if hasattr(directive, name)}
+        if {"start", "end", "x_position", "reason"}.issubset(value):
+            result.append(value)
+    return result
+
+
+def _nearest_box(track: dict, timestamp: float) -> Optional[Box]:
+    frames, boxes = track.get("frames") or [], track.get("boxes") or []
+    if not frames or not boxes:
+        return None
+    index = min(range(min(len(frames), len(boxes))),
+                key=lambda i: abs(float(frames[i]) - timestamp))
+    return tuple(float(v) for v in boxes[index])
+
+
+def _track_nearest_x(tracks: Dict[int, dict], x_norm: Optional[float],
+                     frame_w: int, tolerance: float = 0.15) -> Optional[int]:
+    """Track whose median box centre is closest to a normalized x position.
+
+    Used when the scene-context layer names the clip's key subject
+    (`primary_subject_x`) but speaker fusion produced no confident binding —
+    the camera holds whoever the director said the clip is about, instead of
+    whoever happened to be detected the most. Returns None when nothing is
+    within `tolerance` (or no x was given), so callers keep their existing
+    fallback.
+    """
+    if x_norm is None:
+        return None
+    best_id, best_dist = None, tolerance
+    for track_id, track in tracks.items():
+        boxes = track.get("boxes") or []
+        if not boxes:
+            continue
+        med = np.median(np.asarray(boxes, dtype=np.float64), axis=0)
+        cx = (med[0] + med[2] / 2.0) / float(frame_w)
+        dist = abs(cx - x_norm)
+        if dist < best_dist:
+            best_dist, best_id = dist, track_id
+    return best_id
+
+
+def _track_boxes_for_shot(shot, spine_tracks: Dict[int, dict]) -> List[Box]:
+    """Return the planner's median subject box for every subject in a shot."""
+    from shot_planner import crop_rect_for_track
+
+    boxes = []
+    for track_id in shot.track_ids:
+        box = crop_rect_for_track(spine_tracks, track_id, shot.start, shot.end)
+        if box is not None:
+            boxes.append(tuple(float(v) for v in box))
+    return boxes
+
+
+def _speaker_shares(active_tracks: Sequence[Optional[int]], shot) -> List[float]:
+    seconds = range(max(0, int(shot.start)), min(len(active_tracks), int(np.ceil(shot.end))))
+    total = max(1, len(list(seconds)))
+    return [sum(active_tracks[i] == track_id for i in range(max(0, int(shot.start)),
+                                                              min(len(active_tracks), int(np.ceil(shot.end))))) / total
+            for track_id in shot.track_ids]
+
+
+def _frame_at(cap, timestamp: float):
+    import cv2
+
+    cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, timestamp) * 1000.0)
+    ok, frame = cap.read()
+    if not ok:
+        raise RuntimeError(f"Could not sample source frame at {timestamp:.2f}s")
+    return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+
+def _compose_shot(shot, spine_tracks: Dict[int, dict], active_tracks,
+                  saliency_map: np.ndarray, frame_w: int, frame_h: int,
+                  aspect: float) -> ComposedShot:
+    """Resolve ONE planned shot into an immutable composition (pure numpy).
+
+    `saliency_map` is the UNISAL map sampled at the shot's midpoint. The
+    attention decision is made here, once, and baked into the crop — the
+    render loop only holds the resulting rect, so saliency can never cause
+    mid-shot drift (the jitter this engine exists to remove).
+    """
+    from shot_planner import SHOT_REACTION
+
+    subjects = _track_boxes_for_shot(shot, spine_tracks)
+    if not subjects:
+        # WIDE shot: the planner emits these on purpose for leading seconds
+        # with no speaker binding (hold_fill's "nothing to hold onto yet"
+        # case) or when a default wide rect is supplied. Hold the full frame
+        # as a neutral composition rather than failing the whole clip on a
+        # shot type the planner is designed to produce.
+        if shot.crop_rect is not None:
+            crop = tuple(float(v) for v in shot.crop_rect)
+        else:
+            crop = crop_rect_containing(
+                (0.0, 0.0, float(frame_w), float(frame_h)),
+                frame_w, frame_h, aspect)
+        return ComposedShot(shot.start, shot.end, LAYOUT_SINGLE, crop, [])
+
+    midpoint = (shot.start + shot.end) / 2.0
+    faces = []
+    for track_id, track in spine_tracks.items():
+        box = _nearest_box(track, midpoint)
+        if box is None:
+            continue
+        if track_id in shot.track_ids:
+            role = ROLE_REACTOR if shot.shot_type == SHOT_REACTION else ROLE_SPEAKER
+        else:
+            role = ROLE_BYSTANDER
+        faces.append(WeightedFace(box, role))
+    attention = build_attention_map(saliency_map, faces)
+    attention_x = attention_center(attention)[0]
+
+    layout = decide_layout(subjects, _speaker_shares(active_tracks, shot),
+                           frame_w, frame_h, aspect)
+    if layout == LAYOUT_SPLIT:
+        crop = None
+    else:
+        subject = union_box(*subjects)
+        crop = crop_rect_containing(subject, frame_w, frame_h, aspect)
+        # Saliency is a nudge within containment slack, never a free aim:
+        # a reaction beside the speaker pulls the frame toward it, but the
+        # subject containment constraint (the "half a person" fix) still
+        # bounds the result, and validate_composition below re-checks it.
+        crop = attention_shifted_crop(crop, subject, attention_x, frame_w, frame_h)
+    return ComposedShot(shot.start, shot.end, layout, crop, subjects)
+
+
+def compose_shots(shots, spine_tracks: Dict[int, dict], active_tracks,
+                  video_path: str, frame_w: int, frame_h: int,
+                  aspect: float) -> List[ComposedShot]:
+    """Sample each shot once and resolve its immutable composition.
+
+    Saliency is sampled at the midpoint of every shot and is deliberately
+    part of composition rather than the render loop: changing a crop while a
+    shot is running would reintroduce the jitter this engine exists to remove.
+    """
+    import cv2
+    from vendor.pyautoflip.saliency_detector import SaliencyDetector
+
+    detector = SaliencyDetector()
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot sample video for v3 composition: {video_path}")
+
+    composed: List[ComposedShot] = []
+    try:
+        for shot in shots:
+            midpoint = (shot.start + shot.end) / 2.0
+            frame_rgb = _frame_at(cap, midpoint)
+            saliency = detector.detect(frame_rgb)["saliency_map"]
+            composed.append(_compose_shot(
+                shot, spine_tracks, active_tracks, saliency, frame_w, frame_h, aspect))
+    finally:
+        cap.release()
+    return composed
+
+
+def _integer_crop(rect: Rect, frame_w: int, frame_h: int) -> Tuple[int, int, int, int]:
+    """Make an ffmpeg/OpenCV-safe even crop while retaining the validated rect."""
+    x, y, w, h = rect
+    x0, y0 = max(0, int(np.floor(x))), max(0, int(np.floor(y)))
+    x1, y1 = min(frame_w, int(np.ceil(x + w))), min(frame_h, int(np.ceil(y + h)))
+    width, height = max(2, x1 - x0), max(2, y1 - y0)
+    width -= width % 2
+    height -= height % 2
+    x0 = min(x0, frame_w - width)
+    y0 = min(y0, frame_h - height)
+    return x0, y0, width, height
+
+
+def _aspect_tuple(aspect: float) -> Tuple[int, int]:
+    """Integer (w, h) ratio for the vendored split renderer."""
+    if abs(aspect - 1.0) < 1e-9:
+        return (1, 1)
+    if abs(aspect - VERTICAL_9_16) < 1e-9:
+        return (9, 16)
+    return (round(aspect * 1000), 1000)
+
+
+def _regular_filtergraph(composed: Sequence[ComposedShot], frame_w: int, frame_h: int,
+                         out_w: int, out_h: int) -> str:
+    parts, labels = [], []
+    for i, shot in enumerate(composed):
+        if shot.layout == LAYOUT_SPLIT or shot.crop is None:
+            raise ValueError("split shots require the Python split renderer")
+        x, y, w, h = _integer_crop(shot.crop, frame_w, frame_h)
+        label = f"s{i}"
+        parts.append(
+            f"[0:v]trim=start={shot.start:.6f}:end={shot.end:.6f},setpts=PTS-STARTPTS,"
+            f"crop={w}:{h}:{x}:{y},scale={out_w}:{out_h}:flags=lanczos[{label}]"
+        )
+        labels.append(f"[{label}]")
+    if not labels:
+        raise CompositionError("v3 generated an empty shot plan")
+    return ";".join(parts + ["".join(labels) + f"concat=n={len(labels)}:v=1:a=0[v]"])
+
+
+def _render_regular(input_video: str, output_video: str, composed: Sequence[ComposedShot],
+                    frame_w: int, frame_h: int, out_w: int, out_h: int,
+                    ass_filter=None, captioned_output=None) -> None:
+    """Render static single/two shots in one native ffmpeg pass."""
+    import subprocess
+    import reframe_v2
+    from ffmpeg_utils import METADATA_SCRUB, QUALITY_FAST, video_encode_args
+
+    graph = _regular_filtergraph(composed, frame_w, frame_h, out_w, out_h)
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", input_video,
+           "-filter_complex", graph, "-map", "[v]", "-map", "0:a?",
+           *video_encode_args(QUALITY_FAST), "-c:a", "copy", *METADATA_SCRUB,
+           "-movflags", "+faststart", output_video]
+    if ass_filter and captioned_output:
+        cmd += reframe_v2.caption_output_args(ass_filter, captioned_output)
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                   timeout=1800)
+
+
+def _render_with_splits(input_video: str, output_video: str, composed: Sequence[ComposedShot],
+                        frame_w: int, frame_h: int, out_w: int, out_h: int,
+                        aspect: float) -> None:
+    """Render split shots frame-by-frame; regular shots remain static crops.
+
+    This intentionally handles only the split case in Python. The normal path
+    stays an ffmpeg filtergraph, while the vendored split renderer receives the
+    BGR arrays it was designed for.
+    """
+    import cv2
+    import os
+    import subprocess
+    import tempfile
+    from vendor.pyautoflip import render_split_screen_from_centers
+
+    duration, fps, _, _ = _duration_and_size(input_video)
+    cap = cv2.VideoCapture(input_video)
+    fd, silent = tempfile.mkstemp(prefix="openshorts_v3_", suffix=".mp4")
+    os.close(fd)
+    writer = cv2.VideoWriter(silent, cv2.VideoWriter_fourcc(*"mp4v"), fps, (out_w, out_h))
+    if not writer.isOpened():
+        cap.release()
+        raise RuntimeError("Could not open temporary v3 split renderer")
+    try:
+        index = 0
+        aspect_tuple = _aspect_tuple(aspect)
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            timestamp = index / fps
+            shot = next((s for s in composed if s.start <= timestamp < s.end), composed[-1])
+            if shot.layout == LAYOUT_SPLIT:
+                centers = split_centers(shot.subjects, frame_w, frame_h,
+                                        aspect_tuple=aspect_tuple)
+                canvas = render_split_screen_from_centers(frame, centers, aspect_tuple)
+                rendered = cv2.resize(canvas, (out_w, out_h), interpolation=cv2.INTER_LANCZOS4)
+            else:
+                x, y, w, h = _integer_crop(shot.crop, frame_w, frame_h)
+                rendered = cv2.resize(frame[y:y + h, x:x + w], (out_w, out_h),
+                                      interpolation=cv2.INTER_LANCZOS4)
+            writer.write(rendered)
+            index += 1
+    finally:
+        cap.release()
+        writer.release()
+    try:
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", silent, "-i", input_video,
+                        "-map", "0:v:0", "-map", "1:a?", "-c:v", "copy", "-c:a", "copy",
+                        "-movflags", "+faststart", output_video], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=1800)
+    finally:
+        if os.path.exists(silent):
+            os.remove(silent)
+
+
+def render(input_video, final_output_video, aspect_ratio,
+           transcript=None, clip_start=0.0, clip_end=None,
+           focus_directives=None, primary_subject_x=None,
+           ass_filter=None, captioned_output=None):
+    """Full v3 reframe. Errors intentionally propagate; there is no v3→v2 fallback."""
+    import face_spine
+    import main as m
+    import speaker_fusion
+    import shot_planner
+    import reframe_v2
+
+    print("   🚀 Reframe engine v3 (planned static shots)")
+    duration, _, frame_w, frame_h = _duration_and_size(input_video)
+    effective_end = clip_end if clip_end is not None else clip_start + duration
+    tracks = face_spine.build_face_spine(input_video)
+    if not tracks:
+        raise RuntimeError("Reframe v3 found no face tracks; refusing to silently fall back")
+
+    asd_boxes = []
+    try:
+        import asd_worker
+        if asd_worker.available():
+            asd_boxes = asd_worker.score_clip(input_video, m.detect_face_candidates).get("per_second_box") or []
+    except Exception as exc:
+        print(f"   ⚠️ LR-ASD unavailable for v3 ({type(exc).__name__}: {exc})")
+    segments = (transcript or {}).get("segments", [])
+    _, active = speaker_fusion.fuse_speaker_tracks(
+        asd_boxes, tracks, segments, clip_start, effective_end)
+    if not any(track is not None for track in active):
+        # A transcript/ASD gap must not turn a known person into an untracked
+        # full-frame crop. Prefer the scene context's key subject when it
+        # names one; otherwise hold the most continuously observed identity.
+        fallback = _track_nearest_x(tracks, primary_subject_x, frame_w)
+        if fallback is None:
+            fallback = max(tracks, key=lambda track_id: len(tracks[track_id].get("frames") or []))
+        active = [fallback] * max(1, int(np.ceil(duration)))
+        print("   ⚠️ No confident active-speaker binding; holding a single fallback track")
+
+    planned = shot_planner.plan_shots(active, tracks, total_duration=duration)
+    planned = shot_planner.insert_reaction_shots(
+        planned, _directive_dicts(focus_directives), tracks, frame_w)
+    composed = compose_shots(planned, tracks, active, input_video, frame_w, frame_h, aspect_ratio)
+    validate_composition(composed, frame_w, frame_h, aspect_ratio)
+
+    out_w, out_h = reframe_v2.delivery_size(frame_w, frame_h, aspect_ratio)
+    if any(shot.layout == LAYOUT_SPLIT for shot in composed):
+        if ass_filter or captioned_output:
+            raise RuntimeError("v3 split-screen captions are not implemented; refusing to misplace captions")
+        _render_with_splits(input_video, final_output_video, composed, frame_w, frame_h,
+                            out_w, out_h, aspect_ratio)
+    else:
+        _render_regular(input_video, final_output_video, composed, frame_w, frame_h, out_w, out_h,
+                        ass_filter=ass_filter, captioned_output=captioned_output)
+    print(f"   ✅ v3 clip saved to {final_output_video} ({len(composed)} static shot(s))")
+    return True, [(shot.start, shot.end) for shot in composed]

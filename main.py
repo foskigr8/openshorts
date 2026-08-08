@@ -2105,17 +2105,38 @@ def process_video_to_vertical(input_video, final_output_video, aspect_ratio=ASPE
                               focus_directives=None, primary_subject_x=None,
                               ass_filter=None, captioned_output=None):
     """
-    Core logic to reframe a horizontal video to a target aspect ratio using
-    scene detection and Active Speaker Tracking (MediaPipe).
+    Core logic to reframe a horizontal video to a target aspect ratio.
+    Engine dispatch via REFRAME_ENGINE: "v3" plans the whole shot list up
+    front (face_spine tracks + LR-ASD + UNISAL saliency) and fails loud on
+    composition violations; "v2" (default) is the ffmpeg-native per-scene
+    engine (MediaPipe faces + YOLO bodies + LR-ASD); "v1" is the legacy
+    per-frame loop. Any v2 failure falls back to v1; v3 never falls back.
     aspect_ratio: width/height of the output (9/16 vertical, 1.0 square).
     transcript/clip_start/clip_end/focus_directives: optional, see
     render_clip's docstring.
     """
     script_start_time = time.time()
 
+    engine = os.environ.get("REFRAME_ENGINE", "v2").strip().lower()
+
+    # v3 plans and validates the full shot list before rendering. It must fail
+    # loud: silently falling back to v2 would put the old jitter/containment
+    # failures back into a deliverable video.
+    if engine == "v3":
+        import reframe_v3
+        t0 = time.time()
+        result = reframe_v3.render(input_video, final_output_video, aspect_ratio,
+                                   transcript=transcript, clip_start=clip_start, clip_end=clip_end,
+                                   focus_directives=focus_directives,
+                                   primary_subject_x=primary_subject_x,
+                                   ass_filter=ass_filter,
+                                   captioned_output=captioned_output)
+        print(f"   ⏱️ Reframe v3 total: {time.time() - t0:.1f}s")
+        return result
+
     # v2 engine: analyze downscaled, render natively in ffmpeg. Any failure
     # falls back to the v1 frame loop below so a v2 edge case can't kill jobs.
-    if os.environ.get("REFRAME_ENGINE", "v2").strip().lower() != "v1":
+    if engine != "v1":
         try:
             import reframe_v2
             t0 = time.time()
