@@ -29,7 +29,12 @@ though face_spine's own dict keys are ints; load_track_names converts back.
 from __future__ import annotations
 
 import json
-import math
+
+# The transcript-segments -> per-second-label conversion is a production
+# concern (Phase 3's fusion needs it too, to know when each diarized speaker
+# is talking), so it lives in speaker_fusion.py and this eval module reuses
+# it rather than keeping a second copy that could drift.
+from speaker_fusion import per_second_speaker_label as per_second_speaker_from_transcript  # noqa: F401,E501
 
 
 def load_speaker_names(path):
@@ -65,35 +70,4 @@ def load_track_names(path):
             result[int(k)] = v
         except (TypeError, ValueError):
             continue
-    return result
-
-
-def per_second_speaker_from_transcript(segments, clip_start, clip_end, speaker_names=None):
-    """Derive per-second ground truth from diarized transcript segments.
-
-    segments: transcript_result["segments"], each with 'start', 'end',
-        'speaker' (assemblyai backend; see transcribe_backends.py) — the
-        SAME segments the rest of the pipeline reads, so this is not a
-        parallel transcript, it is a read of the existing one.
-    clip_start/clip_end: absolute seconds into the source video.
-    speaker_names: optional {"A": "host", ...} to resolve labels to names
-        (see load_speaker_names above); unresolved labels pass through as-is.
-
-    Returns a list, index = second offset from clip_start, value = the
-    speaker identity active that second, or None if no segment covers it
-    (silence, cross-talk gap — not scored by speaker_on_screen_pct).
-    """
-    speaker_names = speaker_names or {}
-    duration = int(clip_end - clip_start)
-    result = [None] * max(0, duration)
-    for seg in segments or []:
-        s, e = float(seg.get("start", 0)), float(seg.get("end", 0))
-        speaker = seg.get("speaker")
-        if speaker is None or e <= clip_start or s >= clip_end:
-            continue
-        label = speaker_names.get(speaker, speaker)
-        lo = max(0, int(s - clip_start))
-        hi = min(duration, math.ceil(e - clip_start))
-        for i in range(lo, hi):
-            result[i] = label
     return result

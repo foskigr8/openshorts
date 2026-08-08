@@ -20,77 +20,12 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 from eval import metrics
-
-
-def _box_iou(a, b) -> float:
-    ax, ay, aw, ah = a
-    bx, by, bw, bh = b
-    ix = max(0.0, min(ax + aw, bx + bw) - max(ax, bx))
-    iy = max(0.0, min(ay + ah, by + bh) - max(ay, by))
-    inter = ix * iy
-    union = aw * ah + bw * bh - inter
-    return inter / union if union > 0 else 0.0
-
-
-def _nearest_box_at(track: dict, timestamp: float, time_tolerance: float = 0.5):
-    """The track's box from the detection nearest `timestamp`, or None if
-    the nearest detection is further than `time_tolerance` away (the track
-    was not on screen at this moment).
-    """
-    frames = track.get("frames") or []
-    boxes = track.get("boxes") or []
-    if not frames:
-        return None
-    best_i, best_dt = None, None
-    for i, t in enumerate(frames):
-        dt = abs(t - timestamp)
-        if best_dt is None or dt < best_dt:
-            best_i, best_dt = i, dt
-    if best_i is None or best_dt > time_tolerance:
-        return None
-    return boxes[best_i]
-
-
-def match_box_to_track(spine_tracks: Dict[int, dict], timestamp: float, box,
-                       iou_threshold: float = 0.3,
-                       time_tolerance: float = 0.5) -> Optional[int]:
-    """Which face_spine track a predicted (timestamp, box) belongs to.
-
-    Pure position match against KNOWN tracks (Phase 1's output), not the
-    ambiguous same-frame candidate matching that caused the original binding
-    bug (reframe_v2._apply_asd_speaker_boost) — there the two id spaces were
-    unrelated and had to be reconciled live; here the tracks are already the
-    ground truth for "who is on screen," so this is a lookup, not a decision.
-
-    Returns the best-IoU track id at or above `iou_threshold`, or None if no
-    track's box overlaps enough (predicted box does not correspond to any
-    known person — e.g. a false positive on background).
-    """
-    best_id, best_iou = None, iou_threshold
-    for track_id, track in spine_tracks.items():
-        candidate = _nearest_box_at(track, timestamp, time_tolerance)
-        if candidate is None:
-            continue
-        iou = _box_iou(box, candidate)
-        if iou >= best_iou:
-            best_id, best_iou = track_id, iou
-    return best_id
-
-
-def asd_predicted_track_per_second(asd_per_second_boxes: List[Optional[tuple]],
-                                   spine_tracks: Dict[int, dict],
-                                   iou_threshold: float = 0.3) -> List[Optional[int]]:
-    """One model's raw per-second output -> per-second track id, via the
-    face spine. `asd_per_second_boxes[i]` is the model's predicted
-    active-speaker box at second i, or None where the model made no call.
-    """
-    result = []
-    for t, box in enumerate(asd_per_second_boxes):
-        if box is None:
-            result.append(None)
-            continue
-        result.append(match_box_to_track(spine_tracks, float(t), box, iou_threshold))
-    return result
+# Position-matching (ASD box -> face_spine track) is a production concern —
+# Phase 3's fusion (speaker_fusion.py) needs the exact same lookup, so it
+# lives there and this eval module imports it, not the other way around.
+from speaker_fusion import (  # noqa: F401 (re-exported for existing callers)
+    _box_iou, _nearest_box_at, match_box_to_track, asd_predicted_track_per_second,
+)
 
 
 def expected_track_per_second(track_names: Dict[int, str],
