@@ -30,12 +30,20 @@ clean or already handled separately.
 
 ## 1. Phase 6 — GPU parity for the v3 path (do this first of the three)
 
-### Why this is real, not speculative
+### Why this is real, not speculative — and a warning about trusting docstrings
 
 `gpu_affinity.py`'s own docstring claims per-worker GPU assignment is fully
-wired through "the reframe, clip-cut and caption-burn call sites" — but that
-docstring describes the **old `reframe_v2` path, which no longer exists**.
-Reading the current `reframe_v3.py` shows two concrete gaps:
+wired through "the reframe, clip-cut and caption-burn call sites." **Do not
+trust that claim just because it's written down.** It describes the old
+`reframe_v2` path, and per the owner's explicit correction, v2 never actually
+achieved multi-GPU utilization in practice — the docstring describes intent
+or an unverified belief, not a measured result. Treat every claim in this
+section, including ones from this document, as needing its own
+`nvidia-smi` proof, not as settled fact because code exists that looks like
+it should work.
+
+Reading the current `reframe_v3.py` shows two concrete gaps versus what that
+docstring describes:
 
 **1a. `asd_worker.score_clip` is called without a device.**
 ```python
@@ -59,14 +67,16 @@ asd_boxes = asd_worker.score_clip(
     input_video, face_spine.detect_faces_per_frame,
     device=gpu_affinity.current_device()).get("per_second_box") or []
 ```
-Note `face_spine.build_face_spine(input_video)` (called just above it in the
-same function) does NOT have this problem — `face_spine._resolve_ctx_id`
-already falls back to `gpu_affinity.current_device()` internally when no
-device is passed (`face_spine.py:81-98`). Confirm this by reading that
-function before assuming `asd_worker` needs the same internal fallback vs.
-an explicit pass-through at the call site — either fixes it, but match
-whichever pattern is more consistent with the rest of the file rather than
-inventing a third approach.
+`face_spine.build_face_spine(input_video)` (called just above it in the same
+function) at least *resolves* a device via `face_spine._resolve_ctx_id`
+falling back to `gpu_affinity.current_device()` when none is passed
+(`face_spine.py:81-98`) — but resolving a ctx_id is not the same as proving
+InsightFace's ONNX session actually executes on that GPU. **Verify this one
+too, empirically, rather than assuming it already works** because the code
+looks right — check GPU utilization during the face-spine stage specifically
+(not just the render as a whole) as part of §1's `nvidia-smi` verification
+below. If it turns out face_spine ISN'T actually landing on the assigned GPU
+either, fix that here rather than treating it as a solved reference case.
 
 **1b. `reframe_v3`'s own ffmpeg subprocess calls never resolve a worker GPU.**
 Both render paths build raw `ffmpeg` command lists with no hwaccel args at
@@ -87,25 +97,37 @@ encode stage runs on whatever device ffmpeg defaults to, not the worker
 thread's assigned GPU — the same class of bug §1a describes, in a different
 call site.
 
-**Fix:** the deleted `reframe_v2.py` solved exactly this — recover it from
-git history to see the actual working pattern rather than guessing ffmpeg
-hwaccel flag syntax from memory:
-```bash
-git show ff31021^:reframe_v2.py | grep -n "gpu_affinity\|worker_gpu" 
-```
-Its `render()` function opens with:
-```python
-worker_gpu = gpu_affinity.current_device()
-```
-then threads `worker_gpu` through to wherever it builds `-hwaccel`/CUDA
-filter device args (search the surrounding ~50-100 lines and downstream
-filter-graph construction in that recovered copy for how `worker_gpu` gets
-used — it may feed CUDA filter names like `scale_cuda`/`hwupload_cuda`
-directly, or an explicit ffmpeg device flag, or both, depending on which
-code path). Port that pattern into `_render_regular` and
-`_render_with_splits`, don't invent a new one. Check
-`ffmpeg_utils.video_encode_args` first too — it's already imported for
-encoder args and may partially own this already.
+**Do NOT copy `reframe_v2.py`'s approach to this.** An earlier version of
+this document pointed at v2's old `worker_gpu = gpu_affinity.current_device()`
+wiring as "the working pattern to port." **That was wrong.** The code being
+present in v2 is not evidence it worked — nobody ever confirmed with
+`nvidia-smi` that GPU 1 actually got used for v2's ffmpeg stage, and per the
+owner's explicit correction, it did not: v2 never actually utilized the
+second GPU, regardless of what its code or `gpu_affinity.py`'s docstring
+claimed. Do not read v2's source for this at all. This rebuild is being done
+from the ground up specifically so it isn't quietly inheriting v2's unproven
+assumptions — copying its ffmpeg/CUDA wiring here would be exactly that
+mistake again, just in v3's code instead of v2's.
+
+**Build this fresh, and prove it, don't assume it:**
+1. Establish what ffmpeg actually needs to run its decode/filter/encode
+   pipeline on a specific GPU — this means real CUDA hwaccel flags
+   (`-hwaccel cuda -hwaccel_device N` on the input side, and/or CUDA-aware
+   filters if the filtergraph should also run on-GPU) threaded from
+   `gpu_affinity.current_device()` into the `cmd` list in both
+   `_render_regular` and `_render_with_splits`. Verify the exact flags
+   against current ffmpeg/nvenc documentation or a working local test, not
+   against any code that already exists in this repo's history.
+2. **Prove it empirically before calling it done.** Run 2+ concurrent clip
+   renders on the actual 2×T4 Kaggle host and watch `nvidia-smi` DURING the
+   render — both GPUs must show real utilization, not just be theoretically
+   addressed by a flag. A flag that's present but silently ignored by ffmpeg
+   (wrong syntax, unsupported filter, falls back to CPU) is functionally the
+   same failure as not having it at all, and is exactly the kind of gap that
+   went unnoticed in v2 for as long as it did.
+3. Check `ffmpeg_utils.video_encode_args` for what it already owns re:
+   device selection — but verify its actual behavior by reading it and
+   testing it, not by assuming it's correct because it exists.
 
 ### Verification for Phase 6
 No unit test can prove GPU placement — this needs a real 2×T4 host.
@@ -241,8 +263,13 @@ Treat §1 and §2 as the actual actionable work in this document.
 git log --oneline -20                        # full history through the v2 removal
 cat vendor/pyautoflip/README.md              # pyautoflip decision, if §4 comes up
 grep -n "def score_clip" -A 15 asd_worker.py # device= param §1a needs to use
-grep -n "gpu_affinity" face_spine.py         # the pattern that already works, to mirror
-git show ff31021^:reframe_v2.py | grep -n "gpu_affinity\|worker_gpu"  # how v2 solved §1b, before deletion
+grep -n "gpu_affinity" face_spine.py         # ctx_id resolution to verify empirically, §1a
+nvidia-smi                                    # the only real source of truth for §1 — not git history
 python3 -m pytest tests/test_reframe_v3.py tests/test_shot_planner.py \
   tests/test_face_spine.py -q                # confirm the 175-test baseline still holds
 ```
+
+**Do not run `git show` against any pre-deletion `reframe_v2.py` commit for
+GPU/ffmpeg wiring guidance.** That file's approach to this problem is
+unverified and, per the owner, did not actually work — reading it for this
+purpose is how the mistake in an earlier version of this document happened.
