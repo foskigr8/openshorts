@@ -65,6 +65,17 @@ MIN_REACTION_WINDOW_SECONDS = 0.3
 
 DIRECTIVE_PAYOFF_REASONS = ("causing_reaction", "referenced")
 
+# Corroboration gate defaults (see is_directive_corroborated below). A real
+# documented failure: Gemini hallucinated a causing_reaction beat with
+# nobody actually reacting at that timestamp (HANDOFF_FRAMING.md). Kept low
+# on purpose -- this is a cheap position-based proxy for "something is
+# actually happening here," not a real gesture/expression detector, and a
+# false rejection (blocking a genuine but visually subtle reaction) is worse
+# than a false acceptance for this specific use, since a rejected directive
+# just means the base shot list is used instead -- never a broken render.
+MIN_CORROBORATION_DETECTIONS = 1
+MIN_CORROBORATION_MOTION_FRAC = 0.03
+
 
 @dataclass
 class Shot:
@@ -351,18 +362,89 @@ def resolve_directive_track(x_position: float, spine_tracks: Dict[int, dict],
     return best_id
 
 
+def _track_positional_motion(track: dict, start: float, end: float) -> Optional[float]:
+    """How much `track`'s box centre moved within [start, end), normalized
+    by its own average box width (so the number means the same thing for a
+    tight close-up and a wide shot). None if there are no detections in the
+    window at all.
+    """
+    frames = track.get("frames") or []
+    boxes = track.get("boxes") or []
+    in_span = [b for t, b in zip(frames, boxes) if start <= t < end]
+    if not in_span:
+        return None
+    centres_x = [b[0] + b[2] / 2.0 for b in in_span]
+    centres_y = [b[1] + b[3] / 2.0 for b in in_span]
+    avg_w = sum(b[2] for b in in_span) / len(in_span)
+    if avg_w <= 0:
+        return 0.0
+    dx = max(centres_x) - min(centres_x)
+    dy = max(centres_y) - min(centres_y)
+    return ((dx ** 2 + dy ** 2) ** 0.5) / avg_w
+
+
+def is_directive_corroborated(spine_tracks: Dict[int, dict], track_id: int,
+                              start: float, end: float,
+                              min_detections: int = MIN_CORROBORATION_DETECTIONS,
+                              min_motion_frac: float = MIN_CORROBORATION_MOTION_FRAC
+                              ) -> bool:
+    """Does independent evidence — the face spine's OWN detections, already
+    computed for other reasons, not a second Gemini call — support a
+    causing_reaction/referenced directive pointing at `track_id` during
+    [start, end)?
+
+    Two checks, both cheap and both already-available data:
+      1. PRESENCE: the track must actually have detections in the window at
+         all. This alone catches the documented failure mode directly — a
+         directive pointing at a moment/person where nothing was really
+         there (HANDOFF_FRAMING.md's hallucinated causing_reaction beat).
+      2. MOTION (soft, skipped when too few samples to judge): some minimum
+         positional movement, since a "causing_reaction" moment is
+         definitionally someone DOING something, not sitting still. Skipped
+         rather than enforced when there is only one detection in the
+         window — a single sample cannot prove or disprove movement, and
+         penalizing sparse-but-real evidence would reject genuine reactions
+         on tracks the spine only sampled lightly.
+
+    This never calls any model — it is a read of data Phase 1/3 already
+    computed, so it adds no latency and no API cost to the pipeline.
+    """
+    track = spine_tracks.get(track_id)
+    if not track:
+        return False
+    frames = track.get("frames") or []
+    n_in_span = sum(1 for t in frames if start <= t < end)
+    if n_in_span < min_detections:
+        return False
+    motion = _track_positional_motion(track, start, end)
+    if motion is None:
+        return False
+    if n_in_span >= 2 and motion < min_motion_frac:
+        return False
+    return True
+
+
 def insert_reaction_shots(shots: List[Shot], directives: List[dict],
                           spine_tracks: Dict[int, dict], frame_width: float,
                           max_reaction_seconds: float = DEFAULT_MAX_REACTION_SECONDS,
-                          min_shot_seconds: float = 1.2) -> List[Shot]:
+                          min_shot_seconds: float = 1.2,
+                          require_corroboration: bool = True) -> List[Shot]:
     """For each `causing_reaction`/`referenced` directive (gemini_worker's
     "show the cause, not the reaction" / "cut to who was referenced" rule),
     resolve which track it points at and — if that differs from what the
-    base shot list already frames there — splice in a bounded REACTION shot,
+    base shot list already frames there, AND independent evidence backs it
+    up (`is_directive_corroborated`) — splice in a bounded REACTION shot,
     then resume the original target. Directives with any other `reason`
     (`speaking`, `reacting`) are not payoff moments and are ignored here;
     they already inform who the SPEAKING track is via the transcript/ASD
     fusion that built the base shot list.
+
+    The corroboration check exists because a director call CAN be wrong (a
+    real, documented case: HANDOFF_FRAMING.md's hallucinated causing_reaction
+    beat with nobody actually reacting) — this is what stops that failure
+    from ever reaching the render, regardless of which model produced the
+    directive. `require_corroboration=False` is an escape hatch for
+    debugging/comparison only, not meant to run in production.
 
     `directives` are plain dicts matching gemini_worker.FocusDirective's
     fields (`start`, `end`, `x_position`, `reason`) — accepted as dicts
@@ -381,6 +463,9 @@ def insert_reaction_shots(shots: List[Shot], directives: List[dict],
         w_start = max(d["start"], mid - half)
         w_end = min(d["end"], mid + half)
         if w_end - w_start < MIN_REACTION_WINDOW_SECONDS:
+            continue
+        if require_corroboration and not is_directive_corroborated(
+                spine_tracks, track, w_start, w_end):
             continue
         rect = crop_rect_for_track(spine_tracks, track, w_start, w_end)
         result = _splice_window(result, w_start, w_end, SHOT_REACTION, [track],

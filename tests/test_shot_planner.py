@@ -270,6 +270,9 @@ def test_resolve_directive_track_none_when_nothing_close_enough():
 
 
 def test_insert_reaction_shot_for_causing_reaction_directive():
+    # require_corroboration=False here: these fixtures test the SPLICE
+    # mechanics (resolve -> bound -> insert), not the corroboration gate --
+    # that gate has its own tests below, including on this exact scenario.
     spine = _spine({
         0: [(float(i), (0.0, 0.0, 100.0, 100.0)) for i in range(10)],
         1: [(float(i), (900.0, 0.0, 100.0, 100.0)) for i in range(10)],
@@ -277,7 +280,7 @@ def test_insert_reaction_shot_for_causing_reaction_directive():
     shots = [sp.Shot(0.0, 10.0, sp.SHOT_SINGLE, [0], (0, 0, 100, 100))]
     directives = [{"start": 4.0, "end": 6.0, "x_position": 0.95, "reason": "causing_reaction"}]
     result = sp.insert_reaction_shots(shots, directives, spine, frame_width=1000.0,
-                                      min_shot_seconds=1.0)
+                                      min_shot_seconds=1.0, require_corroboration=False)
     assert len(result) == 3
     assert result[1].shot_type == sp.SHOT_REACTION
     assert result[1].track_ids == [1]
@@ -294,7 +297,7 @@ def test_insert_reaction_ignores_non_payoff_reasons():
 def test_insert_reaction_window_bounded_by_max_reaction_seconds():
     spine = _spine({
         0: [(float(i), (0.0, 0.0, 10.0, 10.0)) for i in range(20)],
-        1: [(float(i), (900.0, 0.0, 10.0, 10.0)) for i in range(20)],  # near x_position=0.9 of 1000
+        1: [(float(i), (900.0 + i, 0.0, 10.0, 10.0)) for i in range(20)],  # slight drift = real motion
     })
     shots = [sp.Shot(0.0, 20.0, sp.SHOT_SINGLE, [0], None)]
     # A long 10s directive window -- the inserted reaction shot must still
@@ -304,6 +307,70 @@ def test_insert_reaction_window_bounded_by_max_reaction_seconds():
                                       max_reaction_seconds=2.0, min_shot_seconds=1.0)
     reaction = [s for s in result if s.shot_type == sp.SHOT_REACTION][0]
     assert reaction.duration <= 2.0 + 1e-9
+
+
+# ---------------------------------------------------------------------------
+# is_directive_corroborated / the corroboration gate — the actual fix for
+# a hallucinated directive reaching the render (HANDOFF_FRAMING.md's
+# documented causing_reaction beat with nobody actually reacting)
+# ---------------------------------------------------------------------------
+
+def test_corroborated_when_track_absent_entirely():
+    spine = _spine({0: [(0.0, (0, 0, 10, 10))]})  # nothing near t=5
+    assert sp.is_directive_corroborated(spine, 0, 5.0, 6.0) is False
+
+
+def test_corroborated_when_track_id_unknown():
+    spine = _spine({0: [(5.0, (0, 0, 10, 10))]})
+    assert sp.is_directive_corroborated(spine, 99, 5.0, 6.0) is False
+
+
+def test_not_corroborated_when_perfectly_static():
+    # Two detections in the window, box never moves at all -- weak evidence
+    # anything reaction-worthy is happening (this is exactly the scenario
+    # the earlier splice-mechanics tests above bypass with require_corroboration=False).
+    spine = _spine({0: [(5.0, (0.0, 0.0, 100.0, 100.0)), (5.5, (0.0, 0.0, 100.0, 100.0))]})
+    assert sp.is_directive_corroborated(spine, 0, 5.0, 6.0) is False
+
+
+def test_corroborated_when_visible_motion():
+    spine = _spine({0: [(5.0, (0.0, 0.0, 100.0, 100.0)), (5.5, (20.0, 0.0, 100.0, 100.0))]})
+    assert sp.is_directive_corroborated(spine, 0, 5.0, 6.0) is True
+
+
+def test_corroboration_falls_back_to_presence_only_for_single_detection():
+    # Only one sample in the window -- cannot prove or disprove movement,
+    # so a single real detection should NOT be penalized for it.
+    spine = _spine({0: [(5.2, (0.0, 0.0, 100.0, 100.0))]})
+    assert sp.is_directive_corroborated(spine, 0, 5.0, 6.0) is True
+
+
+def test_insert_reaction_shots_rejects_uncorroborated_directive_by_default():
+    # Same scenario as the splice-mechanics test above, but WITHOUT
+    # disabling corroboration -- the perfectly static track must now be
+    # rejected, and the base shot list must come back unchanged.
+    spine = _spine({
+        0: [(float(i), (0.0, 0.0, 100.0, 100.0)) for i in range(10)],
+        1: [(float(i), (900.0, 0.0, 100.0, 100.0)) for i in range(10)],  # zero motion
+    })
+    shots = [sp.Shot(0.0, 10.0, sp.SHOT_SINGLE, [0], (0, 0, 100, 100))]
+    directives = [{"start": 4.0, "end": 6.0, "x_position": 0.95, "reason": "causing_reaction"}]
+    result = sp.insert_reaction_shots(shots, directives, spine, frame_width=1000.0,
+                                      min_shot_seconds=1.0)
+    assert result == shots
+
+
+def test_insert_reaction_shots_accepts_corroborated_directive_by_default():
+    spine = _spine({
+        0: [(float(i), (0.0, 0.0, 100.0, 100.0)) for i in range(10)],
+        1: [(float(i), (900.0 + i * 5, 0.0, 100.0, 100.0)) for i in range(10)],  # visible motion
+    })
+    shots = [sp.Shot(0.0, 10.0, sp.SHOT_SINGLE, [0], (0, 0, 100, 100))]
+    directives = [{"start": 4.0, "end": 6.0, "x_position": 0.95, "reason": "causing_reaction"}]
+    result = sp.insert_reaction_shots(shots, directives, spine, frame_width=1000.0,
+                                      min_shot_seconds=1.0)
+    assert len(result) == 3
+    assert result[1].shot_type == sp.SHOT_REACTION
 
 
 # ---------------------------------------------------------------------------
