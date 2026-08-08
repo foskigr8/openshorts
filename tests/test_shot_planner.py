@@ -1,0 +1,350 @@
+"""shot_planner.py is the actual jitter fix and the actual "no re-centering
+after a cut" fix — the two most specific, most repeated complaints in this
+rebuild. Pure Python, no video/GPU, so every claim here is checked directly.
+"""
+import shot_planner as sp
+
+
+def _spine(tracks):
+    """tracks: {track_id: [(t, box), ...]} -> face_spine-shaped dict."""
+    return {
+        tid: {"frames": [t for t, _ in samples],
+              "boxes": [b for _, b in samples]}
+        for tid, samples in tracks.items()
+    }
+
+
+# ---------------------------------------------------------------------------
+# hold_fill
+# ---------------------------------------------------------------------------
+
+def test_hold_fill_carries_forward():
+    samples = [(0.0, 0), (1.0, None), (2.0, None), (3.0, 1)]
+    assert sp.hold_fill(samples) == [(0.0, 0), (1.0, 0), (2.0, 0), (3.0, 1)]
+
+
+def test_hold_fill_leading_none_stays_none():
+    samples = [(0.0, None), (1.0, None), (2.0, 0)]
+    assert sp.hold_fill(samples) == [(0.0, None), (1.0, None), (2.0, 0)]
+
+
+# ---------------------------------------------------------------------------
+# raw_runs
+# ---------------------------------------------------------------------------
+
+def test_raw_runs_basic_segmentation():
+    filled = [(0.0, 0), (1.0, 0), (2.0, 1), (3.0, 1)]
+    runs = sp.raw_runs(filled, total_duration=4.0)
+    assert runs == [(0.0, 2.0, 0), (2.0, 4.0, 1)]
+
+
+def test_raw_runs_coalesces_non_adjacent_equal_values():
+    filled = [(0.0, 0), (1.0, 1), (2.0, 0)]
+    runs = sp.raw_runs(filled, total_duration=3.0)
+    # 0 at [0,1), 1 at [1,2), 0 at [2,3) -- NOT coalesced across the 1 in between
+    assert runs == [(0.0, 1.0, 0), (1.0, 2.0, 1), (2.0, 3.0, 0)]
+
+
+def test_raw_runs_empty_input():
+    assert sp.raw_runs([], total_duration=10.0) == []
+
+
+# ---------------------------------------------------------------------------
+# split_at_forced_boundaries — the "half a person after a cut" fix
+# ---------------------------------------------------------------------------
+
+def test_split_at_forced_boundary_inside_a_run():
+    runs = [(0.0, 10.0, 0)]
+    result = sp.split_at_forced_boundaries(runs, [5.0])
+    assert result == [(0.0, 5.0, 0), (5.0, 10.0, 0)]
+
+
+def test_split_at_forced_boundary_ignores_boundary_outside_any_run():
+    runs = [(0.0, 5.0, 0), (5.0, 10.0, 1)]
+    # 5.0 sits exactly ON the existing boundary already -- no-op, not double-split.
+    result = sp.split_at_forced_boundaries(runs, [5.0])
+    assert result == runs
+
+
+def test_split_at_multiple_forced_boundaries_in_one_run():
+    runs = [(0.0, 10.0, 0)]
+    result = sp.split_at_forced_boundaries(runs, [3.0, 7.0])
+    assert result == [(0.0, 3.0, 0), (3.0, 7.0, 0), (7.0, 10.0, 0)]
+
+
+def test_split_at_forced_boundaries_with_none_is_noop():
+    runs = [(0.0, 10.0, 0)]
+    assert sp.split_at_forced_boundaries(runs, None) == runs
+
+
+# ---------------------------------------------------------------------------
+# merge_short_runs — the min-shot-duration / no-jitter guarantee
+# ---------------------------------------------------------------------------
+
+def test_short_run_reabsorbed_into_preceding():
+    # A 0.3s flicker to track 1 in the middle of a long track-0 hold.
+    runs = [(0.0, 5.0, 0), (5.0, 5.3, 1), (5.3, 10.0, 0)]
+    result = sp.merge_short_runs(runs, min_shot_seconds=1.2, forced_boundaries=None)
+    assert result == [(0.0, 10.0, 0)]  # fully reabsorbed, one continuous shot
+
+
+def test_run_meeting_minimum_survives():
+    runs = [(0.0, 5.0, 0), (5.0, 7.0, 1), (7.0, 10.0, 0)]
+    result = sp.merge_short_runs(runs, min_shot_seconds=1.2, forced_boundaries=None)
+    assert result == [(0.0, 5.0, 0), (5.0, 7.0, 1), (7.0, 10.0, 0)]
+
+
+def test_first_run_kept_even_if_short():
+    runs = [(0.0, 0.5, 0), (0.5, 10.0, 1)]
+    result = sp.merge_short_runs(runs, min_shot_seconds=1.2, forced_boundaries=None)
+    assert result == [(0.0, 0.5, 0), (0.5, 10.0, 1)]
+
+
+def test_short_run_at_forced_boundary_is_never_reabsorbed():
+    # A splice point forces a real cut even if the resulting shot is short --
+    # the video is physically discontinuous there, it cannot be smoothed away.
+    runs = [(0.0, 5.0, 0), (5.0, 5.3, 0)]  # same target both sides, but forced
+    result = sp.merge_short_runs(runs, min_shot_seconds=1.2, forced_boundaries=[5.0])
+    assert result == [(0.0, 5.0, 0), (5.0, 5.3, 0)]
+
+
+def test_adjacent_equal_targets_coalesce_after_reabsorption():
+    # X, then a short Y blip, then X again with a normal duration -- after Y
+    # reabsorbs into the first X, the trailing X run should merge in too.
+    runs = [(0.0, 5.0, 0), (5.0, 5.3, 1), (5.3, 10.0, 0)]
+    result = sp.merge_short_runs(runs, min_shot_seconds=1.2, forced_boundaries=None)
+    assert result == [(0.0, 10.0, 0)]
+
+
+def test_cascading_reabsorption_across_three_short_runs():
+    runs = [(0.0, 5.0, 0), (5.0, 5.2, 1), (5.2, 5.4, 2), (5.4, 10.0, 0)]
+    result = sp.merge_short_runs(runs, min_shot_seconds=1.2, forced_boundaries=None)
+    assert result == [(0.0, 10.0, 0)]
+
+
+# ---------------------------------------------------------------------------
+# crop_rect_for_track — the static-box computation
+# ---------------------------------------------------------------------------
+
+def test_crop_rect_is_median_not_mean_or_union():
+    spine = _spine({0: [(0.0, (0, 0, 10, 10)), (1.0, (0, 0, 10, 10)),
+                        (2.0, (1000, 1000, 10, 10))]})  # one wild outlier
+    rect = sp.crop_rect_for_track(spine, 0, 0.0, 3.0)
+    # median of [0,0,1000] is 0 -- the outlier does not drag the box
+    assert rect == (0.0, 0.0, 10.0, 10.0)
+
+
+def test_crop_rect_falls_back_to_nearest_when_span_has_no_detections():
+    spine = _spine({0: [(100.0, (5, 5, 10, 10))]})
+    rect = sp.crop_rect_for_track(spine, 0, 0.0, 1.0)  # no detections in [0,1)
+    assert rect == (5, 5, 10, 10)
+
+
+def test_crop_rect_none_for_unknown_track():
+    spine = _spine({0: [(0.0, (0, 0, 10, 10))]})
+    assert sp.crop_rect_for_track(spine, 99, 0.0, 1.0) is None
+
+
+# ---------------------------------------------------------------------------
+# plan_shots / plan_shots_from_samples — the full pipeline
+# ---------------------------------------------------------------------------
+
+def test_plan_shots_produces_stable_static_shots():
+    spine = _spine({
+        0: [(float(i), (0.0, 0.0, 10.0, 10.0)) for i in range(6)],
+        1: [(float(i), (100.0, 0.0, 10.0, 10.0)) for i in range(6, 12)],
+    })
+    active = [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1]
+    shots = sp.plan_shots(active, spine, min_shot_seconds=1.0)
+    assert len(shots) == 2
+    assert shots[0].shot_type == sp.SHOT_SINGLE
+    assert shots[0].track_ids == [0]
+    assert shots[0].start == 0.0 and shots[0].end == 6.0
+    assert shots[1].track_ids == [1]
+    assert shots[1].start == 6.0 and shots[1].end == 12.0
+
+
+def test_plan_shots_wide_when_no_confident_speaker():
+    spine = _spine({})
+    active = [None, None, None]
+    shots = sp.plan_shots(active, spine, default_wide_rect=(0, 0, 100, 100))
+    assert len(shots) == 1
+    assert shots[0].shot_type == sp.SHOT_WIDE
+    assert shots[0].track_ids == []
+    assert shots[0].crop_rect == (0, 0, 100, 100)
+
+
+def test_plan_shots_respects_forced_boundary_even_across_a_splice():
+    # Same speaker (track 0) the whole time, but a jump-cut splice sits at
+    # t=5 -- must still produce two shots, not one, because the video itself
+    # is discontinuous there (this is the actual "half a person" bug fix).
+    spine = _spine({0: [(float(i), (0.0, 0.0, 10.0, 10.0)) for i in range(10)]})
+    active = [0] * 10
+    shots = sp.plan_shots(active, spine, forced_boundaries=[5.0], min_shot_seconds=1.0)
+    assert len(shots) == 2
+    assert shots[0].end == 5.0
+    assert shots[1].start == 5.0
+
+
+def test_plan_shots_end_to_end_with_realistic_flicker():
+    # Speaker A (track 0) talks the whole clip; ASD briefly mis-points at
+    # track 1 for one second mid-clip (the exact scenario Phase 3 tests
+    # already proved binds correctly at the fusion level) -- the SHOT list
+    # must also show zero visible effect from it.
+    spine = _spine({
+        0: [(float(i), (0.0, 0.0, 10.0, 10.0)) for i in range(10)],
+        1: [(5.0, (200.0, 0.0, 10.0, 10.0))],
+    })
+    active = [0, 0, 0, 0, 0, 1, 0, 0, 0, 0]
+    shots = sp.plan_shots(active, spine, min_shot_seconds=1.2)
+    assert len(shots) == 1
+    assert shots[0].track_ids == [0]
+    assert shots[0].start == 0.0 and shots[0].end == 10.0
+
+
+# ---------------------------------------------------------------------------
+# _splice_window — the shared, conservative insertion primitive
+# ---------------------------------------------------------------------------
+
+def test_splice_window_inserts_cleanly_inside_a_shot():
+    shots = [sp.Shot(0.0, 10.0, sp.SHOT_SINGLE, [0], (0, 0, 10, 10))]
+    result = sp._splice_window(shots, 4.0, 6.0, sp.SHOT_REACTION, [1],
+                               (1, 1, 1, 1), min_shot_seconds=1.0)
+    assert len(result) == 3
+    assert result[0] == sp.Shot(0.0, 4.0, sp.SHOT_SINGLE, [0], (0, 0, 10, 10))
+    assert result[1] == sp.Shot(4.0, 6.0, sp.SHOT_REACTION, [1], (1, 1, 1, 1))
+    assert result[2] == sp.Shot(6.0, 10.0, sp.SHOT_SINGLE, [0], (0, 0, 10, 10))
+
+
+def test_splice_window_skips_when_it_would_leave_a_sub_minimum_sliver():
+    shots = [sp.Shot(0.0, 10.0, sp.SHOT_SINGLE, [0], None)]
+    # Left remainder would be 0.5s, under min_shot_seconds=1.0.
+    result = sp._splice_window(shots, 0.5, 6.0, sp.SHOT_REACTION, [1], None,
+                               min_shot_seconds=1.0)
+    assert result == shots  # unchanged
+
+
+def test_splice_window_skips_when_already_framing_that_track():
+    shots = [sp.Shot(0.0, 10.0, sp.SHOT_SINGLE, [0], None)]
+    result = sp._splice_window(shots, 4.0, 6.0, sp.SHOT_REACTION, [0], None,
+                               min_shot_seconds=1.0)
+    assert result == shots
+
+
+def test_splice_window_skips_when_straddling_a_boundary():
+    shots = [sp.Shot(0.0, 5.0, sp.SHOT_SINGLE, [0], None),
+            sp.Shot(5.0, 10.0, sp.SHOT_SINGLE, [1], None)]
+    result = sp._splice_window(shots, 4.0, 6.0, sp.SHOT_REACTION, [2], None,
+                               min_shot_seconds=1.0)
+    assert result == shots  # window crosses the 5.0 boundary -- skipped
+
+
+def test_splice_window_no_left_remainder_when_window_starts_at_shot_start():
+    shots = [sp.Shot(0.0, 10.0, sp.SHOT_SINGLE, [0], None)]
+    result = sp._splice_window(shots, 0.0, 4.0, sp.SHOT_REACTION, [1], None,
+                               min_shot_seconds=1.0)
+    assert len(result) == 2
+    assert result[0].shot_type == sp.SHOT_REACTION
+    assert result[1] == sp.Shot(4.0, 10.0, sp.SHOT_SINGLE, [0], None)
+
+
+# ---------------------------------------------------------------------------
+# resolve_directive_track + insert_reaction_shots
+# ---------------------------------------------------------------------------
+
+def test_resolve_directive_track_picks_nearest_x():
+    spine = _spine({
+        0: [(1.0, (0.0, 0.0, 100.0, 100.0))],    # centre x = 50
+        1: [(1.0, (900.0, 0.0, 100.0, 100.0))],  # centre x = 950
+    })
+    # directive x_position=0.9 of a 1000px frame -> target_x=900, track 1 wins
+    track = sp.resolve_directive_track(0.9, spine, frame_width=1000.0, at_time=1.0)
+    assert track == 1
+
+
+def test_resolve_directive_track_none_when_nothing_close_enough():
+    spine = _spine({0: [(1.0, (0.0, 0.0, 10.0, 10.0))]})
+    track = sp.resolve_directive_track(0.9, spine, frame_width=1000.0, at_time=1.0,
+                                       x_tolerance_frac=0.05)
+    assert track is None
+
+
+def test_insert_reaction_shot_for_causing_reaction_directive():
+    spine = _spine({
+        0: [(float(i), (0.0, 0.0, 100.0, 100.0)) for i in range(10)],
+        1: [(float(i), (900.0, 0.0, 100.0, 100.0)) for i in range(10)],
+    })
+    shots = [sp.Shot(0.0, 10.0, sp.SHOT_SINGLE, [0], (0, 0, 100, 100))]
+    directives = [{"start": 4.0, "end": 6.0, "x_position": 0.95, "reason": "causing_reaction"}]
+    result = sp.insert_reaction_shots(shots, directives, spine, frame_width=1000.0,
+                                      min_shot_seconds=1.0)
+    assert len(result) == 3
+    assert result[1].shot_type == sp.SHOT_REACTION
+    assert result[1].track_ids == [1]
+
+
+def test_insert_reaction_ignores_non_payoff_reasons():
+    spine = _spine({0: [(float(i), (0.0, 0.0, 10.0, 10.0)) for i in range(10)]})
+    shots = [sp.Shot(0.0, 10.0, sp.SHOT_SINGLE, [0], None)]
+    directives = [{"start": 4.0, "end": 6.0, "x_position": 0.5, "reason": "speaking"}]
+    result = sp.insert_reaction_shots(shots, directives, spine, frame_width=100.0)
+    assert result == shots
+
+
+def test_insert_reaction_window_bounded_by_max_reaction_seconds():
+    spine = _spine({
+        0: [(float(i), (0.0, 0.0, 10.0, 10.0)) for i in range(20)],
+        1: [(float(i), (900.0, 0.0, 10.0, 10.0)) for i in range(20)],  # near x_position=0.9 of 1000
+    })
+    shots = [sp.Shot(0.0, 20.0, sp.SHOT_SINGLE, [0], None)]
+    # A long 10s directive window -- the inserted reaction shot must still
+    # be capped at max_reaction_seconds, not span the whole directive.
+    directives = [{"start": 5.0, "end": 15.0, "x_position": 0.9, "reason": "referenced"}]
+    result = sp.insert_reaction_shots(shots, directives, spine, frame_width=1000.0,
+                                      max_reaction_seconds=2.0, min_shot_seconds=1.0)
+    reaction = [s for s in result if s.shot_type == sp.SHOT_REACTION][0]
+    assert reaction.duration <= 2.0 + 1e-9
+
+
+# ---------------------------------------------------------------------------
+# two_shot_crop_rect + apply_two_shot
+# ---------------------------------------------------------------------------
+
+def test_two_shot_crop_rect_covers_both():
+    spine = _spine({
+        0: [(0.0, (0.0, 0.0, 10.0, 10.0))],
+        1: [(0.0, (90.0, 0.0, 10.0, 10.0))],
+    })
+    rect = sp.two_shot_crop_rect(spine, 0, 1, 0.0, 1.0)
+    assert rect == (0.0, 0.0, 100.0, 10.0)  # spans from track0's left edge to track1's right edge
+
+
+def test_apply_two_shot_widens_when_addressee_known():
+    spine = _spine({
+        0: [(float(i), (0.0, 0.0, 10.0, 10.0)) for i in range(10)],
+        1: [(float(i), (500.0, 0.0, 10.0, 10.0)) for i in range(10)],
+    })
+    shots = [sp.Shot(0.0, 10.0, sp.SHOT_SINGLE, [0], (0, 0, 10, 10))]
+    addressee_per_second = [1] * 10  # track 0 addresses track 1 the whole shot
+    result = sp.apply_two_shot(shots, addressee_per_second, spine, min_shot_seconds=1.0)
+    assert len(result) == 1
+    assert result[0].shot_type == sp.SHOT_TWO_SHOT
+    assert set(result[0].track_ids) == {0, 1}
+
+
+def test_apply_two_shot_skips_when_addressee_changes_mid_shot():
+    spine = _spine({
+        0: [(float(i), (0.0, 0.0, 10.0, 10.0)) for i in range(10)],
+        1: [(float(i), (500.0, 0.0, 10.0, 10.0)) for i in range(10)],
+        2: [(float(i), (900.0, 0.0, 10.0, 10.0)) for i in range(10)],
+    })
+    shots = [sp.Shot(0.0, 10.0, sp.SHOT_SINGLE, [0], None)]
+    addressee_per_second = [1] * 5 + [2] * 5  # not a single consistent addressee
+    result = sp.apply_two_shot(shots, addressee_per_second, spine, min_shot_seconds=1.0)
+    assert result == shots
+
+
+def test_apply_two_shot_skips_when_no_addressee():
+    shots = [sp.Shot(0.0, 10.0, sp.SHOT_SINGLE, [0], None)]
+    result = sp.apply_two_shot(shots, [None] * 10, {}, min_shot_seconds=1.0)
+    assert result == shots
