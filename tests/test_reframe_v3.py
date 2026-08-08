@@ -20,13 +20,94 @@ from reframe_v3 import (
     WeightedFace,
     attention_center,
     build_attention_map,
+    caption_output_args,
     contains,
     crop_rect_containing,
     decide_layout,
     union_box,
 )
+from reframe_v3 import ComposedShot, _render_regular
 
 FRAME_W, FRAME_H = 1920, 1080
+
+
+# ─── Phase 6: worker-GPU threading (gpu_affinity) ───────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _clean_ffmpeg_state(monkeypatch):
+    import ffmpeg_utils
+    import os
+    monkeypatch.delenv("FFMPEG_ENCODER", raising=False)
+    monkeypatch.delenv("GPU_RENDER", raising=False)
+    ffmpeg_utils.reset_encoder_cache()
+    ffmpeg_utils.reset_gpu_render_cache()
+    yield
+    ffmpeg_utils.reset_encoder_cache()
+    ffmpeg_utils.reset_gpu_render_cache()
+
+
+def _fake_ffmpeg_run(monkeypatch):
+    """Capture the ffmpeg argv; never actually run ffmpeg."""
+    import subprocess
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return captured
+
+
+def test_render_regular_threads_worker_device_into_decode_and_encode(monkeypatch):
+    import ffmpeg_utils
+    import gpu_affinity
+    monkeypatch.setenv("FFMPEG_ENCODER", "nvenc")
+    monkeypatch.setattr(gpu_affinity, "current_device", lambda: "cuda:1")
+    monkeypatch.setattr(ffmpeg_utils, "_probe_gpu_render", lambda: True)
+    monkeypatch.setattr(ffmpeg_utils, "_probe_nvenc", lambda: True)
+    captured = _fake_ffmpeg_run(monkeypatch)
+
+    shots = [ComposedShot(0.0, 2.0, LAYOUT_SINGLE, (100.0, 0.0, 405.0, 720.0), [])]
+    _render_regular("in.mp4", "out.mp4", shots, 1920, 1080, 405, 720)
+    cmd = captured["cmd"]
+    assert cmd.index("-hwaccel") < cmd.index("-i")
+    assert "-hwaccel_device" in cmd and cmd[cmd.index("-hwaccel_device") + 1] == "1"
+    assert "-gpu" in cmd and cmd[cmd.index("-gpu") + 1] == "1"
+
+
+def test_render_regular_without_assignment_keeps_cpu_defaults(monkeypatch):
+    import ffmpeg_utils
+    import gpu_affinity
+    monkeypatch.setenv("FFMPEG_ENCODER", "nvenc")
+    monkeypatch.setattr(gpu_affinity, "current_device", lambda: None)
+    monkeypatch.setattr(ffmpeg_utils, "_probe_gpu_render", lambda: True)
+    monkeypatch.setattr(ffmpeg_utils, "_probe_nvenc", lambda: True)
+    captured = _fake_ffmpeg_run(monkeypatch)
+
+    shots = [ComposedShot(0.0, 2.0, LAYOUT_SINGLE, (100.0, 0.0, 405.0, 720.0), [])]
+    _render_regular("in.mp4", "out.mp4", shots, 1920, 1080, 405, 720)
+    cmd = captured["cmd"]
+    assert "-hwaccel_device" not in cmd
+    assert "-gpu" not in cmd
+
+
+def test_caption_output_args_threads_worker_device(monkeypatch):
+    import ffmpeg_utils
+    monkeypatch.setenv("FFMPEG_ENCODER", "nvenc")
+    monkeypatch.setattr(ffmpeg_utils, "_probe_nvenc", lambda: True)
+    args = caption_output_args("ass='/tmp/subs.ass'", "/tmp/out_sub.mp4",
+                               device="cuda:0")
+    assert "-gpu" in args and args[args.index("-gpu") + 1] == "0"
+
+
+def test_caption_output_args_without_device_omits_gpu_flag(monkeypatch):
+    import ffmpeg_utils
+    monkeypatch.setenv("FFMPEG_ENCODER", "nvenc")
+    monkeypatch.setattr(ffmpeg_utils, "_probe_nvenc", lambda: True)
+    args = caption_output_args("ass='/tmp/subs.ass'", "/tmp/out_sub.mp4")
+    assert "-gpu" not in args
 
 
 # ─── attention map ───────────────────────────────────────────────────────────

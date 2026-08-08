@@ -699,15 +699,20 @@ def _render_regular(input_video: str, output_video: str, composed: Sequence[Comp
                     ass_filter=None, captioned_output=None) -> None:
     """Render static single/two shots in one native ffmpeg pass."""
     import subprocess
-    from ffmpeg_utils import METADATA_SCRUB, QUALITY_FAST, video_encode_args
+    import gpu_affinity
+    from ffmpeg_utils import (METADATA_SCRUB, QUALITY_FAST, gpu_decode_args,
+                              video_encode_args)
 
+    device = gpu_affinity.current_device()
     graph = _regular_filtergraph(composed, frame_w, frame_h, out_w, out_h)
-    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", input_video,
+    cmd = ["ffmpeg", "-y", "-loglevel", "error",
+           *gpu_decode_args(device=device), "-i", input_video,
            "-filter_complex", graph, "-map", "[v]", "-map", "0:a?",
-           *video_encode_args(QUALITY_FAST), "-c:a", "copy", *METADATA_SCRUB,
+           *video_encode_args(QUALITY_FAST, device=device),
+           "-c:a", "copy", *METADATA_SCRUB,
            "-movflags", "+faststart", output_video]
     if ass_filter and captioned_output:
-        cmd += caption_output_args(ass_filter, captioned_output)
+        cmd += caption_output_args(ass_filter, captioned_output, device=device)
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                    timeout=1800)
 
@@ -737,7 +742,7 @@ def delivery_size(orig_w: int, orig_h: int, aspect_ratio: float):
 
 
 def caption_output_args(ass_filter: str, captioned_output: str,
-                        encode_tier: str = "quality"):
+                        encode_tier: str = "quality", device=None):
     """Second-output args for the one-pass clean+captioned render.
 
     With these args the same ffmpeg invocation encodes BOTH files from the
@@ -750,7 +755,8 @@ def caption_output_args(ass_filter: str, captioned_output: str,
     return [
         "-map", "[v]", "-map", "0:a?",
         "-vf", ass_filter,
-        *video_encode_args(encode_tier), "-c:a", "copy", *METADATA_SCRUB,
+        *video_encode_args(encode_tier, device=device),
+        "-c:a", "copy", *METADATA_SCRUB,
         "-movflags", "+faststart", captioned_output,
     ]
 
@@ -768,6 +774,8 @@ def _render_with_splits(input_video: str, output_video: str, composed: Sequence[
     import os
     import subprocess
     import tempfile
+    import gpu_affinity
+    from ffmpeg_utils import METADATA_SCRUB, QUALITY_FAST, video_encode_args
     from vendor.pyautoflip import render_split_screen_from_centers
 
     duration, fps, _, _ = _duration_and_size(input_video)
@@ -801,9 +809,16 @@ def _render_with_splits(input_video: str, output_video: str, composed: Sequence[
     finally:
         cap.release()
         writer.release()
+    # The Python split renderer writes an mp4v intermediate (cv2.VideoWriter
+    # has no nvenc backend), so the final mux re-encodes it to the normal
+    # h264/nvenc delivery codec on the assigned worker GPU. One extra
+    # generation vs the regular path, which encodes once from the source.
+    device = gpu_affinity.current_device()
     try:
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", silent, "-i", input_video,
-                        "-map", "0:v:0", "-map", "1:a?", "-c:v", "copy", "-c:a", "copy",
+                        "-map", "0:v:0", "-map", "1:a?",
+                        *video_encode_args(QUALITY_FAST, device=device),
+                        "-c:a", "copy", *METADATA_SCRUB,
                         "-movflags", "+faststart", output_video], check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=1800)
     finally:
@@ -817,13 +832,18 @@ def render(input_video, final_output_video, aspect_ratio,
            ass_filter=None, captioned_output=None):
     """Full v3 reframe. Errors intentionally propagate; there is no v3→v2 fallback."""
     import face_spine
+    import gpu_affinity
     import speaker_fusion
     import shot_planner
 
     print("   🚀 Reframe engine v3 (planned static shots)")
     duration, fps, frame_w, frame_h = _duration_and_size(input_video)
     effective_end = clip_end if clip_end is not None else clip_start + duration
-    tracks = face_spine.build_face_spine(input_video)
+    # Thread the worker's assigned GPU (gpu_affinity.current_device()) into
+    # every device-capable stage. On hosts/threads with no assignment this is
+    # None and every stage keeps its existing default behaviour.
+    worker_device = gpu_affinity.current_device()
+    tracks = face_spine.build_face_spine(input_video, device=worker_device)
     if not tracks:
         raise RuntimeError("Reframe v3 found no face tracks; refusing to silently fall back")
 
@@ -832,7 +852,8 @@ def render(input_video, final_output_video, aspect_ratio,
         import asd_worker
         if asd_worker.available():
             asd_boxes = asd_worker.score_clip(
-                input_video, face_spine.detect_faces_per_frame).get("per_second_box") or []
+                input_video, face_spine.detect_faces_per_frame,
+                device=worker_device).get("per_second_box") or []
     except Exception as exc:
         print(f"   ⚠️ LR-ASD unavailable for v3 ({type(exc).__name__}: {exc})")
     segments = (transcript or {}).get("segments", [])
