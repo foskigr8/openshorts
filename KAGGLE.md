@@ -42,7 +42,7 @@ for name in ("GEMINI_API_KEY", "GEMINI_API_KEYS",
         print(f"secret not set: {name}")
 
 REPO = "https://github.com/foskigr8/openshorts.git"   # private: use a PAT URL
-BRANCH = "session/framing-work"
+BRANCH = "claude/gemini-vision-clip-picking-bikvuy"
 
 if not os.path.isdir("/kaggle/working/openshorts"):
     subprocess.run(["git", "clone", "-b", BRANCH, REPO,
