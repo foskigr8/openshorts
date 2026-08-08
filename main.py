@@ -1827,6 +1827,50 @@ def _snap_candidates(shorts, words, video_duration):
     return shorts
 
 
+def _dedup_overlapping_clips(shorts):
+    """Drop lower-scoring clips when two picks overlap in time.
+
+    The narrative engine returns picks as-is (the skill engine dedups inside
+    normalize_response), and the shared tail then MOVES boundaries — question
+    extension pulls starts earlier, vision rescue shifts both edges, word
+    snapping re-lands them — so distinct picks can collide into overlapping
+    spans after selection. Every short in the list is rendered, so without
+    this the same moment ships multiple times and spends GPU + vision/context
+    calls on near-identical clips (the "it keeps picking the same thing"
+    complaint). Runs on the FINAL boundaries, after every mutation, so it
+    catches what the skill engine's pre-confirm dedup cannot.
+
+    Keeps the higher-scoring clip (predicted_score, the key both engines
+    write; score is the skill engine's alias). Ties keep the earlier pick.
+    """
+    if len(shorts) < 2:
+        return shorts
+    ranked = sorted(enumerate(shorts), key=lambda t: (t[1].get("start", 0), t[0]))
+    kept = []
+    for idx, clip in ranked:
+        prev = kept[-1][1] if kept else None
+        if prev is not None and clip["start"] < prev["end"]:
+            cur_score = (clip.get("predicted_score")
+                         or clip.get("score") or 0)
+            prev_score = (prev.get("predicted_score")
+                          or prev.get("score") or 0)
+            if cur_score > prev_score:
+                print(f"   ⚠️ overlapping picks "
+                      f"[{prev['start']:.1f}-{prev['end']:.1f}] / "
+                      f"[{clip['start']:.1f}-{clip['end']:.1f}] — keeping the "
+                      f"higher-scoring one ({cur_score} > {prev_score})")
+                kept[-1] = (idx, clip)
+            else:
+                print(f"   ⚠️ overlapping picks "
+                      f"[{prev['start']:.1f}-{prev['end']:.1f}] / "
+                      f"[{clip['start']:.1f}-{clip['end']:.1f}] — keeping "
+                      f"[{prev['start']:.1f}-{prev['end']:.1f}] "
+                      f"({prev_score} >= {cur_score})")
+            continue
+        kept.append((idx, clip))
+    return [c for _, c in kept]
+
+
 def get_viral_clips(transcript_result, video_duration, source_video_path=None,
                     clip_count=None, long_context_count=0, style_variant="balanced",
                     output_dir=None):
@@ -1886,6 +1930,7 @@ def get_viral_clips(transcript_result, video_duration, source_video_path=None,
                     _scene_bounds = scene_boundaries_for(source_video_path)
                     for s in shorts:
                         _clamp_candidate_end_to_scene(s, _scene_bounds)
+                    shorts = _dedup_overlapping_clips(shorts)
                     result = {"shorts": shorts,
                               "rejected": skill_result.get("rejected", [])}
                     if skill_result.get("cost_analysis"):
@@ -1927,6 +1972,7 @@ def get_viral_clips(transcript_result, video_duration, source_video_path=None,
         _scene_bounds = scene_boundaries_for(source_video_path)
         for s in shorts:
             _clamp_candidate_end_to_scene(s, _scene_bounds)
+        shorts = _dedup_overlapping_clips(shorts)
         result = {"shorts": shorts}
         if deepseek_result.get("cost_analysis"):
             result["cost_analysis"] = deepseek_result["cost_analysis"]
