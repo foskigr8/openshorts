@@ -1523,9 +1523,15 @@ def download_youtube_video(url, output_dir=".", require_hd=False):
     print("📥 Downloading video from YouTube...")
     step_start_time = time.time()
 
-    cookies_path = '/app/cookies.txt'
+    # Derived from this file's own location, not hardcoded to /app: /app is
+    # only where docker-compose.yml bind-mounts the repo. On Kaggle the repo
+    # lives at /kaggle/working/openshorts (see openshorts_kaggle.ipynb), so a
+    # literal '/app/cookies.txt' can never exist there and every Kaggle run
+    # silently lost the on-disk jar, falling through to the (often stale)
+    # YOUTUBE_COOKIES env var or no cookies at all.
+    cookies_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cookies.txt')
     cookies_env = os.environ.get("YOUTUBE_COOKIES")
-    # auto_refresh_cookies.sh keeps /app/cookies.txt fresh (a real Netscape
+    # auto_refresh_cookies.sh keeps cookies.txt fresh (a real Netscape
     # jar, rewritten every ~20min from a logged-in Chrome session). The
     # YOUTUBE_COOKIES env value is the LEGACY path and can be stale — a
     # 27-char blob was clobbering the fresh 4.9KB jar on every job, which is
