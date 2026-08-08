@@ -101,9 +101,6 @@ RUN chown -R appuser:appuser /app /tmp/Ultralytics
 # Switch to non-root user
 USER appuser
 
-# Pre-download YOLO model on build (now running as appuser)
-RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
-
 # Expose FastAPI port
 EXPOSE 8000
 

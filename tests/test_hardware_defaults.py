@@ -3,31 +3,22 @@
 import hardware_defaults as hd
 
 
-def test_gpu_detected_via_yolo_device(monkeypatch):
-    monkeypatch.setenv("YOLO_DEVICE", "0")
-    monkeypatch.delenv("WHISPER_DEVICE", raising=False)
-    assert hd.gpu_configured() is True
-
-
 def test_gpu_detected_via_whisper_cuda(monkeypatch):
-    monkeypatch.delenv("YOLO_DEVICE", raising=False)
     monkeypatch.setenv("WHISPER_DEVICE", "cuda")
     assert hd.gpu_configured() is True
 
 
 def test_cpu_host_when_no_gpu_env(monkeypatch):
-    monkeypatch.delenv("YOLO_DEVICE", raising=False)
     monkeypatch.delenv("WHISPER_DEVICE", raising=False)
     assert hd.gpu_configured() is False
 
 
 def test_clip_workers_five_on_gpu(monkeypatch):
-    monkeypatch.setenv("YOLO_DEVICE", "0")
+    monkeypatch.setenv("WHISPER_DEVICE", "cuda")
     assert hd.default_clip_workers() == 5
 
 
 def test_clip_workers_scaled_to_cores_on_cpu(monkeypatch):
-    monkeypatch.delenv("YOLO_DEVICE", raising=False)
     monkeypatch.delenv("WHISPER_DEVICE", raising=False)
     monkeypatch.setattr(hd.os, "cpu_count", lambda: 4)
     assert hd.default_clip_workers() == 3
@@ -38,7 +29,6 @@ def test_clip_workers_scaled_to_cores_on_cpu(monkeypatch):
 
 
 def test_max_concurrent_jobs_single_on_cpu(monkeypatch):
-    monkeypatch.delenv("YOLO_DEVICE", raising=False)
     monkeypatch.delenv("WHISPER_DEVICE", raising=False)
     assert hd.default_max_concurrent_jobs() == 1
 

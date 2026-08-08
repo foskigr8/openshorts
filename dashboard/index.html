@@ -83,7 +83,7 @@
           "@id": "https://www.openshorts.app/#software",
           "name": "OpenShorts",
           "alternateName": "OpenShorts self-hosted",
-          "description": "Open source AI clip generator, MIT licensed and self-hosted with Docker. Turns long-form videos into viral-ready 9:16 clips for TikTok, Instagram Reels and YouTube Shorts using Google Gemini 3.0 Flash for moment detection, faster-whisper for word-level subtitles and MediaPipe for face-tracked reframing. This edition is free with no watermark and no usage cap; you supply your own API keys. The hosted service is priced separately.",
+          "description": "Open source AI clip generator, MIT licensed and self-hosted with Docker. Turns long-form videos into viral-ready 9:16 clips for TikTok, Instagram Reels and YouTube Shorts using Google Gemini 3.0 Flash for moment detection, faster-whisper for word-level subtitles and active-speaker reframing (SCRFD face detection + LR-ASD speaker binding). This edition is free with no watermark and no usage cap; you supply your own API keys. The hosted service is priced separately.",
           "applicationCategory": "MultimediaApplication",
           "operatingSystem": "Cross-platform (Docker)",
           "url": "https://www.openshorts.app/",
@@ -95,7 +95,7 @@
           "screenshot": "https://www.openshorts.app/og-image.png",
           "featureList": [
             "AI viral moment detection with Google Gemini 3.0 Flash",
-            "Smart 9:16 vertical cropping with MediaPipe face tracking and YOLOv8 fallback",
+            "Smart 9:16 vertical cropping with SCRFD face detection and LR-ASD active-speaker binding",
             "Automatic subtitle generation with word-level timestamps",
             "AI voice dubbing in 30+ languages via ElevenLabs",
             "Local video file upload and YouTube link ingest",
@@ -169,7 +169,7 @@
               "name": "What is OpenShorts?",
               "acceptedAnswer": {
                 "@type": "Answer",
-                "text": "OpenShorts is an open source AI clip generator that turns long videos (podcasts, webinars, livestreams, vlogs, interviews) into viral-ready 9:16 vertical clips for TikTok, Instagram Reels and YouTube Shorts. faster-whisper transcribes the audio with word-level timestamps, PySceneDetect finds the scene boundaries, and Google Gemini 3.0 Flash scores the transcript to pick the 3 to 15 strongest moments. Each clip is then reframed to vertical with MediaPipe face tracking and subtitled automatically. It comes in two editions: self-hosted, which is free and open source under MIT, and OpenShorts Cloud, which is the hosted service with a free 20 minute per month tier and paid plans from $12 per month."
+                "text": "OpenShorts is an open source AI clip generator that turns long videos (podcasts, webinars, livestreams, vlogs, interviews) into viral-ready 9:16 vertical clips for TikTok, Instagram Reels and YouTube Shorts. faster-whisper transcribes the audio with word-level timestamps, PySceneDetect finds the scene boundaries, and Google Gemini 3.0 Flash scores the transcript to pick the 3 to 15 strongest moments. Each clip is then reframed to vertical with active-speaker tracking and subtitled automatically. It comes in two editions: self-hosted, which is free and open source under MIT, and OpenShorts Cloud, which is the hosted service with a free 20 minute per month tier and paid plans from $12 per month."
               }
             },
             {
@@ -201,7 +201,7 @@
               "name": "How does the AI vertical cropping work?",
               "acceptedAnswer": {
                 "@type": "Answer",
-                "text": "There are two cropping modes. TRACK mode uses MediaPipe face detection with a YOLOv8 fallback to follow a single subject, damped by a stabiliser that holds the camera still inside a safe zone instead of chasing every head movement, which is what prevents the visible swinging that reads as amateur. GENERAL mode handles group shots and landscapes by preserving the full width over a blurred backdrop. A speaker tracker stops the crop from flipping between people and holds position through brief occlusions."
+                "text": "Each clip is framed by a shot planner: SCRFD face detection and LR-ASD active-speaker detection build one face spine, the speaker-to-face binding is decided once per clip so the crop cannot flip mid-turn, and an attention-weighted composer (speaker + saliency) places the subject deliberately in the vertical frame. Two live speakers in an exchange become a split screen; reactions follow the saliency, not just whoever is talking."
               }
             },
             {

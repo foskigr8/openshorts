@@ -61,7 +61,7 @@ export const CANONICAL_ANSWERS = {
   isItFree:
     'Both, and the distinction matters. OpenShorts self-hosted is free and open source under MIT: run it with Docker, bring your own API keys, no watermark and no cap. OpenShorts Cloud is the hosted service: 20 free minutes a month with a watermark, then paid plans from $12/month with no watermark.',
   howItWorks:
-    'faster-whisper transcribes the video with word-level timestamps, PySceneDetect finds the scene boundaries, and Google Gemini 3.0 Flash scores the transcript to pick the 3 to 15 strongest moments of 15 to 60 seconds each. Each moment is then cut with FFmpeg and reframed to 9:16 with MediaPipe face tracking.',
+    'faster-whisper transcribes the video with word-level timestamps, PySceneDetect finds the scene boundaries, and Google Gemini 3.0 Flash scores the transcript to pick the 3 to 15 strongest moments of 15 to 60 seconds each. Each moment is then cut with FFmpeg and reframed to 9:16 with active-speaker tracking.',
 }
 
 export const PIPELINE_STEPS = [
@@ -79,7 +79,7 @@ export const PIPELINE_STEPS = [
   },
   {
     title: 'Vertical reframing',
-    body: 'Each clip is cropped from 16:9 to 9:16 in one of two modes. TRACK mode follows a single subject with MediaPipe face detection and a YOLOv8 fallback, damped by a stabiliser that holds the camera still inside a safe zone instead of chasing every head movement. GENERAL mode handles group shots and landscapes by keeping the full width over a blurred backdrop.',
+    body: 'Each clip is cropped from 16:9 to 9:16 by a shot planner. SCRFD face detection and LR-ASD active-speaker detection build one face spine, the speaker-to-face binding is decided once per clip so the camera cannot flip mid-turn, and an attention-weighted composer keeps the subject deliberately placed in the vertical frame.',
   },
   {
     title: 'Subtitles, hooks and effects',
@@ -198,7 +198,7 @@ export const COMPARISON_ROWS = [
   { feature: 'Self-hostable', os: 'Yes, Docker Compose', vendor: 'No, cloud only' },
   { feature: 'Source video stays on your machine', os: 'Yes when self-hosted', vendor: 'No' },
   { feature: 'AI viral moment detection', os: 'Yes, Gemini 3.0 Flash', vendor: 'Yes' },
-  { feature: 'Face-tracked 9:16 reframing', os: 'Yes, MediaPipe + YOLOv8', vendor: 'Yes' },
+  { feature: 'Active-speaker 9:16 reframing', os: 'Yes, SCRFD + LR-ASD', vendor: 'Yes' },
   { feature: 'Word-level auto subtitles', os: 'Yes, faster-whisper', vendor: 'Yes' },
   { feature: 'AI voice dubbing, 30+ languages', os: 'Yes, ElevenLabs', vendor: 'No' },
   { feature: 'AI UGC video with lip-synced actors', os: 'Yes, from $0.65/video', vendor: 'No' },

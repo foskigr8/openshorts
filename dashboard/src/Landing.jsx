@@ -98,7 +98,7 @@ export default function Landing({ onLaunchApp }) {
     {
       icon: Scissors,
       title: "Smart 9:16 Vertical Cropping",
-      description: "Dual-mode AI reframing with MediaPipe face tracking and YOLOv8 fallback."
+      description: "Active-speaker reframing with SCRFD face detection and LR-ASD speaker binding."
     },
     {
       icon: Subtitles,
@@ -175,7 +175,7 @@ export default function Landing({ onLaunchApp }) {
     },
     {
       question: "How do I turn a long-form video into TikTok or Reels clips?",
-      answer: "Upload your long-form video into OpenShorts, enter your free Gemini API key, and click Process. The AI transcribes it with faster-whisper, detects the best viral moments using Google Gemini 3.0 Flash, and crops them to 9:16 vertical format with MediaPipe face tracking. According to Wyzowl's 2025 Video Marketing Statistics report, 91% of businesses use video as a marketing tool, and repurposed short-form clips drive 2.5x more engagement than original content."
+      answer: "Upload your long-form video into OpenShorts, enter your free Gemini API key, and click Process. The AI transcribes it with faster-whisper, detects the best viral moments using Google Gemini 3.0 Flash, and crops them to 9:16 vertical format with active-speaker tracking. According to Wyzowl's 2025 Video Marketing Statistics report, 91% of businesses use video as a marketing tool, and repurposed short-form clips drive 2.5x more engagement than original content."
     },
     {
       question: "Can OpenShorts generate YouTube thumbnails and titles for free?",
@@ -203,7 +203,7 @@ export default function Landing({ onLaunchApp }) {
     },
     {
       question: "How does the smart vertical cropping work?",
-      answer: "OpenShorts offers two intelligent cropping modes for converting 16:9 horizontal video to 9:16 vertical format. TRACK mode uses MediaPipe face detection with YOLOv8 as fallback to follow a single subject with 'Heavy Tripod' stabilization — the camera moves smoothly like a professional cameraman. GENERAL mode handles group shots and landscapes by creating a blurred background layout. A SpeakerTracker prevents rapid switching between subjects and handles temporary occlusions for smooth results."
+      answer: "OpenShorts frames each clip with a shot planner. SCRFD face detection and LR-ASD active-speaker detection build one face spine, the speaker-to-face binding is decided once per clip so the camera cannot flip mid-turn, and an attention-weighted composer (speaker + saliency) keeps the subject deliberately placed in the vertical frame. Two live speakers in an exchange become a split screen; reactions follow saliency, not just whoever is talking."
     },
     {
       question: "Is there a free open source clip generator?",
@@ -211,7 +211,7 @@ export default function Landing({ onLaunchApp }) {
     },
     {
       question: "What are the system requirements to run OpenShorts?",
-      answer: "OpenShorts runs on any system with Docker installed. The recommended setup is 8GB+ RAM and a modern multi-core CPU. GPU acceleration (NVIDIA CUDA) is optional but speeds up video processing significantly. The Docker Compose setup handles all dependencies automatically — Python 3.11, FFmpeg, YOLOv8, MediaPipe, faster-whisper, and the React dashboard. It works on Linux, macOS, and Windows (via WSL2/Docker Desktop)."
+      answer: "OpenShorts runs on any system with Docker installed. The recommended setup is 8GB+ RAM and a modern multi-core CPU. GPU acceleration (NVIDIA CUDA) is optional but speeds up video processing significantly. The Docker Compose setup handles all dependencies automatically — Python 3.11, FFmpeg, InsightFace (SCRFD), LR-ASD, faster-whisper, and the React dashboard. It works on Linux, macOS, and Windows (via WSL2/Docker Desktop)."
     }
   ];
 
@@ -609,8 +609,8 @@ export default function Landing({ onLaunchApp }) {
             {[
               { name: "Google Gemini 3.0", desc: "AI Analysis" },
               { name: "faster-whisper", desc: "Transcription" },
-              { name: "YOLOv8", desc: "Object Detection" },
-              { name: "MediaPipe", desc: "Face Tracking" },
+              { name: "InsightFace SCRFD", desc: "Face Detection" },
+              { name: "LR-ASD", desc: "Active-Speaker Detection" },
               { name: "FFmpeg", desc: "Video Processing" },
               { name: "ElevenLabs", desc: "Voice & TTS" },
               { name: "fal.ai", desc: "AI Video Gen" },

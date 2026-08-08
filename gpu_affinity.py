@@ -16,20 +16,17 @@ inside a clip render (20-34s of a 94-110s clip in the measured run) and it does
 shard. FFmpeg decode/encode now follows the worker's device too (the reframe,
 clip-cut and caption-burn call sites pass gpu_affinity.current_device() into
 `-hwaccel_device`), so the second GPU is used for the ffmpeg stage as well.
-MediaPipe and YOLO detection stay on the default device: they run under
-main.py's global DETECT_LOCK because the graph and the model are not
-thread-safe, so they are serialized regardless of how many GPUs exist —
-sharding them would mean a model instance per device, which is a bigger change
-than this. So expect a partial improvement on multi-clip jobs, not 2×, and
-nothing at all on single-clip jobs.
+The v3 reframe engine's face spine (SCRFD/ArcFace) also follows the worker
+device via face_spine's ctx resolution. So expect a partial improvement on
+multi-clip jobs, not 2×, and nothing at all on single-clip jobs.
 
 Environment
 -----------
 CLIP_GPUS   comma-separated device indices to spread across. UNSET = no
-            affinity at all (every worker uses the default device), which is
-            the default because sharding broke TransNetV2 scene detection on
-            the first real 2xT4 run — see available_devices(). Set
-            CLIP_GPUS=0,1 to opt in. Ignored when CUDA is unavailable.
+            restriction — every CUDA-visible device is used (auto-enabled
+            since f577936; sharding is device-safe now). Set CLIP_GPUS to a
+            subset (e.g. 0,1) to restrict, or to one device to pin workers
+            there. Ignored when CUDA is unavailable.
 """
 
 import os

@@ -13,7 +13,7 @@ def _truncate_bytes(text, max_bytes):
     """Trim to a byte budget without splitting a multi-byte character.
 
     Deliberately duplicated from main.truncate_bytes: this module stays free of
-    main's heavy imports (cv2, mediapipe, torch) so it can be used standalone.
+    main's heavy imports (cv2/scenedetect/yt-dlp) so it can be used standalone.
     """
     encoded = text.encode("utf-8")
     if len(encoded) <= max_bytes:

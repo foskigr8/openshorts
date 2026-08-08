@@ -6,7 +6,12 @@ import sys
 from ffmpeg_utils import (video_encode_args, gpu_decode_args, QUALITY,
                           METADATA_SCRUB)
 import gpu_affinity
-from reframe_v2 import UNIFIED_CONTENT_HEIGHT_RATIO
+
+# The reframe engine (v3) renders every shot at the target aspect — the crop
+# IS the frame, so there is no letterbox and the content band fills the whole
+# output. v2 used to letterbox a 3:4 crop into the 9:16 canvas; that engine
+# was removed, so the ratio is now fixed at full-frame.
+UNIFIED_CONTENT_HEIGHT_RATIO = 1.0
 
 
 _STDIO_CONFIGURED = False
@@ -468,28 +473,19 @@ def generate_ass(transcript, clip_start, clip_end, output_path,
     letter_spacing_ratio: fraction of fontsize applied as ASS Style
     "Spacing" (negative = tighter). See CAPTION_LETTER_SPACING_RATIO.
     general_ranges: list of (clip-relative start, end) seconds where the
-    reframe engine's content box is smaller than the full frame — the
-    unified 3:4-consistent crop (reframe_v2.UNIFIED_CROP_RATIO) letterboxes
-    into a blurred fill above and below (see reframe_v2.unified_filtergraph),
-    for every frame now, so render() passes the whole clip range here.
-    The default margin positions captions near the bottom of a FULL-height
-    frame, which leaves them floating in the blur band below the actual
-    (smaller, centered) content box — disconnected from the footage, reading
-    as a second stacked panel (confirmed on real delivered clips,
-    31-jul-2026). Events whose start time falls in one of these ranges get a
-    per-line MarginV override that lands them in the bottom slice of the
-    actual content box instead.
+    reframe engine's content box is smaller than the full frame. The v3
+    engine renders every shot at the target aspect (no letterbox), so
+    callers pass [] and captions use the full-frame margin below.
     """
     blocks = _collect_word_blocks(transcript, clip_start, clip_end, max_chars, max_duration)
     if not blocks:
         return False
 
-    # Caption margin for the letterboxed content box: computed as a ratio of
-    # PlayResY, so it's resolution-independent like everything else in this
-    # file. The content box is vertically centered at
-    # UNIFIED_CONTENT_HEIGHT_RATIO of the frame height (see
-    # reframe_v2.unified_filtergraph) — this places the caption
-    # CAPTION_CONTENT_INSET_RATIO up from the bottom of that box.
+    # Caption margin for the content box: computed as a ratio of PlayResY,
+    # so it's resolution-independent like everything else in this file. With
+    # the v3 engine the content box fills the frame
+    # (UNIFIED_CONTENT_HEIGHT_RATIO = 1.0) — this places the caption
+    # CAPTION_CONTENT_INSET_RATIO up from the bottom of the frame.
     PLAY_RES_Y = 288
     content_bottom_ratio = (1 - UNIFIED_CONTENT_HEIGHT_RATIO) / 2 + UNIFIED_CONTENT_HEIGHT_RATIO
     # FLOOR: just enough margin to clear the blurred fill below the content

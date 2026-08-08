@@ -3,13 +3,11 @@ transnetv2-pytorch==1.0.5
 ultralytics==8.4.46
 torch==2.11.0
 torchvision==0.26.0
-tqdm==4.67.3
 yt-dlp
 faster-whisper==1.2.1
 py3langid==0.3.0
 google-genai==1.75.0
 python-dotenv==1.2.2
-mediapipe==0.10.14
 boto3==1.43.4
 
 fastapi==0.136.1
@@ -39,17 +37,16 @@ huggingface_hub>=0.23
 # used to turn anonymous diarized labels ("SPEAKER_00") into real names before
 # clip selection reads the transcript. InsightFace over DeepFace/dlib on the
 # integration guide's recommendation: ~15ms/face on a T4 vs ~80ms and ~300ms,
-# and it shares the ONNX ecosystem YOLOv8 already uses.
+# and it shares the ONNX runtime the face spine (SCRFD) already uses.
 #
 # MEASURED 6-aug-2026 on the Kaggle host: installing this unconstrained pulls
 # opencv 5.x through albumentations -> albucore, and opencv 5 is what drags a
 # numpy major-version jump in behind it. Capping opencv is the precise fix.
 #
-# Pinning numpy instead is NOT: Kaggle ships numpy 2.0.2 and mediapipe 0.10.14
-# resolves against it perfectly well, so a `numpy<2` line there is
-# unsatisfiable and takes the ENTIRE install down with it (ResolutionImpossible
-# -> no yt-dlp, no ultralytics, no mediapipe). That was a real outage, not a
-# hypothetical.
+# Pinning numpy instead is NOT: Kaggle ships numpy 2.0.2, so a `numpy<2` line
+# there is unsatisfiable and takes the ENTIRE install down with it
+# (ResolutionImpossible -> no yt-dlp, no ultralytics). That was a real outage,
+# not a hypothetical.
 insightface==0.7.3
 # Not imported anywhere — guards, per the note above.
 opencv-python<5

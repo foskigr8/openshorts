@@ -38,7 +38,7 @@ const S = {
 
 const FEATURES = [
   ['AI viral moment detection', 'Google Gemini 3.0 Flash scores the transcript and scene data to find the 3 to 15 strongest moments, so there is no manual scrubbing.'],
-  ['Smart 9:16 vertical cropping', 'Dual-mode reframing with MediaPipe face tracking and a YOLOv8 fallback, stabilised so the camera holds still instead of swinging.'],
+  ['Smart 9:16 vertical cropping', 'Active-speaker reframing with SCRFD face detection and LR-ASD speaker binding, held stable by a shot planner.'],
   ['Word-level automatic subtitles', 'faster-whisper produces a timestamp for every word, and the subtitles are burned in with FFmpeg.'],
   ['AI voice dubbing in 30+ languages', 'ElevenLabs translates the audio while preserving the speaker\'s voice, then the new track is re-transcribed so subtitles match.'],
   ['Hook text overlays', 'AI-written hook titles covering the first seconds, which is where a short-form viewer decides whether to stay.'],
@@ -72,7 +72,7 @@ const FAQ = [
   ],
   [
     'How does the smart vertical cropping work?',
-    'TRACK mode follows a single subject with MediaPipe face detection and a YOLOv8 fallback, damped so the crop holds still inside a safe zone rather than chasing every head movement. GENERAL mode handles group shots and landscapes by preserving the full width over a blurred backdrop. A speaker tracker prevents the crop from flipping between people and holds position through brief occlusions.',
+    'A shot planner frames each clip: SCRFD face detection and LR-ASD active-speaker detection build one face spine, the speaker-to-face binding is decided once per clip so the camera cannot flip mid-turn, and an attention-weighted composer keeps the subject deliberately placed in the vertical frame.',
   ],
   [
     'Can OpenShorts translate and dub videos?',
@@ -84,7 +84,7 @@ const FAQ = [
   ],
   [
     'What are the system requirements to self-host?',
-    'Any machine with Docker, realistically 8GB of RAM and a modern multi-core CPU. An NVIDIA GPU is optional and cuts processing time by roughly an order of magnitude. Docker Compose pulls Python 3.11, FFmpeg, YOLOv8, MediaPipe, faster-whisper and the React dashboard. Linux, macOS and Windows via WSL2 are supported.',
+    'Any machine with Docker, realistically 8GB of RAM and a modern multi-core CPU. An NVIDIA GPU is optional and cuts processing time by roughly an order of magnitude. Docker Compose pulls Python 3.11, FFmpeg, InsightFace (SCRFD), LR-ASD, faster-whisper and the React dashboard. Linux, macOS and Windows via WSL2 are supported.',
   ],
 ]
 

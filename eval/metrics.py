@@ -32,16 +32,15 @@ def crop_motion_within_shot(rects, shot_boundaries):
 
     rects: list of (x, y, w, h) in source pixels, one per output frame, in
         frame order — exactly what `REFRAME_DUMP_PATH` writes
-        (reframe_v2.py:3167-3182).
+        (reframe_v3.render's dump block).
     shot_boundaries: list of (start_frame, end_frame) exclusive-end ranges
-        partitioning `rects` into shots (e.g. from a shot list's frame
-        indices, or from `reframe_v2`'s scene/subject-change points for the
-        current v2 engine).
+        partitioning `rects` into shots (the v3 render's returned shot list,
+        converted to frame indices — see eval/run.py).
 
     Returns a list of ShotMotion, one per shot. A shot's crop is meant to be
-    pixel-static once the rebuild lands: `max_delta_px` must be 0 for that
-    shot's rows once Phase 4/5 land. Non-zero values quantify the CURRENT
-    engine's jitter, in pixels of (x, y) centre movement between consecutive
+    pixel-static: `max_delta_px` must be 0 for a v3 shot's rows (the whole
+    point of planned static shots). Non-zero values quantify jitter, in
+    pixels of (x, y) centre movement between consecutive
     frames — not a proxy metric, the actual crop position delta.
     """
     results = []

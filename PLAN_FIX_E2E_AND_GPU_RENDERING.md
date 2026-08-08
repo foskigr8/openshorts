@@ -1,5 +1,10 @@
 # Plan: fix the first real end-to-end run — stabilization, GPU rendering, boundaries, dashboard
 
+> **OBSOLETE in part (8-aug-2026):** this plan targeted the v2 engine
+> (`reframe_v2`, MediaPipe/YOLO) and its supersample path. Both were removed —
+> `reframe_v3` is the only reframe engine. `REFRAME_DUMP_PATH` still exists
+> (now produced by `reframe_v3.render`); the rest is historical.
+
 > **STATUS (6-aug-2026):** written at the point the previous Claude session hit
 > its limit (the request was *"write a plan for deepseek containg what to do to
 > fix it and yes i want gpu rendering to save time"*). This replaces the

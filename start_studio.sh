@@ -43,9 +43,6 @@ if ! docker ps --format '{{.Names}} {{.Status}}' | grep -q '^openshorts-backend.
   sleep 5
 fi
 
-echo "==> MediaPipe pose model (needed by USE_GESTURE; downloads once as root)"
-docker exec -u root openshorts-backend sh -c 'test -f /opt/venv/lib/python3.11/site-packages/mediapipe/modules/pose_landmark/pose_landmark_lite.tflite || python3 -c "import mediapipe as mp; mp.solutions.pose.Pose(static_image_mode=False, model_complexity=0)"' 2>/dev/null || true
-
 echo "==> Container status:"
 docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 

@@ -28,14 +28,13 @@ else
     GPU_COUNT=0
 fi
 
-# 6-aug-2026 (PART 2): on a GPU host, prefer CUDA decode offload and the 2x
-# supersampled crop path (sub-pixel camera steps). Both probe and fall back
-# cleanly inside the app when the ffmpeg build lacks CUDA, so exporting them
-# unconditionally here is safe on CPU-only boxes too.
+# 6-aug-2026 (PART 2): on a GPU host, prefer CUDA decode offload and CUDA
+# Whisper. Both probe and fall back cleanly inside the app when the ffmpeg
+# build lacks CUDA, so exporting them unconditionally here is safe on
+# CPU-only boxes too.
 if [ "${GPU_COUNT:-0}" -gt 0 ]; then
     export GPU_RENDER="${GPU_RENDER:-1}"
-    export CROP_SUPERSAMPLE="${CROP_SUPERSAMPLE:-2}"
-    echo "    GPU_RENDER=1, CROP_SUPERSAMPLE=2 (probe + fallback inside app)"
+    echo "    GPU_RENDER=1 (probe + fallback inside app)"
 fi
 
 # 6-aug-2026: use BOTH T4s. CLIP_GPUS was opt-in because sharding broke
@@ -103,8 +102,8 @@ if [ "${SKIP_INSTALL:-0}" != "1" ]; then
     # cv2.__version__ reports "4.13.0" while the distribution is "4.13.0.x", so
     # `opencv-python==4.13.0` is unsatisfiable — and an unsatisfiable pin is
     # ResolutionImpossible, meaning NOTHING installs. Measured on the host
-    # 6-aug-2026: no yt-dlp, no ultralytics, no mediapipe. A cap is satisfied by
-    # whatever is already installed, so pip simply leaves it alone.
+    # 6-aug-2026: no yt-dlp, no ultralytics. A cap is satisfied by whatever
+    # is already installed, so pip simply leaves it alone.
     printf 'opencv-python<5\nopencv-contrib-python<5\nopencv-python-headless<5\n' \
         >> /tmp/req-kaggle.txt
     if pip install -q -r /tmp/req-kaggle.txt 2>/tmp/pip-err.log; then
@@ -117,8 +116,8 @@ if [ "${SKIP_INSTALL:-0}" != "1" ]; then
     fi
 
     # Report the versions that actually matter, without asserting a major
-    # version: this host ships numpy 2.0.2 and mediapipe 0.10.14 works on it.
-    # The real signal is whether the imports below succeed, not a number.
+    # version: this host ships numpy 2.0.2. The real signal is whether the
+    # imports below succeed, not a number.
     python3 - <<'PYVER' || true
 for mod in ("numpy", "cv2"):
     try:
@@ -126,31 +125,6 @@ for mod in ("numpy", "cv2"):
     except Exception as e:
         print(f"    {mod} MISSING ({type(e).__name__})")
 PYVER
-
-    say "Checking mediapipe imports"
-    _mp_ok() { python3 -c "import mediapipe" >/dev/null 2>&1; }
-    if ! _mp_ok; then
-        echo "    mediapipe import failed — attempting repair"
-        _err=$(python3 -c "import mediapipe" 2>&1 | tail -1) || true
-        echo "    $_err"
-        if echo "$_err" | grep -q "runtime_version\|protobuf" 2>/dev/null; then
-            echo "    remedy 1/2: removing tensorflow (unused by this pipeline)"
-            pip uninstall -y -q tensorflow tensorflow-cpu tensorflow-gpu 2>/dev/null || true
-        fi
-        if ! _mp_ok; then
-            echo "    remedy 2/2: reinstalling mediapipe against the current protobuf"
-            pip install -q --force-reinstall --no-deps mediapipe 2>&1 | tail -2 || true
-            pip install -q "protobuf<5" 2>&1 | tail -2 || true
-        fi
-        if _mp_ok; then
-            echo "    repaired: mediapipe imports"
-        else
-            echo "    STILL BROKEN — face detection will not work. Last error:"
-            python3 -c "import mediapipe" 2>&1 | tail -3 || true
-        fi
-    else
-        echo "    mediapipe imports"
-    fi
 
     # Face ID needs an ONNX runtime to execute; requirements.txt deliberately
     # ships only insightface (onnxruntime-gpu is ~2GB and lives in the
@@ -178,7 +152,7 @@ import importlib
 # which overwrites the cv2 package Kaggle ships. Our usage (VideoCapture,
 # cvtColor, resize) is headless-safe and no GUI call exists in this repo,
 # but a broken cv2 would otherwise surface much later as a failed render.
-for m in ("fastapi", "uvicorn", "yt_dlp", "mediapipe", "ultralytics", "torch", "cv2"):
+for m in ("fastapi", "uvicorn", "yt_dlp", "ultralytics", "torch", "cv2"):
     try:
         importlib.import_module(m)
         print(f"    ok   {m}")
@@ -388,9 +362,10 @@ fi
 # transcribe_backends.py:591 picks the backend from TRANSCRIBE_BACKEND, which
 # defaults to "whisper". Measured on Kaggle 5-aug-2026: the local whisper path
 # took 254s of a ~420s job AND produced no diarization, which costs
-# subject_policy its TIER_DIARIZED evidence entirely (that run's framing line
-# read "lip-sync 97%, directed 3%" with diarized at 0%). On multi-speaker
-# footage that is the signal that stops the camera sitting on the wrong person.
+# the speaker-binding pipeline its diarized-tier evidence entirely (that run's
+# framing line read "lip-sync 97%, directed 3%" with diarized at 0%). On
+# multi-speaker footage that is the signal that stops the camera sitting on
+# the wrong person.
 if [ -n "${ASSEMBLYAI_API_KEY:-}" ]; then
     export TRANSCRIBE_BACKEND="${TRANSCRIBE_BACKEND:-assemblyai}"
     echo "    ASSEMBLYAI_API_KEY: set — TRANSCRIBE_BACKEND=$TRANSCRIBE_BACKEND (API + diarization)"
@@ -445,9 +420,9 @@ fi
 # GPU-appropriate defaults, mirroring docker-compose.gpu.yml.
 if [ "$GPU_COUNT" -gt 0 ]; then
     export FFMPEG_ENCODER="${FFMPEG_ENCODER:-nvenc}"
-    export YOLO_DEVICE="${YOLO_DEVICE:-0}"
+    export WHISPER_DEVICE="${WHISPER_DEVICE:-cuda}"
     export USE_ASD="${USE_ASD:-1}"
-    echo "    encoder=nvenc  yolo_device=0  gpus=$GPU_COUNT"
+    echo "    encoder=nvenc  whisper_device=cuda  gpus=$GPU_COUNT"
 fi
 export OUTPUT_DIR="${OUTPUT_DIR:-$PWD/output}"
 mkdir -p "$OUTPUT_DIR" uploads

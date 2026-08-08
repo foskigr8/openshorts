@@ -1,5 +1,10 @@
 # Task: finish the OpenShorts framing rebuild and validate it on Pop The Balloon
 
+> **OBSOLETE (8-aug-2026):** this handoff describes building
+> `subject_policy.py`/`reframe_v2.py`. Those were removed — `reframe_v3` is
+> the only reframe engine. Kept as build history; do not resurrect the v2
+> files it references.
+
 You are continuing work in `/teamspace/studios/this_studio/openshorts`.
 Branch `session/framing-work`, HEAD `0b55031`. `main` is clean at `be4dd06`.
 **Do not roll back to main.** The owner's instruction was: no going back, make it better.

@@ -584,11 +584,11 @@ def _select_backend():
     is configured, prefer assemblyai over the historical "whisper" default:
     supplying the key and getting local whisper anyway is never what anyone
     means by it, and the cost of the silent default is not just speed. Whisper
-    produces no diarization, and diarization is subject_policy's TIER_DIARIZED
-    evidence — the signal that stops the camera sitting on the wrong person in
-    multi-speaker footage. Measured on Kaggle 5-aug-2026 (job b86b8c5a): 254s
-    of a ~420s job spent in local whisper, with the framing evidence line
-    reading "lip-sync 97%, directed 3%" and diarized at 0%.
+    produces no diarization, and diarization is the speaker-binding pipeline's
+    diarized-tier evidence — the signal that stops the camera sitting on the
+    wrong person in multi-speaker footage. Measured on Kaggle 5-aug-2026 (job
+    b86b8c5a): 254s of a ~420s job spent in local whisper, with the framing
+    evidence line reading "lip-sync 97%, directed 3%" and diarized at 0%.
 
     The fallback chain below is unchanged, so an AssemblyAI outage still lands
     on whisper.

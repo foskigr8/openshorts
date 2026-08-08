@@ -5,7 +5,7 @@ import pytest
 
 import gemini_pool
 
-# main pulls in cv2/torch/mediapipe at import time; skip where those aren't
+# main pulls in cv2/scenedetect/yt-dlp at import time; skip where those aren't
 # installed (matches tests/test_gemini_retry.py's convention).
 main = pytest.importorskip("main")
 

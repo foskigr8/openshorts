@@ -72,17 +72,16 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 | `dashboard/vite-plugin-seo.js` | Build-time SEO surface: injects crawler-visible homepage content, emits static pages, sitemap.xml and llms.txt |
 | `dashboard/seo/data.js` | Single source of truth for pricing, pipeline and competitor facts used by every generated page |
 
-### Framing engines (what actually runs)
+### Framing (what actually runs)
 
-Reframing is engine-selectable per job via `REFRAME_ENGINE` (default `v2`).
-MediaPipe/YOLOv8 appear in v1/v2 only — the v3 rebuild deliberately replaces
-the face detector with `face_spine.py`'s SCRFD/ByteTrack/ArcFace chain.
+`reframe_v3` is the only reframe engine. The v1/v2 engines (MediaPipe/YOLO
+detectors, `SmoothedCameraman`, `subject_policy`) were removed — there is no
+`REFRAME_ENGINE` switch and no fallback. The chain is:
 
-| engine | tools | behavior |
-|---|---|---|
-| `v1` (legacy) | MediaPipe faces + `SmoothedCameraman` | per-frame reactive crop loop; kept only as v2's safety net |
-| `v2` (default) | MediaPipe faces + YOLOv8 bodies + LR-ASD lips | per-scene crop, one ffmpeg-native render pass, letterboxed into a fixed 3:4 content band |
-| `v3` (rebuild) | `face_spine.py` (SCRFD + ByteTrack + ArcFace) + LR-ASD + UNISAL saliency (`vendor/pyautoflip`) + `shot_planner.py` | plans the whole shot list up front — one static crop per shot (jitter is structurally impossible), saliency-aware aim within containment, fail-loud `validate_composition` |
+`face_spine.py` (SCRFD + ByteTrack + ArcFace) → `speaker_fusion.py` (one
+speaker↔track binding per clip) → `shot_planner.py` (one static crop per
+shot) → `reframe_v3.py` (saliency-aware composition, fail-loud
+`validate_composition`).
 
 See `MASTER_PLAN_FRAMING_REBUILD.md` for why MediaPipe/YOLO were replaced and
 how each v3 decision was tested.
@@ -147,7 +146,7 @@ engine is the sole Stage 3 path there — `kaggle_bootstrap.sh` prints which.
 `insightface` is in `requirements.txt`, but **installing it unconstrained
 breaks the stack** (measured 6-aug-2026): its chain pulls numpy 2.5.1 and
 opencv-python-headless 5.x through `albumentations -> albucore`, and the pinned
-mediapipe/ultralytics/torch stack does not work on numpy 2. Hence the `numpy<2`
+ultralytics/torch stack does not work on numpy 2. Hence the `numpy<2`
 guard line in requirements.txt — it is not imported by anything, it exists to
 stop that. `kaggle_bootstrap.sh` re-applies the same protection differently: it
 strips numpy/scipy/opencv lines (Kaggle's are CUDA-built), so it generates a
@@ -165,9 +164,10 @@ manual `.ipynb` re-import. Things that were silently degrading there:
 
 - **Transcription.** `TRANSCRIBE_BACKEND` chose the backend and defaulted to
   `whisper`, so setting `ASSEMBLYAI_API_KEY` alone did nothing: 254s of a ~420s
-  job, and no diarization at all (that is `subject_policy`'s `TIER_DIARIZED`
-  evidence). `_select_backend()` now prefers assemblyai when the key is set and
-  the backend is unset; an explicit `TRANSCRIBE_BACKEND` still wins.
+  job, and no diarization at all (that strips the speaker-binding pipeline of
+  its diarized-tier evidence). `_select_backend()` now prefers assemblyai when
+  the key is set and the backend is unset; an explicit `TRANSCRIBE_BACKEND`
+  still wins.
 - **Storage.** `/kaggle/working` is wiped at session end. `hf_storage.py`
   uploads each clip **as it finishes** (not at job end, which loses everything
   when a session dies mid-job) and records the key in the job metadata;
@@ -179,7 +179,7 @@ manual `.ipynb` re-import. Things that were silently degrading there:
 - **The second GPU.** Clips render on a ThreadPoolExecutor in ONE process, so
   `CUDA_VISIBLE_DEVICES` per worker cannot work — it is read once at CUDA init.
   `gpu_affinity.py` uses the thread-local torch device instead. Only LR-ASD
-  shards; MediaPipe/YOLO stay serialized under `DETECT_LOCK`, so expect a
+  shards; per-clip face-spine detection runs inside each worker, so expect a
   partial gain on multi-clip jobs, not 2×.
 
 ### Captions
@@ -216,18 +216,10 @@ say "OpenShorts is free" without naming the Cloud price in the same breath: both
 are true of different editions and quoting only the first one is what makes AI
 answers describe the paid product as free.
 
-### Dual-Mode Video Reframing
-- **TRACK Mode** (single subject): MediaPipe face detection + YOLOv8 fallback with "Heavy Tripod" stabilization
-- **GENERAL Mode** (groups/landscapes): Blurred background layout preserving full width
+### Video Reframing (v3) — attention, not just the active speaker
 
-### Key Classes
-- `SmoothedCameraman` - Stabilized camera movement with safe zone logic (prevents jitter)
-- `SpeakerTracker` - Prevents rapid speaker switching, handles temporary occlusions
-
-### Framing rebuild (v3) — attention, not just the active speaker
-
-The v2 engines above decide the crop **per frame, reactively**, which is why
-jitter is visible even when nothing about who should be on screen changed. The
+The old v1/v2 engines decided the crop **per frame, reactively**, which is why
+jitter was visible even when nothing about who should be on screen changed. The
 v3 chain plans instead: `face_spine` (who) → `speaker_fusion` (who is talking)
 → `shot_planner` (who holds the frame, for how long) → `reframe_v3` (what the
 crop looks like). Each shot carries ONE static crop, so intra-shot re-aiming
@@ -285,7 +277,7 @@ Async job queue with semaphore-based concurrency control. Configure via `MAX_CON
 > API keys are stored encrypted in the browser and sent via headers only when needed. Never stored server-side.
 
 ## Tech Stack
-- **Backend:** Python 3.11, FastAPI, google-genai, faster-whisper, ultralytics (YOLOv8), mediapipe, opencv-python, yt-dlp, FFmpeg, httpx
+- **Backend:** Python 3.11, FastAPI, google-genai, faster-whisper, insightface (SCRFD/ArcFace), ultralytics (ByteTrack/BoT-SORT only), LR-ASD, ONNX Runtime (UNISAL saliency), opencv-python, yt-dlp, FFmpeg, httpx
 - **Frontend:** React 18, Vite 4, Tailwind CSS 3.4
 - **External APIs:** Google Gemini, ElevenLabs Dubbing, Upload-Post
 - **Infrastructure:** Docker + Docker Compose, AWS S3

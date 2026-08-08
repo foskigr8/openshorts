@@ -487,8 +487,8 @@ def test_transcribe_media_falls_back_on_assemblyai_exception(monkeypatch):
 #
 # Measured on Kaggle 5-aug-2026 (job b86b8c5a): ASSEMBLYAI_API_KEY was set and
 # local whisper ran anyway, because the backend is chosen by TRANSCRIBE_BACKEND
-# and nothing set it. That cost 254s of a ~420s job AND all diarization, which
-# is subject_policy's TIER_DIARIZED framing evidence.
+# and nothing set it. That cost 254s of a ~420s job AND all diarization, the
+# speaker-binding pipeline's diarized-tier framing evidence.
 
 
 def test_explicit_backend_always_wins(monkeypatch):

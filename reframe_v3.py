@@ -173,10 +173,10 @@ def attention_center(composite: np.ndarray) -> Tuple[float, float]:
 # Crop geometry
 # ---------------------------------------------------------------------------
 
-# Fraction of the crop HEIGHT above the subject's centre. 0.36 matches
-# main.CAMERA_HEAD_Y, the value already tuned on this footage: it leaves
-# headroom above and body below rather than centring the face vertically,
-# which reads as a snapshot.
+# Fraction of the crop HEIGHT above the subject's centre. 0.36 is the value
+# tuned on this footage during the v1/v2 era (CAMERA_HEAD_Y) and kept here:
+# it leaves headroom above and body below rather than centring the face
+# vertically, which reads as a snapshot.
 DEFAULT_HEAD_Y = 0.36
 
 # Breathing room around the subject box, as a fraction of its own size. The
@@ -699,7 +699,6 @@ def _render_regular(input_video: str, output_video: str, composed: Sequence[Comp
                     ass_filter=None, captioned_output=None) -> None:
     """Render static single/two shots in one native ffmpeg pass."""
     import subprocess
-    import reframe_v2
     from ffmpeg_utils import METADATA_SCRUB, QUALITY_FAST, video_encode_args
 
     graph = _regular_filtergraph(composed, frame_w, frame_h, out_w, out_h)
@@ -708,9 +707,52 @@ def _render_regular(input_video: str, output_video: str, composed: Sequence[Comp
            *video_encode_args(QUALITY_FAST), "-c:a", "copy", *METADATA_SCRUB,
            "-movflags", "+faststart", output_video]
     if ass_filter and captioned_output:
-        cmd += reframe_v2.caption_output_args(ass_filter, captioned_output)
+        cmd += caption_output_args(ass_filter, captioned_output)
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                    timeout=1800)
+
+
+DELIVERY_MIN_WIDTH = 1080
+
+
+def delivery_size(orig_w: int, orig_h: int, aspect_ratio: float):
+    """Output (width, height) for a reframe of this source.
+
+    Picks the largest crop the source allows, then upscales to
+    ``DELIVERY_MIN_WIDTH`` if that crop is narrower. Both dimensions come back
+    even (x264/NVENC reject odd ones). This is the one place the delivery
+    size is decided for every render.
+    """
+    out_h = orig_h
+    out_w = int(out_h * aspect_ratio)
+    if out_w > orig_w:
+        out_w = orig_w
+        out_h = int(out_w / aspect_ratio)
+
+    if out_w < DELIVERY_MIN_WIDTH:
+        out_w = DELIVERY_MIN_WIDTH
+        out_h = int(round(out_w / aspect_ratio))
+
+    return out_w + (out_w % 2), out_h + (out_h % 2)
+
+
+def caption_output_args(ass_filter: str, captioned_output: str,
+                        encode_tier: str = "quality"):
+    """Second-output args for the one-pass clean+captioned render.
+
+    With these args the same ffmpeg invocation encodes BOTH files from the
+    same reframed frames: the clean clip exactly as before, and the captioned
+    clip with the ass filter applied. The captioned file therefore loses one
+    generation instead of two.
+    """
+    from ffmpeg_utils import METADATA_SCRUB, video_encode_args
+
+    return [
+        "-map", "[v]", "-map", "0:a?",
+        "-vf", ass_filter,
+        *video_encode_args(encode_tier), "-c:a", "copy", *METADATA_SCRUB,
+        "-movflags", "+faststart", captioned_output,
+    ]
 
 
 def _render_with_splits(input_video: str, output_video: str, composed: Sequence[ComposedShot],
@@ -775,13 +817,11 @@ def render(input_video, final_output_video, aspect_ratio,
            ass_filter=None, captioned_output=None):
     """Full v3 reframe. Errors intentionally propagate; there is no v3→v2 fallback."""
     import face_spine
-    import main as m
     import speaker_fusion
     import shot_planner
-    import reframe_v2
 
     print("   🚀 Reframe engine v3 (planned static shots)")
-    duration, _, frame_w, frame_h = _duration_and_size(input_video)
+    duration, fps, frame_w, frame_h = _duration_and_size(input_video)
     effective_end = clip_end if clip_end is not None else clip_start + duration
     tracks = face_spine.build_face_spine(input_video)
     if not tracks:
@@ -791,7 +831,8 @@ def render(input_video, final_output_video, aspect_ratio,
     try:
         import asd_worker
         if asd_worker.available():
-            asd_boxes = asd_worker.score_clip(input_video, m.detect_face_candidates).get("per_second_box") or []
+            asd_boxes = asd_worker.score_clip(
+                input_video, face_spine.detect_faces_per_frame).get("per_second_box") or []
     except Exception as exc:
         print(f"   ⚠️ LR-ASD unavailable for v3 ({type(exc).__name__}: {exc})")
     segments = (transcript or {}).get("segments", [])
@@ -813,7 +854,30 @@ def render(input_video, final_output_video, aspect_ratio,
     composed = compose_shots(planned, tracks, active, input_video, frame_w, frame_h, aspect_ratio)
     validate_composition(composed, frame_w, frame_h, aspect_ratio)
 
-    out_w, out_h = reframe_v2.delivery_size(frame_w, frame_h, aspect_ratio)
+    # Path instrumentation (same contract as the old v2 engine): when
+    # REFRAME_DUMP_PATH is set, write the per-frame crop rects (source
+    # pixels) so eval/ can measure jitter numerically. v3's shots are
+    # static, so the motion metric on this dump is the jitter measurement.
+    dump_dir = os.environ.get("REFRAME_DUMP_PATH", "").strip()
+    if dump_dir:
+        try:
+            import os
+            n_frames = max(1, int(round(duration * fps)))
+            rects = []
+            for i in range(n_frames):
+                t = i / fps
+                shot = next((s for s in composed if s.start <= t < s.end), composed[-1])
+                rects.append(list(shot.crop) if shot.crop is not None
+                             else [0.0, 0.0, float(frame_w), float(frame_h)])
+            os.makedirs(dump_dir, exist_ok=True)
+            tag = os.path.splitext(os.path.basename(final_output_video))[0]
+            np.save(os.path.join(dump_dir, f"{tag}_rects.npy"),
+                    np.asarray(rects, dtype=float))
+            print(f"   📐 REFRAME_DUMP_PATH: wrote {tag}_rects.npy ({n_frames} rects)")
+        except Exception as exc:
+            print(f"   ⚠️ REFRAME_DUMP_PATH failed ({exc}) — continuing")
+
+    out_w, out_h = delivery_size(frame_w, frame_h, aspect_ratio)
     if any(shot.layout == LAYOUT_SPLIT for shot in composed):
         if ass_filter or captioned_output:
             raise RuntimeError("v3 split-screen captions are not implemented; refusing to misplace captions")

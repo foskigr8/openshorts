@@ -1,5 +1,9 @@
 # Running OpenShorts in this studio (self-serve runbook)
 
+> **OBSOLETE in part (8-aug-2026):** the caption/reframe notes referencing
+> `reframe_v2` predate the v3-only cleanup — `reframe_v3` is the only
+> reframe engine. The run/restart steps are still current.
+
 Quick reference for starting/restarting the app without help. Everything here
 runs from a terminal in this workspace, inside `/teamspace/studios/this_studio/openshorts`.
 

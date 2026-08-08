@@ -1,5 +1,10 @@
 # Running OpenShorts on Kaggle (dual T4)
 
+> **OBSOLETE in part (8-aug-2026):** the v1/v2 engines (MediaPipe/YOLO,
+> `subject_policy`, `reframe_v2`) were removed — `reframe_v3` is the only
+> reframe engine. This doc's v2-era setup notes are history; the bootstrap
+> and smoke-test flow it describes is still current.
+
 Kaggle gives you 2×T4 for free, which is where this pipeline wants to run: on
 CPU, LR-ASD alone is ~2× realtime (a 32s clip took 170s to render end to end);
 batched on CUDA it measured ~48× realtime.

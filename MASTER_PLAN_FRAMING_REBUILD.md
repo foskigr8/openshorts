@@ -12,6 +12,16 @@ specific effort (the framing/reframing rebuild), written in full because the
 owner needs to hand this off to another engine (DeepSeek) and cannot spend
 more tokens re-explaining it.
 
+> **STATUS (8-aug-2026): the rebuild is shipped end-to-end. `reframe_v3` is
+> now the ONLY reframe engine.** `reframe_v2.py`, `subject_policy.py`,
+> `tools_centrecheck.py`, `SmoothedCameraman`, `SpeakerTracker`,
+> `DETECT_LOCK`, the MediaPipe/YOLO detectors, and the `REFRAME_ENGINE`
+> switch were all deleted — there is no engine selection and no v3→v2
+> fallback. The Kaggle notebook is workflow-only (secrets → clone →
+> bootstrap → smoke test). Everything in this doc that refers to v1/v2 as
+> "current" describes the historical state before this cleanup; read it as
+> the build log it is, not as instructions to resurrect old engines.
+
 ---
 
 ## 0. What this whole effort is, in one paragraph
@@ -28,10 +38,11 @@ actually look (trained saliency), because the old engine's only question —
 "who is talking" — is the wrong question during a reaction (someone pops a
 balloon, the speaker is not the attraction).
 
-Everything below (§1-§5) is **done, tested, committed, pushed**. §6 is the one
-thing still open (Phase 5: wiring it into an actual render) and is where
-DeepSeek should start. §7-§9 cover three problems discovered along the way
-that need fixing before Phase 5 can be validated on Kaggle.
+Everything below (§1-§5) is **done, tested, committed, pushed**, and §6
+(Phase 5: wiring v3 into an actual render) shipped with the v3-only cleanup
+on 8-aug-2026 — `main.py` now calls `reframe_v3.render` directly and the old
+engines are gone. §7-§9 cover three problems discovered along the way; each
+was addressed during the build and is recorded here as history.
 
 ---
 

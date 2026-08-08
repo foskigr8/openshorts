@@ -47,13 +47,13 @@ def test_missing_torch_is_not_fatal(monkeypatch):
     assert gpu_affinity.assign_worker(3) is None
 
 
-def test_sharding_is_off_unless_opted_in(monkeypatch):
-    """Default = no affinity. Assigning workers to cuda:1 broke TransNetV2,
-    which loads on the default device and then got tensors from another one."""
+def test_all_devices_are_auto_enabled_without_clip_gpus(monkeypatch):
+    """f577936: dual-GPU affinity is on by default — with CUDA visible and no
+    CLIP_GPUS, workers spread across every device."""
     _fake_torch(monkeypatch, 2)
-    assert gpu_affinity.available_devices() == []
-    assert gpu_affinity.assign_worker(0) is None
-    assert gpu_affinity.current_device() is None
+    assert gpu_affinity.available_devices() == [0, 1]
+    assert gpu_affinity.assign_worker(0) == "cuda:0"
+    assert gpu_affinity.current_device() == "cuda:0"
 
 
 def test_single_gpu_pins_everything_to_zero(monkeypatch):

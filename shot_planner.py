@@ -2,12 +2,12 @@
 
 WHY THIS EXISTS
 ---------------
-Every engine so far in this codebase decides the crop PER FRAME, reactively:
-`main.SmoothedCameraman` eases toward a target every frame, `subject_policy`
-re-runs its tier decision every frame, and jitter is the visible result of
-that — a crop that is always slightly re-aiming even when nothing about who
-should be on screen has actually changed. The owner's own instruction was
-exact: "if you cut something, remove that end, and the person is in a
+The v1/v2 engines decided the crop PER FRAME, reactively: the camera eases
+toward a target every frame and the subject-policy tier decision re-runs
+every frame, and jitter is the visible result of that — a crop that is always
+slightly re-aiming even when nothing about who should be on screen has
+actually changed. The owner's own instruction was exact: "if you cut
+something, remove that end, and the person is in a
 stationary place, there is no need for you to move the person."
 
 This module plans the WHOLE shot list up front instead: a small number of
@@ -55,8 +55,8 @@ SHOT_REACTION = "reaction"
 SHOT_WIDE = "wide"
 
 # A directive-driven cutaway is punctuation, not the main shot — bounded
-# short on purpose. Mirrors subject_policy.REACTION_MAX_HOLD_SECONDS (2.0),
-# the equivalent per-frame constant in the current engine.
+# short on purpose. Bounded so a reaction never outlasts a real shot, the
+# same floor the old per-frame reaction hold enforced.
 DEFAULT_MAX_REACTION_SECONDS = 2.0
 
 # Below this, a directive-suggested window is too small to be worth a cut at
@@ -170,8 +170,8 @@ def merge_short_runs(runs: List[Tuple[float, float, Optional[int]]],
     run, extending it and keeping the PRECEDING run's target.
 
     A brief flicker to a different track (one bad ASD second, a momentary
-    fusion gap) is not enough evidence to justify a real shot change — this
-    is the same floor-protection idea as `subject_policy.MIN_SHOT_HOLD_SECONDS`,
+    fusion gap) is not enough evidence to justify a real shot change — the
+    same floor-protection idea as the old per-frame minimum shot hold,
     applied once per shot instead of re-checked every frame.
 
     Never reabsorbs across a forced boundary (a run starting exactly at one

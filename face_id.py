@@ -54,7 +54,7 @@ def default_ctx_id() -> int:
     """Which GPU InsightFace runs on.
 
     Defaults to the LAST visible device, not device 0. On the 2×T4 target that
-    puts face ID on GPU 1 while the render pipeline (YOLO, MediaPipe, LR-ASD,
+    puts face ID on GPU 1 while the render pipeline (SCRFD/ArcFace, LR-ASD,
     ffmpeg) keeps GPU 0 — the integration guide's explicit recommendation, and
     it matters because face ID runs BEFORE clip selection, so sharing device 0
     would stall the stage everything else waits on. Single-GPU and CPU hosts

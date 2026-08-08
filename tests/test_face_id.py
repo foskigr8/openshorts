@@ -170,3 +170,58 @@ def test_a_junk_ctx_falls_back_to_zero(monkeypatch, capsys):
     _fake_torch(monkeypatch, 2)
     assert face_id.default_ctx_id() == 0
     assert "FACE_ID_CTX" in capsys.readouterr().out
+
+
+# --- track matching helpers (ported from tests/test_face_id_framing.py) -----
+
+
+def _tracks():
+    return [
+        {"track_id": 0, "frames": [
+            {"timestamp": 1.0, "bbox": [100, 100, 200, 240]},
+            {"timestamp": 1.4, "bbox": [102, 100, 202, 240]},
+        ]},
+        {"track_id": 1, "frames": [
+            {"timestamp": 1.1, "bbox": [400, 120, 520, 280]},
+        ]},
+    ]
+
+
+def test_find_track_at_timestamp_matches_by_iou():
+    tracks = _tracks()
+    # InsightFace-style [x1,y1,x2,y2] box overlapping track 0's frame at 1.0.
+    assert face_id.find_track_at_timestamp(
+        tracks, 1.05, [110, 110, 190, 230]) == 0
+    assert face_id.find_track_at_timestamp(
+        tracks, 1.1, [410, 130, 510, 270]) == 1
+
+
+def test_find_track_at_timestamp_ignores_distant_frames():
+    assert face_id.find_track_at_timestamp(
+        _tracks(), 5.0, [110, 110, 190, 230]) is None
+
+
+def test_merge_face_id_with_tracker_votes_and_ranges():
+    idents = [
+        {"timestamp": 1.0, "name": "Joe", "confidence": 0.9,
+         "bbox": [110, 110, 190, 230]},
+        {"timestamp": 1.4, "name": "Joe", "confidence": 0.88,
+         "bbox": [112, 110, 192, 230]},
+        {"timestamp": 1.1, "name": "Ann", "confidence": 0.7,
+         "bbox": [410, 130, 510, 270]},
+    ]
+    merged = face_id.merge_face_id_with_tracker(_tracks(), idents)
+    assert merged[0]["name"] == "Joe"
+    assert merged[0]["on_screen"] == [[1.0, 1.4]]
+    assert merged[1]["name"] == "Ann"
+
+
+def test_merge_face_id_with_tracker_requires_agreement():
+    # Two votes for different names on the same track -> nothing committed.
+    idents = [
+        {"timestamp": 1.0, "name": "Joe", "confidence": 0.9,
+         "bbox": [110, 110, 190, 230]},
+        {"timestamp": 1.4, "name": "Ann", "confidence": 0.9,
+         "bbox": [112, 110, 192, 230]},
+    ]
+    assert face_id.merge_face_id_with_tracker(_tracks(), idents) == {}

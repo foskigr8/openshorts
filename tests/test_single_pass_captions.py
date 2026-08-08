@@ -8,7 +8,7 @@ frames; these tests pin the prep (naming convention) and the output args.
 import os
 
 import main
-import reframe_v2
+import reframe_v3
 
 
 def _transcript():
@@ -41,7 +41,7 @@ def test_prepare_caption_burn_skips_silent_video(tmp_path):
 
 
 def test_caption_output_args_map_second_output():
-    args = reframe_v2.caption_output_args(
+    args = reframe_v3.caption_output_args(
         "ass='/tmp/subs.ass':fontsdir='/fonts'", "/tmp/out_sub.mp4")
     assert args[0:4] == ["-map", "[v]", "-map", "0:a?"]
     assert "-vf" in args

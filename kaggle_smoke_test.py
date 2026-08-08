@@ -89,7 +89,8 @@ def _transcription():
     """AssemblyAI (API + diarization) vs local whisper.
 
     Local whisper cost 254s of a ~420s job in the measured run AND produced no
-    diarization, which is subject_policy's TIER_DIARIZED framing evidence.
+    diarization, which strips the speaker-binding pipeline of its diarized
+    framing evidence.
     """
     # LAST line only: _select_backend() prints its own explanation to stdout
     # when it auto-selects, so the naive read captured the log line plus the

@@ -31,11 +31,8 @@ services:
       - FFMPEG_ENCODER=nvenc
       - WHISPER_DEVICE=cuda
       - ASR_GPU_CONCURRENCY=1
-      # Explicit YOLO device so CUDA init failures fail loud (main.py guard).
-      - YOLO_DEVICE=0
       # LR-ASD active-speaker detection. Off by default in the base compose
       # because on CPU it runs ~4x realtime; on this T4 the model itself is
       # 19x realtime (0.5s per 10s clip), so it is worth having on wherever a
-      # GPU exists. Adds ~7s to a 10s clip end-to-end, most of which is the
-      # 25fps MediaPipe pass, not the network.
+      # GPU exists.
       - USE_ASD=1

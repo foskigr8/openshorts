@@ -1,8 +1,9 @@
 """Identity must survive the things that used to reset it.
 
-The legacy matcher in SpeakerTracker.assign_ids matched on horizontal centre
-alone, greedily, forgetting anyone unseen for 30 frames. These tests pin the
-behaviours that fixes: crossings, occlusion, and per-frame idempotence.
+The legacy matcher (v1/v2's SpeakerTracker.assign_ids) matched on
+horizontal centre alone, greedily, forgetting anyone unseen for 30 frames.
+These tests pin the behaviours that replaced it: crossings, occlusion, and
+per-frame idempotence.
 """
 import numpy as np
 import pytest
@@ -134,61 +135,6 @@ def test_botsort_backend_also_works():
     cands = [_cand(400), _cand(1300)]
     t.update(cands, _frame(), frame_number=0)
     assert len({c["id"] for c in cands}) == 2
-
-
-# --- integration with SpeakerTracker ---------------------------------------
-
-main = pytest.importorskip("main")
-
-
-def test_speaker_tracker_delegates_to_the_identity_backend():
-    t = _tracker()
-    st = main.SpeakerTracker(identity=t)
-    st.set_identity_frame(_frame())
-    cands = [_cand(400), _cand(1300)]
-    out = st.assign_ids(cands, 0, W)
-    assert len({c["id"] for c in cands}) == 2
-    # returns the legacy shape callers expect
-    assert all({"id", "box", "score"} <= set(c) for c in out)
-    assert [c["id"] for c in out] == [c["id"] for c in cands]
-
-
-def test_speaker_tracker_without_identity_uses_legacy_matching():
-    st = main.SpeakerTracker()
-    cands = [_cand(400), _cand(1300)]
-    st.assign_ids(cands, 0, W)
-    assert len({c["id"] for c in cands}) == 2
-
-
-def test_delegated_ids_survive_an_occlusion_legacy_would_lose():
-    """End-to-end version of the occlusion case, through SpeakerTracker."""
-    st = main.SpeakerTracker(identity=_tracker())
-    before = after = None
-    for i in range(30):
-        st.set_identity_frame(_frame())
-        cands = [_cand(500)]
-        if not (10 <= i < 21):
-            cands.append(_cand(1200, y=310))
-        st.assign_ids(cands, i * 4, W)
-        if i == 9:
-            before = cands[1]["id"]
-        if i == 29:
-            after = cands[1]["id"]
-    assert after == before
-
-    legacy = main.SpeakerTracker()
-    l_before = l_after = None
-    for i in range(30):
-        cands = [_cand(500)]
-        if not (10 <= i < 21):
-            cands.append(_cand(1200, y=310))
-        legacy.assign_ids(cands, i * 4, W)
-        if i == 9:
-            l_before = cands[1]["id"]
-        if i == 29:
-            l_after = cands[1]["id"]
-    # Documents WHY this change exists: legacy loses the identity here.
-    assert l_after != l_before
 
 
 def test_provisional_ids_are_stable_across_frames():

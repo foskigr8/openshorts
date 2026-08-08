@@ -2,16 +2,17 @@
 
 WHY THIS EXISTS
 ---------------
-Today's binding (`reframe_v2._apply_asd_speaker_boost`) matches LR-ASD's
-speaker box to a candidate box EVERY FRAME, with a decisiveness gate
-(`ASD_MATCH_MARGIN`) that discards the match outright when two candidates
-look similarly close. Discarded evidence falls through to "hold whoever the
-camera already had" — and because the match is re-attempted independently
-every single frame, a momentary ambiguity (a reacting listener leaning in,
-two faces briefly at similar distance) can flip the binding mid-turn even
-though the SAME diarized speaker is still talking. That per-frame flip is
-the actual mechanism behind "long stares at the wrong person" and the
-"audio matches but the frame doesn't" symptom (see the rebuild plan, §1.1).
+The v2 engine's binding (`reframe_v2._apply_asd_speaker_boost`, now removed)
+matched LR-ASD's speaker box to a candidate box EVERY FRAME, with a
+decisiveness gate (`ASD_MATCH_MARGIN`) that discarded the match outright when
+two candidates looked similarly close. Discarded evidence fell through to
+"hold whoever the camera already had" — and because the match was re-attempted
+independently every single frame, a momentary ambiguity (a reacting listener
+leaning in, two faces briefly at similar distance) could flip the binding
+mid-turn even though the SAME diarized speaker was still talking. That
+per-frame flip was the actual mechanism behind "long stares at the wrong
+person" and the "audio matches but the frame doesn't" symptom (see the
+rebuild plan, §1.1).
 
 This module replaces per-frame matching with ONE decision per clip: for each
 diarized speaker label, look at ALL the evidence across the whole clip (every
@@ -24,8 +25,8 @@ the binding up.
 A speaker that never accumulates confident evidence is left UNBOUND rather
 than guessed at (see resolve_speaker_bindings) — Phase 4 owns the fallback
 tier for that case (hold / size / whatever the shot-planning rules decide),
-matching subject_policy's existing tier philosophy of "no strong evidence
-means don't invent a decision."
+the same "no strong evidence means don't invent a decision" philosophy the
+old subject-policy tiers enforced.
 """
 from __future__ import annotations
 
@@ -219,9 +220,8 @@ def fuse_speaker_tracks(asd_per_second_boxes: List[Optional[tuple]],
     spine + the diarized transcript -> (bindings, per_second_active_track).
 
     This is the plan's Pass 2 deliverable: "who is speaking, and which
-    track is them" — the input Phase 4's shot planner reads, and the
-    thing that replaces reframe_v2._apply_asd_speaker_boost's per-frame
-    matching once wired in (Phase 5).
+    track is them" — the input Phase 4's shot planner reads, replacing the
+    v2 engine's per-frame speaker-match with one decision per clip.
     """
     predicted_track_ps = asd_predicted_track_per_second(
         asd_per_second_boxes, spine_tracks, iou_threshold)

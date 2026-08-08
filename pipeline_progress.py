@@ -2,9 +2,9 @@
 
 Standalone on purpose: main.py (the producer) and app.py (the consumer) both
 need it, and it must stay importable in tests WITHOUT dragging in main.py's
-heavy stack (torch/ultralytics/cv2/mediapipe). Everything fails silent — a
-progress write or marker write must never break the pipeline that is actually
-producing clips.
+heavy stack (cv2/scenedetect/yt-dlp/google-genai). Everything fails silent —
+a progress write or marker write must never break the pipeline that is
+actually producing clips.
 """
 import json
 import os

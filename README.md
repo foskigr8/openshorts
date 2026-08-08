@@ -77,13 +77,11 @@ All generated videos and avatars are saved to a public gallery with SEO pages fo
 
 ### Clip Generator
 - **Viral Moment Detection**: Google Gemini 3.0 Flash analyzes transcripts and scene boundaries to detect 3-15 high-potential moments
-- **Smart 9:16 Cropping**: Engine-selectable AI reframing. The current engine
-  (v3) plans the whole shot list up front — SCRFD face tracking (ByteTrack +
-  ArcFace re-ID), LR-ASD active-speaker detection, and UNISAL saliency (where
-  a human eye actually looks) produce one static crop per shot, so intra-shot
-  jitter is structurally impossible. The default v2 engine is ffmpeg-native
-  (MediaPipe faces + YOLOv8 bodies + LR-ASD) and v1 is the legacy frame loop;
-  switch with `REFRAME_ENGINE`.
+- **Smart 9:16 Cropping**: AI reframing via the v3 chain — SCRFD face
+  detection (ByteTrack + ArcFace re-ID), LR-ASD active-speaker detection, and
+  UNISAL saliency (where a human eye actually looks). The shot planner plans
+  the whole shot list up front, producing one static crop per shot, so
+  intra-shot jitter is structurally impossible.
 - **Auto Subtitles**: faster-whisper with word-level timestamps, styled and burned into clips
 - **AI Voice Dubbing**: ElevenLabs integration for 30+ languages with voice cloning
 - **Hook Text Overlays**: AI-generated attention-grabbing text overlays
@@ -254,7 +252,7 @@ Navigate to **`http://localhost:5175`**
 
 | Layer | Technology |
 |-------|-----------|
-| Backend | Python 3.11, FastAPI, google-genai, faster-whisper, yt-dlp, FFmpeg, PySceneDetect, mediapipe, ultralytics (YOLOv8), insightface (SCRFD/ArcFace), LR-ASD, ONNX Runtime (UNISAL saliency), opencv-python, httpx |
+| Backend | Python 3.11, FastAPI, google-genai, faster-whisper, yt-dlp, FFmpeg, PySceneDetect, insightface (SCRFD/ArcFace), LR-ASD, ONNX Runtime (UNISAL saliency), opencv-python, httpx |
 | Frontend | React 18, Vite 4, Tailwind CSS 3.4 |
 | AI APIs | Google Gemini, fal.ai (Flux, Hailuo, VEED, Kling), ElevenLabs |
 | Infrastructure | Docker + Docker Compose, AWS S3 |

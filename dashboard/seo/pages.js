@@ -91,7 +91,7 @@ ${faqBlock([
   },
   {
     q: `Can I switch from ${c.name} without losing quality?`,
-    a: `The pipelines are comparable on the core job. OpenShorts transcribes with faster-whisper at word level, detects scenes with PySceneDetect, and scores moments with Google Gemini 3.0 Flash, then reframes with MediaPipe face tracking stabilised against jitter. The honest difference is caption styling, where the commercial tools generally ship more presets.`,
+    a: `The pipelines are comparable on the core job. OpenShorts transcribes with faster-whisper at word level, detects scenes with PySceneDetect, and scores moments with Google Gemini 3.0 Flash, then reframes with active-speaker tracking (SCRFD face detection + LR-ASD speaker binding) stabilised against jitter. The honest difference is caption styling, where the commercial tools generally ship more presets.`,
   },
   {
     q: `Does OpenShorts put a watermark on clips?`,
@@ -204,7 +204,7 @@ const freeClipGenerator = () => ({
   breadcrumb: [{ name: 'Free AI clip generator' }],
   tldr: [
     'OpenShorts self-hosted is a free AI clip generator under the MIT licence. No watermark, no usage cap, no subscription. You run it with Docker and supply your own Google Gemini API key, whose free tier covers 1,500 requests a day.',
-    'It turns a long video into 3 to 15 vertical clips: faster-whisper transcribes at word level, PySceneDetect finds the cuts, Gemini 3.0 Flash scores the moments, and MediaPipe face tracking reframes each one to 9:16.',
+    'It turns a long video into 3 to 15 vertical clips: faster-whisper transcribes at word level, PySceneDetect finds the cuts, Gemini 3.0 Flash scores the moments, and active-speaker reframing crops each one to 9:16.',
     'If you do not want to run anything, OpenShorts Cloud gives you 20 free minutes a month with a watermark, and paid plans from $12/month without one.',
   ],
   body: `
@@ -231,14 +231,14 @@ under MIT, and you can read all of it.</p>
 realistic floor. An NVIDIA GPU is optional and changes the numbers a lot: on CPU
 an 8-minute video takes roughly 5 to 8 minutes to process, and on a GPU the same
 video takes about 50 seconds. Linux, macOS and Windows via WSL2 all work, and
-Docker Compose pulls Python 3.11, FFmpeg, YOLOv8, MediaPipe and faster-whisper
-for you.</p>
+Docker Compose pulls Python 3.11, FFmpeg, InsightFace (SCRFD), LR-ASD and
+faster-whisper for you.</p>
 
 <h2>Is a free clip generator good enough for real posting?</h2>
 <p>It depends on what you are comparing against. The moment detection uses the
 same class of model the paid tools use, Google Gemini 3.0 Flash, and the
-reframing uses MediaPipe with a YOLOv8 fallback and a stabiliser that holds the
-camera still inside a safe zone rather than chasing every head movement. Where
+reframing uses SCRFD face detection with LR-ASD active-speaker binding, held
+stable by a shot planner rather than chasing every head movement. Where
 the commercial tools are ahead is caption styling: they ship more presets and
 more polish. If your clips live or die on animated caption design, budget for
 that either in time or in a second tool.</p>
@@ -294,7 +294,7 @@ const openSourceClipper = () => ({
   breadcrumb: [{ name: 'Open source video clipper' }],
   tldr: [
     'OpenShorts is an MIT-licensed video clipper that runs entirely on your own hardware via Docker Compose. Source video never leaves the machine.',
-    'The stack is Python 3.11, FastAPI, faster-whisper, PySceneDetect, MediaPipe, YOLOv8, FFmpeg and Google Gemini 3.0 Flash, with a React dashboard.',
+    'The stack is Python 3.11, FastAPI, faster-whisper, PySceneDetect, InsightFace (SCRFD), LR-ASD, FFmpeg and Google Gemini 3.0 Flash, with a React dashboard.',
     'It is the only open source tool in this category. Opus Clip, Klap, Vizard and Submagic are all closed-source cloud services.',
   ],
   body: `
@@ -407,7 +407,7 @@ ${faqBlock([
   },
   {
     q: 'How does the automatic vertical cropping work?',
-    a: 'Two modes. TRACK mode follows a single subject using MediaPipe face detection with a YOLOv8 fallback, stabilised so the crop holds still inside a safe zone instead of following every movement. GENERAL mode handles group shots and landscapes by preserving the full width over a blurred backdrop.',
+    a: 'A shot planner frames each clip: SCRFD face detection and LR-ASD active-speaker detection build one face spine, the speaker-to-face binding is decided once per clip so the camera cannot flip mid-turn, and an attention-weighted composer keeps the subject deliberately placed in the vertical frame. Two live speakers in an exchange become a split screen.',
   },
   {
     q: 'Can it dub clips into other languages?',
@@ -422,7 +422,7 @@ ${faqBlock([
     },
     {
       q: 'How does the automatic vertical cropping work?',
-      a: 'TRACK mode follows a single subject with MediaPipe face detection and a YOLOv8 fallback, stabilised to hold still inside a safe zone. GENERAL mode preserves full width over a blurred backdrop for group shots and landscapes.',
+      a: 'A shot planner frames each clip with SCRFD face detection and LR-ASD active-speaker binding, so the camera holds the active speaker and cannot flip mid-turn. Two live speakers in an exchange become a split screen.',
     },
   ],
 })

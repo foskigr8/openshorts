@@ -2,27 +2,20 @@
 
 WHY THIS EXISTS
 ---------------
-Today there are TWO independent face trackers in this pipeline: LR-ASD builds
-its own ByteTrack instance over its own face crops (asd_worker.py), and the
-renderer builds a SECOND, unrelated one over MediaPipe/YOLO boxes
-(reframe_v2.render). Their track-id spaces have nothing to do with each other,
-so matching "the face LR-ASD says is speaking" to "the box the renderer is
-about to frame" has to happen by PIXEL POSITION every frame
-(reframe_v2._apply_asd_speaker_boost), with a decisiveness gate that silently
-discards the evidence when two candidates look similar. That discarded
-evidence falls through to "hold whoever the camera already had" — which is the
-actual mechanism behind the wrong-person framing this rebuild exists to fix,
-not a tuning problem in either tracker.
-
-This module is the fix: ONE face-track spine, built once, that both speaker
-resolution (Phase 2/3) and shot planning (Phase 4) read from. No more
-positional matching between two id spaces, because there is only one.
+The v1/v2 engines had TWO independent face trackers — LR-ASD's ByteTrack over
+its own face crops (asd_worker.py) and the v2 renderer's MediaPipe/YOLO
+detector — whose id spaces had to be matched by pixel position every frame.
+That per-frame matching was the mechanism behind the wrong-person framing bug
+this rebuild exists to fix. The v2 engine is gone; this module is the fix:
+ONE face-track spine, built once, that speaker resolution (Phase 2/3) and
+shot planning (Phase 4) both read from. No more positional matching between
+two id spaces, because there is only one.
 
 WHAT IT DOES
 ------------
 1. SCRFD face detection (via InsightFace, already a project dependency for
    face_id.py's named-identity layer — buffalo_l bundles SCRFD + ArcFace) at
-   GPU-batched, onnxruntime speed, in place of MediaPipe's CPU-only BlazeFace.
+   GPU-batched, onnxruntime speed.
 2. A short-term tracker (identity_tracker.IdentityTracker, the same
    ByteTrack/BoT-SORT adapter the renderer already uses — no new tracking
    dependency) to link detections frame-to-frame within one continuous shot.
@@ -42,13 +35,12 @@ face-occluded stretch), never a framing target in their own right.
 
 NO GLOBAL LOCK
 ---------------
-main.py's MediaPipe/YOLO detection is serialized behind one process-wide
-DETECT_LOCK because the MediaPipe graph and the YOLO model instance are not
-thread-safe to call concurrently. onnxruntime sessions (what InsightFace runs
-on) do not have that restriction — concurrent Run() calls on a session are
-safe, and each device gets its own analyzer instance here (see
-_get_analyzer's cache key), so parallel clip/GPU workers do not need to queue
-behind a shared lock the way today's detection does.
+The old main.py MediaPipe/YOLO detectors (removed with the v1/v2 engines)
+needed a process-wide DETECT_LOCK because those graphs were not thread-safe.
+onnxruntime sessions (what InsightFace runs on) do not have that restriction —
+concurrent Run() calls on a session are safe, and each device gets its own
+analyzer instance here (see _get_analyzer's cache key), so parallel clip/GPU
+workers do not need to queue behind a lock.
 """
 import os
 import threading
@@ -218,6 +210,30 @@ def extract_raw_tracks(video_path: str, device: Optional[str] = None,
 
     cap.release()
     return tracks
+
+
+def detect_faces_per_frame(frame, ctx_id: int = 0,
+                           model_name: str = DEFAULT_MODEL,
+                           det_size=DEFAULT_DET_SIZE) -> List[dict]:
+    """Per-frame SCRFD candidates in the shape `asd_worker.score_clip` expects:
+    ``[{"box": (x, y, w, h), "score": float}, ...]``.
+
+    Same cached detector as `extract_raw_tracks` — this is the v3 chain's
+    face-candidate source for the render path.
+    """
+    analyzer = _get_analyzer(model_name, ctx_id, det_size)
+    try:
+        detections = analyzer.get(frame)
+    except Exception:
+        detections = []
+    candidates = []
+    for face in detections:
+        x, y, w, h = _xywh_from_bbox(face.bbox)
+        candidates.append({
+            "box": (x, y, w, h),
+            "score": float(getattr(face, "det_score", 1.0)),
+        })
+    return candidates
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:

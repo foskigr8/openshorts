@@ -1,8 +1,8 @@
 """Phase 3's actual deliverable: one speaker->track binding per clip,
 decided from all the evidence at once, that cannot flip mid-turn. Pure
 Python — no video, no GPU, no ASD model — so this is fully testable here,
-and it's the piece that directly replaces reframe_v2._apply_asd_speaker_boost
-once wired in (Phase 5).
+and it's the piece that replaced the v2 engine's per-frame speaker-match
+(reframe_v2._apply_asd_speaker_boost, now removed).
 """
 import speaker_fusion as sf
 

@@ -1,5 +1,10 @@
 # Kaggle optimization plan
 
+> **OBSOLETE in part (8-aug-2026):** the v1/v2 engines it describes
+> (MediaPipe/YOLO under `DETECT_LOCK`, `subject_policy`) were removed —
+> `reframe_v3` is the only reframe engine. The GPU-affinity findings below
+> still apply; the MediaPipe/YOLO mentions are history.
+
 > **STATUS (6-aug-2026): every finding below is implemented.** Findings 1, 2, 4,
 > 5 and 6 landed as described; Finding 3 was superseded by
 > `PLAN_CAPTIONS_AND_STORAGE.md` (HuggingFace, not R2) and is now implemented

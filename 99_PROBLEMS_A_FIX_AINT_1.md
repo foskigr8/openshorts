@@ -1,5 +1,10 @@
 # 99 Problems and a Fix Ain't 1
 
+> **OBSOLETE in part (8-aug-2026):** entries referencing the v2 engine
+> (`reframe_v2` filtergraphs, MediaPipe face detection, supersample) predate
+> the v3-only cleanup — `reframe_v3` is the only reframe engine. Kept as a
+> historical problem register.
+
 **The OpenShorts problem register — every problem reported, none of them
 confirmed fixed.**
 

@@ -261,11 +261,11 @@ def test_keep_spans_match_the_narrative_engine_model():
 def _load_main_functions(*names):
     """Compile named top-level functions out of main.py without importing it.
 
-    main.py pulls in cv2/scenedetect/mediapipe/ultralytics, which a unit-test
-    environment has no business needing — but the keep_spans consumers there
-    are pure Python over builtins, so we can compile just those and test
-    against the REAL source. That keeps this contract honest (it breaks if
-    someone edits main.py) instead of re-implementing the consumer here.
+    main.py pulls in cv2/scenedetect/yt-dlp, which a unit-test environment
+    has no business needing — but the keep_spans consumers there are pure
+    Python over builtins, so we can compile just those and test against the
+    REAL source. That keeps this contract honest (it breaks if someone edits
+    main.py) instead of re-implementing the consumer here.
     """
     import ast
     import os

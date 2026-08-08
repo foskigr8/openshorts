@@ -217,17 +217,11 @@ class TestGenerateAss:
         assert "Style: Default,Verdana," in content
 
     def test_general_range_gets_a_bigger_margin_v(self, tmp_path):
-        # Regression: captions used a fixed MarginV regardless of reframe
-        # mode, so during a GENERAL-layout scene (content shrunk and
-        # vertically centered, blurred fill above/below — see
-        # reframe_v2.general_filtergraph) the caption floated in the blur
-        # band well below the actual content, disconnected from it, reading
-        # as a second stacked panel (confirmed on real delivered clips,
-        # 31-jul-2026). A word inside a general_ranges window must get a
-        # per-line MarginV override pulling it up into the content box;
-        # a word outside any range must keep the default line MarginV of 0
-        # (inherits the Style's margin).
-        from subtitles import generate_ass
+        # The v3 engine renders every shot at the target aspect (no
+        # letterbox), so the content box fills the frame and every
+        # bottom-aligned line gets the same SAFE_MARGIN_V — the old v2
+        # "track lines at 0 / general lines lifted" split is gone.
+        from subtitles import SAFE_MARGIN_V, generate_ass
         out = tmp_path / "subs.ass"
         words = [_w(" track", 0.0, 0.5), _w(" general", 5.0, 5.5)]
         assert generate_ass(self._transcript(words), 0, 10, str(out),
@@ -237,20 +231,20 @@ class TestGenerateAss:
         assert len(lines) == 2
         track_line, general_line = lines
         # Format: Dialogue: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
-        track_margin_v = track_line.split(",")[7]
-        general_margin_v = general_line.split(",")[7]
-        assert track_margin_v == "0"
-        assert general_margin_v != "0" and int(general_margin_v) > 0
+        assert track_line.split(",")[7] == str(SAFE_MARGIN_V)
+        assert general_line.split(",")[7] == str(SAFE_MARGIN_V)
 
     def test_general_ranges_defaults_to_no_override(self, tmp_path):
-        from subtitles import generate_ass
+        # No general_ranges -> the full-frame SAFE_MARGIN_V applies, exactly
+        # as it does for every line in a v3 render.
+        from subtitles import SAFE_MARGIN_V, generate_ass
         out = tmp_path / "subs.ass"
         words = [_w(" hello", 0.0, 0.5)]
         assert generate_ass(self._transcript(words), 0, 10, str(out)) is True
         content = out.read_text(encoding="utf-8-sig")
         line = [l for l in content.splitlines()
                 if l.startswith("Dialogue:")][0]
-        assert line.split(",")[7] == "0"
+        assert line.split(",")[7] == str(SAFE_MARGIN_V)
 
     def test_general_floor_keeps_bottom_near_the_bottom(self, tmp_path):
         # 6-aug-2026: the content-box floor used to place "bottom" at ~40%
