@@ -47,6 +47,43 @@ if [ "${GPU_COUNT:-0}" -gt 1 ]; then
     echo "    CLIP_GPUS=0,1 (both GPUs: LR-ASD + ffmpeg per-worker)"
 fi
 
+# --- 1b. nvenc-capable ffmpeg -----------------------------------------------
+# Kaggle's preinstalled ffmpeg (apt) is a CPU-only build with no --enable-nvenc.
+# FFMPEG_ENCODER/GPU_RENDER above tell the app to use nvenc, but ffmpeg_utils.py
+# probes the actual binary at runtime and silently falls back to libx264 when
+# nvenc isn't there — so every render was CPU-encoded despite the GPU config
+# (confirmed: nvidia-smi showed zero encode activity during a job). nvenc only
+# needs the driver's libnvidia-encode.so (already present, it's part of the
+# driver, not CUDA toolkit), so a static build with nvenc compiled in is a drop-
+# in swap — no system packages, no rebuild. Entirely optional: any failure here
+# leaves ffmpeg exactly as it was (CPU encode), same as before this block.
+if [ "${GPU_COUNT:-0}" -gt 0 ] && [ "${SKIP_FFMPEG_NVENC:-0}" != "1" ]; then
+    say "nvenc-capable ffmpeg"
+    if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q h264_nvenc; then
+        echo "    ffmpeg already has h264_nvenc — nothing to do"
+    else
+        FFMPEG_DIR="${FFMPEG_DIR:-/kaggle/working/ffmpeg-nvenc}"
+        mkdir -p "$FFMPEG_DIR"
+        FFMPEG_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
+        if curl -fsSL --max-time 120 "$FFMPEG_URL" -o /tmp/ffmpeg-nvenc.tar.xz 2>"$LOG_DIR/ffmpeg_nvenc.log" \
+            && tar -xJf /tmp/ffmpeg-nvenc.tar.xz -C /tmp 2>>"$LOG_DIR/ffmpeg_nvenc.log" \
+            && cp /tmp/ffmpeg-*-linux64-gpl/bin/ffmpeg /tmp/ffmpeg-*-linux64-gpl/bin/ffprobe "$FFMPEG_DIR/" 2>>"$LOG_DIR/ffmpeg_nvenc.log"; then
+            export PATH="$FFMPEG_DIR:$PATH"
+            rm -rf /tmp/ffmpeg-nvenc.tar.xz /tmp/ffmpeg-*-linux64-gpl
+            if "$FFMPEG_DIR/ffmpeg" -hide_banner -encoders 2>/dev/null | grep -q h264_nvenc; then
+                echo "    installed to $FFMPEG_DIR, h264_nvenc confirmed present (PATH updated for this session)"
+                echo "    NOTE: PATH change is only in this bootstrap's shell — re-run bash kaggle_bootstrap.sh"
+                echo "    on future sessions, or add 'export PATH=\"$FFMPEG_DIR:\$PATH\"' before starting uvicorn"
+                echo "    if you serve it a different way."
+            else
+                echo "    downloaded build lacks h264_nvenc — falling back to system ffmpeg (libx264)"
+            fi
+        else
+            echo "    download/extract failed — falling back to system ffmpeg (libx264); see $LOG_DIR/ffmpeg_nvenc.log"
+        fi
+    fi
+fi
+
 # --- 2. Python deps --------------------------------------------------------
 # Kaggle's base image already carries torch/opencv/numpy built against its own
 # CUDA. Reinstalling those from requirements.txt is slow and can break CUDA, so
