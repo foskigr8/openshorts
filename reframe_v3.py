@@ -334,3 +334,102 @@ def split_centers(subjects: Sequence[Box], frame_w: int, frame_h: int,
         ((b[0] + b[2] / 2.0) / frame_w, (b[1] + b[3] / 2.0) / frame_h)
         for b in (ordered[0], ordered[-1])
     ]
+
+
+# ---------------------------------------------------------------------------
+# Validation: fail loud rather than render something wrong
+# ---------------------------------------------------------------------------
+
+class CompositionError(ValueError):
+    """A planned composition violates a hard guarantee.
+
+    Raised rather than repaired on purpose. The framing bugs this rebuild
+    exists to fix all shipped silently — a crop that cut a person in half
+    still produced a playable file, so nothing surfaced until somebody
+    watched it. Consistent with the Phase 5 no-silent-fallback rule: a
+    violation here should stop the job, not quietly degrade it.
+    """
+
+
+@dataclass
+class ComposedShot:
+    """A shot with its composition resolved, ready for the render stage."""
+    start: float
+    end: float
+    layout: str
+    crop: Optional[Rect] = None
+    subjects: List[Box] = None
+
+    @property
+    def duration(self) -> float:
+        return self.end - self.start
+
+
+def validate_composition(shots: Sequence[ComposedShot], frame_w: int, frame_h: int,
+                         aspect: float = VERTICAL_9_16,
+                         min_shot_seconds: float = 1.2,
+                         aspect_tolerance: float = 0.02) -> None:
+    """Assert every hard guarantee, or raise listing ALL violations.
+
+    Reports every problem at once rather than the first — a plan with four
+    bad shots should take one run to diagnose, not four.
+
+    Checked per shot:
+      * every subject is fully inside the crop, at every shot (containment
+        is the "half a person" property; average-case is not enough)
+      * the crop lies inside the frame
+      * the crop matches the target aspect
+      * the shot is long enough to be worth a cut
+
+    SPLIT layouts are exempt from crop containment: their subjects live in
+    separate panels by construction, so a single containing rect is not a
+    meaningful constraint on them.
+    """
+    problems: List[str] = []
+
+    for i, shot in enumerate(shots):
+        where = f"shot {i} [{shot.start:.2f}-{shot.end:.2f}s]"
+
+        if shot.duration < min_shot_seconds - 1e-6:
+            problems.append(
+                f"{where}: duration {shot.duration:.2f}s < min {min_shot_seconds}s"
+            )
+
+        if shot.layout == LAYOUT_SPLIT:
+            continue
+
+        if shot.crop is None:
+            problems.append(f"{where}: layout {shot.layout!r} has no crop rect")
+            continue
+
+        x, y, w, h = shot.crop
+        if w <= 0 or h <= 0:
+            problems.append(f"{where}: degenerate crop {shot.crop}")
+            continue
+
+        if x < -0.5 or y < -0.5 or x + w > frame_w + 0.5 or y + h > frame_h + 0.5:
+            problems.append(
+                f"{where}: crop {tuple(round(v) for v in shot.crop)} "
+                f"escapes frame {frame_w}x{frame_h}"
+            )
+
+        actual = w / h
+        if abs(actual - aspect) > aspect_tolerance:
+            problems.append(
+                f"{where}: aspect {actual:.4f} != target {aspect:.4f}"
+            )
+
+        for j, subject in enumerate(shot.subjects or []):
+            if subject is None:
+                continue
+            if not contains(shot.crop, subject):
+                problems.append(
+                    f"{where}: subject {j} {tuple(round(v) for v in subject)} "
+                    f"not contained in crop {tuple(round(v) for v in shot.crop)}"
+                )
+
+    if problems:
+        raise CompositionError(
+            f"{len(problems)} composition violation(s):\n  "
+            + "\n  ".join(problems)
+        )

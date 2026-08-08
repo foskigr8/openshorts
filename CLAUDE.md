@@ -61,6 +61,12 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 | `hf_storage.py` | HuggingFace Hub clip storage: clips upload as each one finishes so they survive a Kaggle session ending; fails soft when unconfigured |
 | `gpu_affinity.py` | Per-clip-worker GPU assignment (thread-local torch device) so a second GPU is not left idle |
 | `kaggle_smoke_test.py` | Post-boot health check for the Kaggle host — lives in the repo so it improves via `git pull`, not a notebook re-import |
+| `face_spine.py` | Framing rebuild Phase 1: ONE shared face-track spine (SCRFD + ByteTrack + ArcFace re-id across cuts). Boxes are **pixels**, `(x, y, w, h)` |
+| `speaker_fusion.py` | Phase 3: one speaker↔track binding per clip, replacing per-frame pixel-position matching |
+| `shot_planner.py` | Phase 4: plans the whole shot list up front — a few `(start, end, shot_type, track_ids, crop_rect)` entries, each with ONE static crop for its duration, so intra-shot jitter is structurally impossible |
+| `reframe_v3.py` | Phase 4b: composition. Attention map (UNISAL saliency + role-weighted faces), containment-first crop geometry with vertical head placement, split-screen decision, and a fail-loud validation stage |
+| `vendor/pyautoflip/` | Vendored subset of pyautoflip 0.2.1 (MIT): UNISAL saliency + split-screen geometry. **Read its README before taking more of that library** — its cropper, camera-motion handler and padding were reviewed and rejected, with reasons |
+| `eval/` | Phase 0: framing measurement harness. Every framing fix ships with a metric that moved |
 | `dashboard/src/App.jsx` | Main React component with state management |
 | `dashboard/src/components/TranslateModal.jsx` | Voice dubbing UI with language selection |
 | `dashboard/vite-plugin-seo.js` | Build-time SEO surface: injects crawler-visible homepage content, emits static pages, sitemap.xml and llms.txt |
@@ -202,6 +208,35 @@ answers describe the paid product as free.
 ### Key Classes
 - `SmoothedCameraman` - Stabilized camera movement with safe zone logic (prevents jitter)
 - `SpeakerTracker` - Prevents rapid speaker switching, handles temporary occlusions
+
+### Framing rebuild (v3) — attention, not just the active speaker
+
+The v2 engines above decide the crop **per frame, reactively**, which is why
+jitter is visible even when nothing about who should be on screen changed. The
+v3 chain plans instead: `face_spine` (who) → `speaker_fusion` (who is talking)
+→ `shot_planner` (who holds the frame, for how long) → `reframe_v3` (what the
+crop looks like). Each shot carries ONE static crop, so intra-shot re-aiming
+cannot happen.
+
+Two things about `reframe_v3` are load-bearing:
+
+- **Active-speaker detection is not enough, by construction.** ASD answers "who
+  is talking", which is the wrong question during a reaction — someone pops a
+  balloon, someone winces, and the speaker is not the attraction. UNISAL
+  saliency answers "where would a human look". `build_attention_map` fuses
+  both; neither rules alone.
+- **Bystander suppression is multiplicative (`×0.25`), not just absent boost.**
+  Upstream pyautoflip uses `np.maximum(region, FACE_WEIGHT)`, which can only
+  raise a value — so a bystander standing on a bright background keeps full
+  saliency and still drags the centre of mass. That *is* the "biggest/brightest
+  face wins" bug. If you touch `build_attention_map`, keep suppression able to
+  scale values down.
+
+Coordinates are **pixels** throughout (`face_spine` stores raw InsightFace
+bboxes); normalized coords appear only at the boundary with the vendored
+split-screen helpers. `validate_composition` raises `CompositionError` rather
+than repairing — the framing bugs this rebuild fixes all shipped silently,
+because a crop that cut a person in half still produced a playable file.
 
 ### API Endpoints
 | Method | Route | Purpose |

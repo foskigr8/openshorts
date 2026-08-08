@@ -296,3 +296,99 @@ def test_split_centers_falls_back_when_the_vendored_rule_declines():
 
     assert centers is not None and len(centers) == 2
     assert centers[0][0] < centers[1][0]
+
+
+# ─── validation ──────────────────────────────────────────────────────────────
+
+from reframe_v3 import ComposedShot, CompositionError, validate_composition  # noqa: E402
+
+
+def _valid_shot(start=0.0, end=3.0):
+    subject = (900, 500, 100, 100)
+    return ComposedShot(
+        start=start, end=end, layout=LAYOUT_SINGLE,
+        crop=crop_rect_containing(subject, FRAME_W, FRAME_H),
+        subjects=[subject],
+    )
+
+
+def test_a_well_formed_plan_validates():
+    validate_composition([_valid_shot(), _valid_shot(3.0, 6.0)], FRAME_W, FRAME_H)
+
+
+def test_uncontained_subject_raises():
+    """The 'half a person' failure — the whole reason this stage exists."""
+    shot = _valid_shot()
+    shot.subjects = [(50, 500, 100, 100)]  # far left, crop is around x=900
+
+    with pytest.raises(CompositionError, match="not contained"):
+        validate_composition([shot], FRAME_W, FRAME_H)
+
+
+def test_all_violations_are_reported_at_once():
+    """A plan with several bad shots should take one run to diagnose."""
+    bad_a = _valid_shot(0.0, 3.0)
+    bad_a.subjects = [(50, 500, 100, 100)]
+    bad_b = _valid_shot(3.0, 3.2)          # too short
+
+    with pytest.raises(CompositionError) as exc:
+        validate_composition([bad_a, bad_b], FRAME_W, FRAME_H)
+
+    message = str(exc.value)
+    assert "2 composition violation" in message
+    assert "not contained" in message
+    assert "min" in message
+
+
+def test_short_shot_raises():
+    with pytest.raises(CompositionError, match="duration"):
+        validate_composition([_valid_shot(0.0, 0.4)], FRAME_W, FRAME_H)
+
+
+def test_crop_escaping_the_frame_raises():
+    shot = _valid_shot()
+    shot.crop = (1800, 0, 607.5, 1080)  # runs off the right edge
+    shot.subjects = []
+
+    with pytest.raises(CompositionError, match="escapes frame"):
+        validate_composition([shot], FRAME_W, FRAME_H)
+
+
+def test_wrong_aspect_raises():
+    shot = _valid_shot()
+    shot.crop = (100, 100, 400, 400)  # square, not 9:16
+    shot.subjects = []
+
+    with pytest.raises(CompositionError, match="aspect"):
+        validate_composition([shot], FRAME_W, FRAME_H)
+
+
+def test_non_split_layout_without_a_crop_raises():
+    shot = _valid_shot()
+    shot.crop = None
+
+    with pytest.raises(CompositionError, match="no crop rect"):
+        validate_composition([shot], FRAME_W, FRAME_H)
+
+
+def test_split_layout_is_exempt_from_containment():
+    """Split panels hold their subjects separately, so a single containing
+    rect is not a meaningful constraint — but duration still applies."""
+    shot = ComposedShot(
+        start=0.0, end=3.0, layout=LAYOUT_SPLIT, crop=None,
+        subjects=[(200, 400, 120, 120), (1600, 400, 120, 120)],
+    )
+    validate_composition([shot], FRAME_W, FRAME_H)
+
+    shot.end = 0.3
+    with pytest.raises(CompositionError, match="duration"):
+        validate_composition([shot], FRAME_W, FRAME_H)
+
+
+def test_degenerate_crop_raises():
+    shot = _valid_shot()
+    shot.crop = (100, 100, 0, 0)
+    shot.subjects = []
+
+    with pytest.raises(CompositionError, match="degenerate"):
+        validate_composition([shot], FRAME_W, FRAME_H)
