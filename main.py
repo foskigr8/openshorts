@@ -26,7 +26,8 @@ import picker
 import source_store
 from clip_selection import snap_clip_to_words
 from ffmpeg_utils import (video_encode_args, audio_encode_args, QUALITY,
-                          QUALITY_FAST, METADATA_SCRUB, gpu_decode_args)
+                          QUALITY_FAST, METADATA_SCRUB, gpu_decode_args,
+                          gpu_render_available, nvenc_available)
 from pipeline_progress import write_progress as _write_progress
 from pipeline_progress import mark_clip_ready as _mark_clip_ready
 from pipeline_progress import record_stage_durations
@@ -80,6 +81,27 @@ def _link_or_copy(src, dst):
         os.link(src, dst)
     except OSError:
         shutil.copy2(src, dst)
+
+
+def _print_pipeline_diagnostics():
+    """One-shot startup diagnostics: which ffmpeg binary is in use, GPU
+    decode/encode verdicts, torch CUDA. Every run's log then answers "is the
+    GPU actually processing this" instead of silently falling back to CPU.
+    The probes cache their verdict for the rest of the process, so calling
+    them here costs nothing extra (the first render would pay it anyway)."""
+    try:
+        import shutil
+        import torch
+        print("🖥️  Pipeline diagnostics:")
+        print(f"   ffmpeg: {shutil.which('ffmpeg') or 'ffmpeg (PATH)'}")
+        print(f"   GPU decode (NVDEC + CUDA filters): "
+              f"{'YES' if gpu_render_available() else 'NO — CPU decode'}")
+        print(f"   GPU encode (NVENC h264): "
+              f"{'YES' if nvenc_available() else 'NO — CPU x264 encode'}")
+        print(f"   torch CUDA: {torch.cuda.is_available()} "
+              f"({torch.cuda.device_count()} device(s))")
+    except Exception as e:
+        print(f"   ⚠️ Pipeline diagnostics incomplete: {type(e).__name__}: {e}")
 
 
 def source_logo_crop_vf_args():
@@ -1634,6 +1656,10 @@ if __name__ == '__main__':
     args = parser.parse_args()
     remove_background_audio = (args.remove_background_audio or "").strip() or None
     output_format = args.format
+
+    # Show what the GPU is doing for THIS run, before any work starts.
+    _print_pipeline_diagnostics()
+
     # Custom aspect ratio drives the reframe crop shape end-to-end; the
     # pipeline still scales to the delivery floor for quality, same as 9:16.
     output_aspect = None

@@ -70,10 +70,15 @@ if [ "${GPU_COUNT:-0}" -gt 0 ] && [ "${SKIP_FFMPEG_NVENC:-0}" != "1" ]; then
             export PATH="$FFMPEG_DIR:$PATH"
             rm -rf /tmp/ffmpeg-nvenc.tar.xz /tmp/ffmpeg-*-linux64-gpl
             if "$FFMPEG_DIR/ffmpeg" -hide_banner -encoders 2>/dev/null | grep -q h264_nvenc; then
-                echo "    installed to $FFMPEG_DIR, h264_nvenc confirmed present (PATH updated for this session)"
-                echo "    NOTE: PATH change is only in this bootstrap's shell — re-run bash kaggle_bootstrap.sh"
-                echo "    on future sessions, or add 'export PATH=\"$FFMPEG_DIR:\$PATH\"' before starting uvicorn"
-                echo "    if you serve it a different way."
+                echo "    installed to $FFMPEG_DIR, h264_nvenc confirmed present"
+                if "$FFMPEG_DIR/ffmpeg" -hide_banner -hwaccels 2>/dev/null | grep -qiE 'cuda|nvdec|cuvid'; then
+                    echo "    CUDA decode (NVDEC) also present — GPU decode + encode both active"
+                else
+                    echo "    NOTE: this build has NVENC (GPU encode) but no CUDA hwaccel —"
+                    echo "          decode stays CPU unless a decode-capable build is used"
+                fi
+                echo "    main.py prepends $FFMPEG_DIR to PATH itself at job start,"
+                echo "    so uvicorn does NOT need this shell's PATH export."
             else
                 echo "    downloaded build lacks h264_nvenc — falling back to system ffmpeg (libx264)"
             fi
