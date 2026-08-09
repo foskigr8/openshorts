@@ -27,7 +27,8 @@ import source_store
 from clip_selection import snap_clip_to_words
 from ffmpeg_utils import (video_encode_args, audio_encode_args, QUALITY,
                           QUALITY_FAST, METADATA_SCRUB, gpu_decode_args,
-                          gpu_render_available, nvenc_available)
+                          gpu_render_available, nvenc_available,
+                          reset_gpu_render_cache)
 from pipeline_progress import write_progress as _write_progress
 from pipeline_progress import mark_clip_ready as _mark_clip_ready
 from pipeline_progress import record_stage_durations
@@ -105,6 +106,61 @@ def _link_or_copy(src, dst):
         shutil.copy2(src, dst)
 
 
+_FFMPEG_DOWNLOAD_URL = (
+    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/"
+    "ffmpeg-master-latest-linux64-gpl.tar.xz")
+
+
+def _ensure_gpu_decode_ffmpeg():
+    """Install the decode-capable ffmpeg when GPU decode is required but the
+    binary is missing (GPU-or-nothing contract). Self-healing so a missed or
+    failed bootstrap download can't block jobs forever. Returns True when GPU
+    decode is available after the attempt."""
+    if gpu_render_available():
+        return True
+    target_dir = os.environ.get("FFMPEG_DIR") or "/kaggle/working/ffmpeg-nvenc"
+    bin_path = os.path.join(target_dir, "ffmpeg")
+    if os.path.exists(bin_path):
+        return False  # present but not decode-capable — can't fix in-process
+    try:
+        print(f"⬇️  Installing decode-capable ffmpeg (BtbN master build) to "
+              f"{target_dir} — GPU-or-nothing requires it...", flush=True)
+        os.makedirs(target_dir, exist_ok=True)
+        archive = os.path.join(tempfile.gettempdir(), "ffmpeg-nvenc.tar.xz")
+        if os.path.exists(archive):
+            os.remove(archive)
+        curl = subprocess.run(
+            ["curl", "-fSL", "--max-time", "300", _FFMPEG_DOWNLOAD_URL,
+             "-o", archive],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if curl.returncode != 0 or not os.path.exists(archive):
+            raise RuntimeError(f"curl failed ({curl.returncode})")
+        import tarfile
+        workdir = tempfile.mkdtemp(prefix="ffmpeg_install_")
+        with tarfile.open(archive, "r:xz") as tf:
+            tf.extractall(workdir)
+        matches = glob.glob(os.path.join(workdir, "ffmpeg-*-linux64-gpl", "bin", "ffmpeg"))
+        if not matches:
+            raise RuntimeError("build archive did not contain ffmpeg")
+        src_bin = matches[0]
+        src_probe = os.path.join(os.path.dirname(src_bin), "ffprobe")
+        _link_or_copy(src_bin, bin_path)
+        if os.path.exists(src_probe):
+            _link_or_copy(src_probe, os.path.join(target_dir, "ffprobe"))
+        os.environ["PATH"] = target_dir + os.pathsep + os.environ.get("PATH", "")
+        reset_gpu_render_cache()
+        if gpu_render_available():
+            print(f"✅ Decode-capable ffmpeg installed and verified — GPU "
+                  f"decode is now active.", flush=True)
+            return True
+        print("⚠️ Installed build did not pass the GPU-decode probe.", flush=True)
+        return False
+    except Exception as e:
+        print(f"⚠️ Could not install decode-capable ffmpeg "
+              f"({type(e).__name__}: {e}).", flush=True)
+        return False
+
+
 def _print_pipeline_diagnostics():
     """One-shot startup diagnostics: which ffmpeg binary is in use, GPU
     decode/encode verdicts, torch CUDA. Every run's log then answers "is the
@@ -127,13 +183,22 @@ def _print_pipeline_diagnostics():
     except Exception as e:
         decode_ok = encode_ok = False
         print(f"   ⚠️ ffmpeg probe failed ({type(e).__name__}) — treated as no GPU", flush=True)
+    # GPU-or-nothing: if decode is required but missing, try to self-heal by
+    # installing the decode-capable build BEFORE judging the run.
+    require = (os.environ.get("REQUIRE_GPU_DECODE") or "1").strip().lower()
+    if cuda and not decode_ok and require == "1":
+        decode_ok = _ensure_gpu_decode_ffmpeg() or decode_ok
+        if decode_ok:
+            try:
+                encode_ok = nvenc_available()
+            except Exception:
+                pass
     print(f"   GPU decode (NVDEC + CUDA filters): "
           f"{'YES' if decode_ok else 'NO'}", flush=True)
     print(f"   GPU encode (NVENC h264): "
           f"{'YES' if encode_ok else 'NO'}", flush=True)
     print(f"   torch CUDA: {cuda} ({gpus} device(s))", flush=True)
     if cuda and not decode_ok:
-        require = (os.environ.get("REQUIRE_GPU_DECODE") or "1").strip().lower()
         if require == "1":
             # GPU or nothing (owner's explicit contract): a decode-capable
             # ffmpeg is required, full stop. Say exactly what is missing so
