@@ -1619,6 +1619,13 @@ async def run_job(job_id, job_data):
             except Exception as e:
                 print(f"⚠️ HF storage: backup pass failed ({type(e).__name__}: {e})")
 
+        # Let the output-drain thread catch up so a failure's "last output"
+        # tail includes the final lines (traceback tail etc.), not a race.
+        try:
+            t_log.join(timeout=2)
+        except Exception:
+            pass
+
         returncode = process.returncode
 
         if jobs[job_id]['status'] == 'cancelled':
@@ -1678,8 +1685,22 @@ async def run_job(job_id, job_data):
                  _persist_job_log(job_id, _entry)
         else:
             jobs[job_id]['status'] = 'failed'
+            # Surface WHY it failed: the dashboard shows the last log line on
+            # the error card, so append the real captured output tail (or an
+            # explicit "no output" note when the process died before printing
+            # anything — that itself is the diagnosis).
+            _tail = [l["text"] if isinstance(l, dict) else str(l)
+                     for l in jobs[job_id]['logs'][-15:]]
+            if _tail:
+                _tail_text = "\n".join(_tail)
+                _fail_msg = (f"Process failed with exit code {returncode}.\n"
+                             f"Last output:\n{_tail_text}")
+            else:
+                _fail_msg = (f"Process failed with exit code {returncode} "
+                             f"with NO output — the process died before "
+                             f"printing anything (startup/import failure).")
             _entry = _log_entry(_scrub_secrets(
-                f"Process failed with exit code {returncode}"))
+                _fail_msg))
             jobs[job_id]['logs'].append(_entry)
             _persist_job_log(job_id, _entry)
         _snapshot_job_logs(job_id)

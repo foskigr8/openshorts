@@ -638,7 +638,15 @@ function App() {
                   : data.logs[data.logs.length - 1].text)
               : "Process failed";
             const errorMsg = data.error || lastLog;
-            setLogs(prev => [...prev, "Error: " + errorMsg]);
+            // Set ONCE — the poll loop hits this branch repeatedly, and
+            // appending the same error every poll spammed the log with
+            // identical "Process failed" lines.
+            setLogs((prev) => {
+              const last = prev[prev.length - 1];
+              const asText = typeof last === 'string' ? last : last?.text || '';
+              if (asText.startsWith('Error: ')) return prev;
+              return [...prev, "Error: " + errorMsg];
+            });
             clearInterval(interval);
           } else if (data.status === 'cancelled') {
             setStatus('cancelled');
