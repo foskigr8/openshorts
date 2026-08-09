@@ -14,10 +14,9 @@ It is deliberately optional and fails open:
 
 Named on-screen ranges are matched against the diarized speaker turns to
 produce a ``{speaker_label: name}`` mapping. That mapping renames the
-transcript's segments in place AND is passed to
-viral_clip_finder.select_viral_clips as ``face_identities``, upgrading the
-transcript to the skill's Tier 3 (named-speaker) input contract so cut briefs
-can say "frame Joe" and recommend reaction cuts by name.
+transcript's segments in place AND is passed to picker.select_viral_clips as
+``face_identities``, upgrading the transcript to a named-speaker input so
+the picker's speaker labels (``sp``) read "Joe" instead of "SPEAKER_00".
 
 Environment
 -----------
@@ -338,8 +337,8 @@ def enrich_transcript_speakers(transcript_result: dict, face_trajectory: dict,
     of the label's speaking time wins — but only when that coverage clears
     ``min_coverage`` AND the label has at least ``min_turn_seconds`` of speech
     (a 2-second blip is too little evidence). Everything else stays
-    anonymous. Returns (transcript_result, {label: name}) — the mapping is
-    exactly what viral_clip_finder.format_transcript_for_skill consumes.
+    anonymous. Returns (transcript_result, {label: name}) — the mapping the
+    picker consumes to name the speaker labels.
     """
     identities = face_trajectory.get("identities") or []
     ranges_by_name = {i["name"]: i.get("on_screen") or [] for i in identities}
@@ -384,12 +383,12 @@ def enrich_if_configured(transcript_result: dict,
     """Top-level entry: run face ID when configured; otherwise no-op.
 
     Returns ``(transcript_result, {speaker_label: name} | None)``. The second
-    value is the LABEL MAPPING, not the face trajectory: it is fed straight to
-    viral_clip_finder.format_transcript_for_skill, which looks speakers up in
-    it with ``speaker in face_identities``. Returning the trajectory dict here
-    made that lookup silently impossible to satisfy. The full trajectory is
-    still reachable via build_face_trajectory for callers that want the
-    on-screen ranges. Never raises — failures degrade to the original
+    value is the LABEL MAPPING, not the face trajectory: it feeds the picker's
+    named-speaker input (segments carry ``speaker_named`` when renamed).
+    Returning the trajectory dict here would silently never rename anything.
+    The full trajectory is still reachable via build_face_trajectory for
+    callers that want the on-screen ranges. Never raises — failures degrade
+    to the original
     transcript.
     """
     if not available() or not video_path or not os.path.exists(video_path):

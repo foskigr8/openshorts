@@ -108,23 +108,22 @@ def _transcription():
 
 
 def _stage3():
-    """The clip SELECTOR. A missing skill package or key does not crash
-    anything — the job quietly produces weaker clips instead."""
+    """The clip SELECTOR — the unified picker (picker.py) + Gemini keys."""
     out = subprocess.run(
         [sys.executable, "-c",
-         "import os, viral_clip_finder as v;"
-         "print(v.skill_available(), len(v._provider_candidates()),"
-         " os.environ.get('VIRAL_ENGINE','auto'))"],
+         "import importlib.util, os;"
+         "print(importlib.util.find_spec('picker') is not None,"
+         " bool(os.environ.get('GEMINI_API_KEY')))"],
         capture_output=True, text=True, cwd=REPO_DIR)
     parts = (out.stdout or "").strip().split()
-    if len(parts) != 3:
+    if len(parts) != 2:
         return False, (out.stderr or out.stdout).strip()[-200:]
-    have_skill, providers, engine = parts[0] == "True", int(parts[1]), parts[2]
-    if not have_skill:
-        return False, "viral_clip_finder_skill/ is missing from the clone"
-    if providers == 0:
-        return False, "no provider key (GEMINI_API_KEY / NARRATIVE_GEMINI_API_KEY)"
-    return True, f"engine={engine}, skill package present, {providers} provider(s)"
+    have_picker, have_key = parts[0] == "True", parts[1] == "True"
+    if not have_picker:
+        return False, "picker.py is missing from the clone"
+    if not have_key:
+        return False, "no provider key (GEMINI_API_KEY)"
+    return True, "picker present, Gemini key present"
 
 
 def _storage():

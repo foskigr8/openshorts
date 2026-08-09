@@ -19,10 +19,11 @@ import yt_dlp
 from google import genai
 from google.genai import types as genai_types
 
+import context_layer
 import gemini_worker
-import deepseek_worker
 import gemini_pool
-from clip_selection import build_transcript_windows, snap_clip_to_words
+import picker
+from clip_selection import snap_clip_to_words
 from ffmpeg_utils import (video_encode_args, audio_encode_args, QUALITY,
                           QUALITY_FAST, METADATA_SCRUB, gpu_decode_args)
 from pipeline_progress import write_progress as _write_progress
@@ -42,45 +43,6 @@ load_dotenv()
 # --- Constants ---
 ASPECT_RATIO = 9 / 16
 
-GEMINI_PROMPT_TEMPLATE = """
-You are a senior short-form video editor. Read the ENTIRE transcript and word-level timestamps to choose the 3–15 MOST VIRAL moments for TikTok/IG Reels/YouTube Shorts. Each clip must be between 15 and 60 seconds long.
-
-⚠️ FFMPEG TIME CONTRACT — STRICT REQUIREMENTS:
-- Return timestamps in ABSOLUTE SECONDS from the start of the video (usable in: ffmpeg -ss <start> -to <end> -i <input> ...).
-- Only NUMBERS with decimal point, up to 3 decimals (examples: 0, 1.250, 17.350).
-- Ensure 0 ≤ start < end ≤ VIDEO_DURATION_SECONDS.
-- Each clip between 15 and 60 s (inclusive).
-- Prefer starting 0.2–0.4 s BEFORE the hook and ending 0.2–0.4 s AFTER the payoff.
-- Use silence moments for natural cuts; never cut in the middle of a word or phrase.
-- STRICTLY FORBIDDEN to use time formats other than absolute seconds.
-
-VIDEO_DURATION_SECONDS: {video_duration}
-
-TRANSCRIPT_TEXT (raw):
-{transcript_text}
-
-WORDS_JSON (array of {{w, s, e}} where s/e are seconds):
-{words_json}
-
-STRICT EXCLUSIONS:
-- No generic intros/outros or purely sponsorship segments unless they contain the hook.
-- No clips < 15 s or > 60 s.
-
-OUTPUT — RETURN ONLY VALID JSON (no markdown, no comments). Order clips by predicted performance (best to worst). In the descriptions, ALWAYS include a CTA like "Follow me and comment X and I'll send you the workflow" (especially if discussing an n8n workflow):
-{{
-  "shorts": [
-    {{
-      "start": <number in seconds, e.g., 12.340>,
-      "end": <number in seconds, e.g., 37.900>,
-      "video_description_for_tiktok": "<description for TikTok oriented to get views>",
-      "video_description_for_instagram": "<description for Instagram oriented to get views>",
-      "video_title_for_youtube_short": "<title for YouTube Short oriented to get views 100 chars max>",
-      "viral_hook_text": "<SHORT punchy text overlay (max 10 words). MUST BE IN THE SAME LANGUAGE AS THE VIDEO TRANSCRIPT. Examples: 'POV: You realized...', 'Did you know?', 'Stop doing this!'>"
-    }}
-  ]
-}}
-"""
-
 
 
 
@@ -89,7 +51,7 @@ OUTPUT — RETURN ONLY VALID JSON (no markdown, no comments). Order clips by pre
 # itself (e.g. a row of social handles across the top, a text sticker along
 # the bottom) — genuinely part of the source pixels, not something the
 # reframe/caption/vision stages can tell apart from real content. Cropping
-# it off HERE, before scene detection/face detection/vision confirmation
+# it off HERE, before scene detection/face detection/rendering
 # ever run, means every downstream stage only ever sees clean frames — not
 # just the final render. Per-source (different creators brand differently),
 # so off by default; set for a specific source via env.
@@ -893,66 +855,6 @@ def transcribe_video(video_path):
 
     return transcript
 
-def _run_gemini_stage(client, model_name, prompt, schema):
-    """One schema-enforced Gemini call with transient-error backoff.
-    Returns (parsed_dict, cost_analysis)."""
-    config = genai_types.GenerateContentConfig(
-        response_mime_type="application/json",
-        response_schema=schema,
-        safety_settings=gemini_worker.RELAXED_SAFETY_SETTINGS,
-    )
-    max_attempts = 3
-    for attempt in range(1, max_attempts + 1):
-        try:
-            response = gemini_pool.generate_with_fallback(
-                client, model_name, prompt, config=config, max_attempts=1,
-                log=lambda msg: print(msg))
-            # Policy blocks are deterministic — retrying only burns quota and
-            # time, and the user deserves the real reason instead of a generic
-            # "empty response" (prod 23-jul: PROHIBITED_CONTENT on every try).
-            gemini_worker.raise_if_blocked(response)
-            # Parsing lives inside the retry loop on purpose: Gemini sometimes
-            # returns 200 with an empty body, which raises here rather than at
-            # the call. Retrying that recovered every occurrence seen in prod
-            # (22-jul-2026) — the same payload succeeds on the next attempt.
-            parsed_obj = getattr(response, "parsed", None)
-            if parsed_obj is not None:
-                parsed = parsed_obj.model_dump() if hasattr(parsed_obj, "model_dump") else parsed_obj
-            else:
-                parsed = gemini_worker._parse_json_response_text(
-                    gemini_worker._get_response_text(response))
-            return parsed, gemini_worker._calculate_cost_analysis(response, model_name)
-        except gemini_worker.GeminiBlockedError:
-            raise  # deterministic policy block — never retry
-        except Exception as e:
-            msg = str(e)
-            transient = any(tok in msg for tok in (
-                '503', 'UNAVAILABLE', '429', 'RESOURCE_EXHAUSTED',
-                '500', 'INTERNAL', 'overloaded', 'Deadline',
-                'empty response body', 'did not contain a JSON object',
-                'Failed to parse Gemini JSON response'))
-            if attempt == max_attempts or not transient:
-                raise
-            wait = 5 * (2 ** (attempt - 1))
-            print(f"⚠️ Gemini transient error (attempt {attempt}/{max_attempts}), retrying in {wait}s: {msg[:150]}")
-            time.sleep(wait)
-
-
-def _rough_cut_candidate(source_video_path, start, end, video_duration, pad=2.0):
-    """ffmpeg-extracts [start-pad, end+pad] (clamped to the source) to a temp
-    file for Gemini Vision to review — a little padding on each side gives
-    the model actual room to suggest a boundary shift, not just confirm the
-    exact span it was handed."""
-    fd, path = tempfile.mkstemp(suffix=".mp4", prefix="vision_review_")
-    os.close(fd)
-    s = max(0.0, start - pad)
-    e = min(float(video_duration), end + pad)
-    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{s:.3f}", "-to", f"{e:.3f}",
-           "-i", source_video_path, "-c", "copy", path]
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=120)
-    return path
-
-
 def _upload_and_generate(client, model_name, video_path, prompt, schema):
     """Shared upload -> poll-until-ACTIVE -> generate -> cleanup. Same
     mechanism get_visual_clips() uses on a full source video, reused here on
@@ -987,93 +889,6 @@ def _upload_and_generate(client, model_name, video_path, prompt, schema):
             try:
                 client.files.delete(name=file_upload.name)
             except Exception:
-                pass
-
-
-def _transcript_excerpt(transcript_result, start, end, proposed_start=None):
-    """Return a transcript excerpt for vision review.
-
-    When ``proposed_start`` falls inside the excerpt, mark its exact location
-    so the context reviewer can distinguish evidence in the pre-roll from the
-    words that will actually open the final short. This is essential for a
-    cold-open review: a reviewer with only the selected span can diagnose a
-    missing setup but cannot see which nearby sentence fixes it.
-    """
-    parts = []
-    marker_added = False
-    for seg in transcript_result.get("segments", []):
-        seg_start, seg_end = seg.get("start", 0), seg.get("end", 0)
-        if seg_end <= start or seg_start >= end:
-            continue
-        if (proposed_start is not None and not marker_added
-                and seg_end > proposed_start):
-            parts.append("[PROPOSED CLIP START]")
-            marker_added = True
-        text = str(seg.get("text", "")).strip()
-        if text:
-            parts.append(text)
-    if proposed_start is not None and not marker_added:
-        parts.append("[PROPOSED CLIP START]")
-    return " ".join(parts)
-
-
-def _context_check_once(pool, model_name, source_video_path, candidate,
-                        video_duration, transcript_result, max_duration_ceiling):
-    """One context/sync check call: rough-cut -> upload -> generate -> cleanup.
-    Returns the parsed response dict, or None if no key was available or the
-    call failed (caller decides how to treat that). Factored out of
-    confirm_clip_with_vision so it can be reused for the bounded retry below.
-    """
-    key = pool.acquire()
-    if not key:
-        return None
-    start, end = candidate["start"], candidate["end"]
-    context_preroll = min(30.0, start)
-    context_cut = None
-    try:
-        context_cut = _rough_cut_candidate(
-            source_video_path, start - context_preroll, end, video_duration, pad=0.0)
-        client = gemini_worker.make_client(key)
-        # A long-context segment is a different product from a tight short, so
-        # it gets a different reviewer. Judging it with the short prompt was why
-        # requesting long clips still produced short ones: rule 3 there demands
-        # a self-contained punchy claim in the opening seconds, which a full arc
-        # (someone walking in, a round starting) never has — so the reviewer
-        # either pulled the start later to manufacture a hook, or dropped the
-        # candidate outright. `clip_type` was being written by the selector and
-        # then never read by anything downstream.
-        is_long = candidate.get("clip_type") == "long_context"
-        template = (gemini_worker.VISION_LONG_CONTEXT_CHECK_PROMPT_TEMPLATE
-                    if is_long else gemini_worker.VISION_CONTEXT_CHECK_PROMPT_TEMPLATE)
-        prompt = template.format(
-            narrative_summary=candidate.get("narrative_summary", ""),
-            candidate_start_offset=context_preroll,
-            transcript_excerpt=_transcript_excerpt(
-                transcript_result, start - context_preroll, end + 2.0,
-                proposed_start=start),
-            max_duration_ceiling=max_duration_ceiling)
-        return _upload_and_generate(
-            client, model_name, context_cut, prompt, gemini_worker.VisionContextCheckResponse)
-    except gemini_worker.GeminiBlockedError:
-        raise
-    except Exception as e:
-        # Only a hard failure (bad key, policy issue, malformed response)
-        # blacklists the key for the rest of the run. A transient 429/503/
-        # quota error is exactly that — transient — and Gemini's own quota
-        # windows are per-minute; permanently dropping a key on the FIRST
-        # rate-limit hit is how a small pool degrades to "every candidate
-        # after the first few fails open with no real check" over the
-        # course of one job (this is what "the quota is killing me" was:
-        # not the calls being slow, the pool silently going empty).
-        if not gemini_pool.is_transient_error(e):
-            pool.mark_bad(key)
-        print(f"⚠️ Vision context/sync check failed: {e}")
-        return None
-    finally:
-        if context_cut:
-            try:
-                os.remove(context_cut)
-            except OSError:
                 pass
 
 
@@ -1182,181 +997,8 @@ def analyze_scene_context(pool, model_name, clip_path, clip_duration,
     }
 
 
-def confirm_clip_with_vision(pool, model_name, source_video_path, candidate,
-                             video_duration, transcript_result,
-                             max_duration_ceiling=180.0):
-    """Runs the visual/audio check and the context/sync check for one
-    DeepSeek-selected candidate, in parallel across the Gemini key pool
-    (each check uses its own key so the two calls don't wait on each other's
-    rate limit), and folds any approved boundary deltas back into the
-    candidate's start/end in place.
-
-    Fails OPEN (returns True, no boundary change) on any error or when no
-    pool is configured — vision confirmation is a quality layer on top of
-    DeepSeek's own selection, not a hard gate; a transient API hiccup or a
-    self-hoster who hasn't added a Gemini pool yet shouldn't zero out a run's
-    clips. Returns False only when a check that DID run explicitly rejected
-    the candidate.
-    """
-    if not pool:
-        return True
-
-    start, end = candidate["start"], candidate["end"]
-    rough_cut = None
-    try:
-        rough_cut = _rough_cut_candidate(source_video_path, start, end, video_duration)
-    except Exception as e:
-        print(f"⚠️ Vision confirm: rough-cut failed ({e}) — skipping confirmation for this candidate")
-        return True
-
-    results = {}
-
-    def _run_visual():
-        key = pool.acquire()
-        if not key:
-            return
-        try:
-            client = gemini_worker.make_client(key)
-            prompt = gemini_worker.VISION_VISUAL_CHECK_PROMPT_TEMPLATE.format(
-                narrative_summary=candidate.get("narrative_summary", ""),
-                candidate_start_offset=min(2.0, start))
-            results["visual"] = _upload_and_generate(
-                client, model_name, rough_cut, prompt, gemini_worker.VisionVisualCheckResponse)
-        except gemini_worker.GeminiBlockedError:
-            raise
-        except Exception as e:
-            if not gemini_pool.is_transient_error(e):  # see confirm_clip_with_vision's twin
-                pool.mark_bad(key)
-            print(f"⚠️ Vision visual/audio check failed: {e}")
-
-    def _run_context():
-        results["context"] = _context_check_once(
-            pool, model_name, source_video_path, candidate,
-            video_duration, transcript_result, max_duration_ceiling)
-
-    try:
-        threads = [threading.Thread(target=_run_visual), threading.Thread(target=_run_context)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-    finally:
-        try:
-            os.remove(rough_cut)
-        except OSError:
-            pass
-
-    visual = results.get("visual")
-    context = results.get("context")
-    if visual is None and context is None:
-        return True  # neither check ran (no free keys / both errored) — fail open
-
-    orig_start, orig_end = candidate["start"], candidate["end"]
-    approved = True
-    reasons = []
-
-    if visual is not None:
-        if not visual.get("approved", True):
-            approved = False
-            reasons.append(f"visual: {visual.get('reason', '(no reason given)')}")
-        delta = max(-3.0, min(3.0, float(visual.get("suggested_start_delta", 0) or 0)))
-        candidate["start"] = max(0.0, candidate["start"] + delta)
-
-    if context is not None:
-        if not context.get("approved", True) or not context.get("narrative_resolved", True):
-            approved = False
-            reasons.append(f"context: {context.get('reason', '(no reason given)')}")
-        if not context.get("has_real_hook", True):
-            approved = False
-            reasons.append(f"hook: {context.get('reason', '(no reason given)')}")
-        # Hook rescue: pull the start earlier (never later) to include the
-        # setup a cold viewer needs — bounded so a "no hook" verdict can't
-        # silently balloon the clip. Applied before the end-delta duration
-        # check below so the ceiling accounts for the wider span.
-        start_delta = min(0.0, float(context.get("suggested_start_delta", 0) or 0))
-        start_delta = max(-30.0, start_delta)
-        candidate["start"] = max(0.0, candidate["start"] + start_delta)
-
-        delta = max(0.0, float(context.get("suggested_end_delta", 0) or 0))
-        new_end = candidate["end"] + delta
-        if new_end - candidate["start"] <= max_duration_ceiling:
-            candidate["end"] = min(float(video_duration), new_end)
-        _apply_boundary_bleed_fixes(candidate, context)
-
-    boundaries_moved = candidate["start"] != orig_start or candidate["end"] != orig_end
-
-    # A context/hook rejection always comes with a fix suggestion baked into
-    # `has_real_hook: false` — the check prompt tells the model to propose
-    # the delta needed rather than silently assume it works. We apply that
-    # delta above, but never actually verified it fixed anything; on real
-    # content this meant genuinely-rescuable candidates (e.g. one segment
-    # pulled back to include the missing question) were dropped anyway,
-    # because the ORIGINAL verdict never got revisited (confirmed 30-jul-2026,
-    # a rescued candidate was still logged "still rejected" for the exact
-    # problem the rescue fixed). One bounded retry — re-run just the context
-    # check on the corrected boundaries — actually collects on the fix
-    # instead of computing it and throwing it away.
-    if not approved and context is not None and boundaries_moved:
-        retry = _context_check_once(
-            pool, model_name, source_video_path, candidate,
-            video_duration, transcript_result, max_duration_ceiling)
-        if retry is not None:
-            retry_ok = (retry.get("approved", True) and retry.get("narrative_resolved", True)
-                        and retry.get("has_real_hook", True))
-            print(f"   🔁 Retry context check on rescued boundaries "
-                  f"[{candidate['start']:.1f}s-{candidate['end']:.1f}s]: "
-                  f"{'approved' if retry_ok else 'rejected — ' + retry.get('reason', '(no reason given)')}")
-            if retry_ok:
-                approved = True
-                candidate.pop("_rejection_reason", None)
-                # A second, smaller fix may still be worth taking (e.g. the
-                # opening is now fine but the payoff needs a touch more room).
-                delta = max(0.0, float(retry.get("suggested_end_delta", 0) or 0))
-                new_end = candidate["end"] + delta
-                if new_end - candidate["start"] <= max_duration_ceiling:
-                    candidate["end"] = min(float(video_duration), new_end)
-                _apply_boundary_bleed_fixes(candidate, retry)
-            else:
-                reasons.append(f"retry: {retry.get('reason', '(no reason given)')}")
-
-    if not approved:
-        candidate["_rejection_reason"] = "; ".join(reasons) if reasons else "(no reason given)"
-
-    if boundaries_moved:
-        print(f"   🔧 Vision adjusted [{orig_start:.1f}s-{orig_end:.1f}s] -> "
-              f"[{candidate['start']:.1f}s-{candidate['end']:.1f}s] "
-              f"({'approved' if approved else 'still rejected'})")
-
-    _extend_keep_spans_to_cover_boundaries(candidate)
-
-    return approved
-
-
-def _extend_keep_spans_to_cover_boundaries(candidate):
-    """Vision confirmation can push start earlier / end later as a rescue
-    (the has_real_hook backstop, or a narrative_resolved extension) — if
-    the candidate carries DeepSeek's keep_spans (the jump-cut plan), those
-    spans must grow to cover the rescued region too, or the jump-cutter
-    would silently drop exactly the content the rescue was for (confirmed
-    31-jul-2026: a hook rescue pulled start 1.2s earlier to include the
-    missing question, but keep_spans still started at the OLD boundary —
-    that 1.2s would never have made it into the rendered clip). No-op when
-    the candidate carries no keep_spans.
-    """
-    keep_spans = candidate.get("keep_spans")
-    if not keep_spans:
-        return
-    start, end = candidate["start"], candidate["end"]
-    span_start = min(float(s.get("start", start)) for s in keep_spans)
-    span_end = max(float(s.get("end", end)) for s in keep_spans)
-    if start < span_start:
-        keep_spans.append({"start": start, "end": span_start})
-    if end > span_end:
-        keep_spans.append({"start": span_end, "end": end})
-
-
 def _snap_keep_spans_to_words(keep_spans, words, clip_start, clip_end, min_span_duration=1.0):
-    """Snap each DeepSeek-proposed keep_span's boundaries onto real word
+    """Snap each picker-proposed keep_span's boundaries onto real word
     edges — same reasoning as clip_selection.snap_clip_to_words (LLMs are
     bad at millisecond arithmetic, word timestamps are ground truth) —
     then clamp to [clip_start, clip_end], drop spans that collapse below
@@ -1483,7 +1125,7 @@ def _build_jump_cut_source(source_video_path, keep_spans, workdir):
 
 
 def _apply_term_corrections(transcript_result, corrections):
-    """Fix ASR mishearings of proper nouns/brand terms (DeepSeek-flagged,
+    """Fix ASR mishearings of proper nouns/brand terms (picker-flagged,
     e.g. "Clod" -> "Claude") in place, across both segment text and
     word-level tokens — the latter is what captions actually render, so a
     text-only fix would leave the burned-in captions wrong.
@@ -1645,90 +1287,6 @@ def _build_word_list(transcript_result):
     return words
 
 
-def _vision_confirm_candidates(shorts, source_video_path, video_duration,
-                               transcript_result, output_dir=None):
-    """Gemini Vision confirmation pass shared by every Stage 3 engine.
-
-    Each candidate gets a rough-cut upload + context/sync review (see
-    confirm_clip_with_vision). Returns the approved list, or None when every
-    candidate was rejected AND VISION_CONFIRM_FALLBACK=0 (the caller then
-    fails the job rather than shipping a clip we already know is bad).
-    """
-    if not source_video_path:
-        return shorts
-    pool = gemini_pool.pool_from_env()
-    if not pool:
-        return shorts
-    model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
-    # Candidates run CONCURRENTLY, bounded by key-pool size: this is the
-    # whole reason gemini_pool.py exists ("Spreads concurrent candidate-clip
-    # confirmation calls ... across multiple keys so a single key's rate
-    # limit doesn't serialize the whole job" — its own docstring). Before
-    # this fix the outer loop over candidates was serial, so a pool of N
-    # keys never actually ran more than 1 candidate's checks at a time; a
-    # 1-hour source with 8-15 candidates at 1-3 min each is where "it loops
-    # for so long" comes from (confirmed 8-aug-2026 — a real run, not a
-    # hypothetical). Each candidate itself still fans out visual+context in
-    # parallel inside confirm_clip_with_vision, so worker count is capped at
-    # the pool size, not len(shorts): more threads than keys just contend
-    # for the same keys with no throughput gain.
-    workers = max(1, min(len(pool), len(shorts)))
-    print(f"👁️  Vision-confirming {len(shorts)} candidate(s) across a pool of "
-          f"{len(pool)} key(s) ({workers} concurrent)...")
-    if output_dir:
-        _write_progress(output_dir, "analyze",
-                        note=f"reviewing {len(shorts)} candidate(s) "
-                             f"({workers} at a time)...")
-
-    def _confirm_one(s):
-        try:
-            return confirm_clip_with_vision(
-                pool, model_name, source_video_path, s, video_duration, transcript_result)
-        except gemini_worker.GeminiBlockedError as e:
-            print(f"🚫 Vision confirm blocked: {e} — dropping this candidate")
-            return False
-
-    # Order is preserved (results collected by original index, not
-    # completion order) — candidate order can carry meaning downstream
-    # (e.g. the selector's own ranking), and parallelizing must not
-    # reshuffle it.
-    verdicts = [None] * len(shorts)
-    _done = [0]
-    _done_lock = threading.Lock()
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(_confirm_one, s): i for i, s in enumerate(shorts)}
-        for future in as_completed(futures):
-            idx = futures[future]
-            verdicts[idx] = future.result()
-            if output_dir:
-                with _done_lock:
-                    _done[0] += 1
-                    _write_progress(output_dir, "analyze",
-                                    note=f"reviewed {_done[0]}/{len(shorts)} candidate(s)...")
-
-    approved_shorts = []
-    for s, approved in zip(shorts, verdicts):
-        if approved:
-            approved_shorts.append(s)
-        else:
-            print(f"   ✗ dropped candidate [{s.get('start', 0):.1f}s-{s.get('end', 0):.1f}s]: "
-                  f"{s.get('_rejection_reason', 'vision confirmation rejected it')}")
-    if not approved_shorts:
-        if os.environ.get("VISION_CONFIRM_FALLBACK", "1").strip().lower() in ("0", "false", "no"):
-            print("❌ Vision confirmation rejected every candidate — no clip had both a clean "
-                  "opening and an actual narrative payoff. Returning no clips for this video "
-                  "rather than one we already know is bad.")
-            return None
-        print("⚠️ Vision confirmation rejected every candidate, but VISION_CONFIRM_FALLBACK=1 "
-              "— shipping the picks anyway. The vision review stays in the log for "
-              "inspection; the user explicitly prefers clips over a zero-clip failure.")
-        return shorts
-    return approved_shorts
-
-
-_scene_boundary_cache = {}
-
-
 def scene_boundaries_for(video_path):
     """Cached scene boundaries in seconds for one source video.
 
@@ -1779,48 +1337,16 @@ def _clamp_candidate_end_to_scene(candidate, scene_bounds):
     return candidate
 
 
-def _apply_boundary_bleed_fixes(candidate, context):
-    """PART 3.3 (6-aug-2026): apply the two new vision boundary fixes.
-
-    Different-speaker open: another person owns the first frames; move the
-    start LATER to the moment the intended speaker is on screen (the opposite
-    direction of the hook rescue, which only ever pulls earlier).
-
-    End-scene bleed: the next scene's person is already on screen at the end;
-    trim back by the model's suggested pullback.
-
-    Both fix in place, never reject — the bounded retry still judges the
-    corrected boundaries.
-    """
-    if not context:
-        return
-    if context.get("different_speaker_open"):
-        on_screen = float(context.get("speaker_on_screen_at") or 0)
-        if 0.5 < on_screen < 3.0:
-            new_start = candidate["start"] + on_screen
-            if new_start < candidate["end"] - 8.0:
-                candidate["start"] = new_start
-                print(f"   🔀 Different-speaker open: start moved to "
-                      f"{candidate['start']:.1f}s (intended speaker on screen)")
-    if context.get("end_scene_bleed"):
-        pull = float(context.get("end_bleed_pullback") or 0)
-        if pull > 0:
-            new_end = candidate["end"] - pull
-            if new_end - candidate["start"] >= 8.0:
-                candidate["end"] = new_end
-                print(f"   ✂️ End-scene bleed: end pulled back to "
-                      f"{candidate['end']:.1f}s")
-
-
 def _snap_candidates(shorts, words, video_duration):
     """Snap every clip's start/end onto real word boundaries. Long-context
-    segments get a higher floor so a full-arc candidate can't legally snap
-    down into short territory."""
+    segments get a higher floor + ceiling (a full arc needs room) and shorts
+    get a 120s ceiling (15-90 is the preferred band, 120 is the hard cap)."""
     for s in shorts:
         is_long = s.get("clip_type") == "long_context"
         ns, ne = snap_clip_to_words(
             s.get("start", 0), s.get("end", 0), words, video_duration,
             min_duration=45.0 if is_long else 15.0,
+            max_duration=240.0 if is_long else 120.0,
             context_start=s.get("_context_start"))
         s["start"], s["end"] = ns, ne
         s.pop("_context_start", None)
@@ -1830,18 +1356,17 @@ def _snap_candidates(shorts, words, video_duration):
 def _dedup_overlapping_clips(shorts):
     """Drop lower-scoring clips when two picks overlap in time.
 
-    The narrative engine returns picks as-is (the skill engine dedups inside
-    normalize_response), and the shared tail then MOVES boundaries — question
-    extension pulls starts earlier, vision rescue shifts both edges, word
-    snapping re-lands them — so distinct picks can collide into overlapping
+    The picker dedups at pick time, and the shared tail then MOVES boundaries
+    — question extension pulls starts earlier, word/sentence snapping
+    re-lands them — so distinct picks can collide into overlapping
     spans after selection. Every short in the list is rendered, so without
     this the same moment ships multiple times and spends GPU + vision/context
     calls on near-identical clips (the "it keeps picking the same thing"
     complaint). Runs on the FINAL boundaries, after every mutation, so it
-    catches what the skill engine's pre-confirm dedup cannot.
+    catches what the picker's pick-time dedup cannot.
 
     Keeps the higher-scoring clip (predicted_score, the key both engines
-    write; score is the skill engine's alias). Ties keep the earlier pick.
+    write). Ties keep the earlier pick.
     """
     if len(shorts) < 2:
         return shorts
@@ -1873,196 +1398,81 @@ def _dedup_overlapping_clips(shorts):
 
 def get_viral_clips(transcript_result, video_duration, source_video_path=None,
                     clip_count=None, long_context_count=0, style_variant="balanced",
-                    output_dir=None):
-    """Stage 3 — viral moment selection, engine-selectable.
+                    output_dir=None, context_blob=None):
+    """Stage 3 — viral moment selection via the unified picker.
 
-    Default (VIRAL_ENGINE=auto) runs the packaged viral-clip-finder skill
-    first — the structured judgment layer (15 frameworks, 8-axis rubric, 18
-    anti-patterns, niche playbooks) returning scored clips with cut briefs —
-    then falls back to the existing narrative-arc engine
-    (deepseek_worker.deepseek_select_narrative_clips → Gemini 2-pass) on any
-    failure so a provider hiccup can't zero out a job. VIRAL_ENGINE=skill
-    makes the skill a hard requirement; VIRAL_ENGINE=narrative restores the
-    pre-upgrade behavior exactly. Every engine's candidates pass through the
-    shared Gemini Vision confirmation + word-snapping tail, and optional
-    face-ID enrichment (FACE_ID_DB) upgrades the transcript to named-speaker
-    input for the skill.
+    The picker (picker.py) IS the planner: one Gemini call reads the whole
+    transcript plus the pre-loaded context blob (context_layer.py) and
+    returns the EXACT requested number of distinct moments — no separate
+    engines, no vision confirmation, no slicing. The shared tail below
+    (ASR term corrections, question backstop, sentence-anchored snapping,
+    scene clamp, overlap dedup) is unchanged; the count the picker promised
+    is surfaced on the result so a physical shortfall is never silent.
     """
     # Optional named-identity enrichment: renames anonymous diarized speaker
-    # labels where confident and hands the skill a Tier 3 input contract.
-    # Fails open — see face_id.py.
-    face_identities = None
+    # labels where confident. Fails open — see face_id.py.
     if source_video_path and os.environ.get("FACE_ID_DB"):
         try:
             import face_id
-            transcript_result, face_identities = face_id.enrich_if_configured(
+            transcript_result, _ = face_id.enrich_if_configured(
                 transcript_result, source_video_path)
         except Exception as e:
             print(f"⚠️ Face ID enrichment skipped ({type(e).__name__}: {e})")
 
-    engine = os.environ.get("VIRAL_ENGINE", "auto").strip().lower()
-    if engine in ("skill", "auto"):
-        try:
-            import viral_clip_finder
-            if viral_clip_finder.skill_available():
-                skill_result = viral_clip_finder.select_viral_clips(
-                    transcript_result, video_duration, clip_count=clip_count,
-                    long_context_count=long_context_count,
-                    style_variant=style_variant,
-                    face_identities=face_identities)
-                if skill_result and skill_result.get("clips"):
-                    # Same order the narrative engine uses: repair ASR
-                    # mishearings FIRST, then build the word list, so captions
-                    # and cut snapping both see the corrected spelling.
-                    if skill_result.get("term_corrections"):
-                        _apply_term_corrections(
-                            transcript_result, skill_result["term_corrections"])
-                    words = _build_word_list(transcript_result)
-                    shorts = skill_result["clips"]
-                    for s in shorts:
-                        _extend_start_for_preceding_question(s, transcript_result)
-                    shorts = _vision_confirm_candidates(
-                        shorts, source_video_path, video_duration, transcript_result,
-                        output_dir=output_dir)
-                    if shorts is None:
-                        return None
-                    _snap_candidates(shorts, words, video_duration)
-                    _scene_bounds = scene_boundaries_for(source_video_path)
-                    for s in shorts:
-                        _clamp_candidate_end_to_scene(s, _scene_bounds)
-                    shorts = _dedup_overlapping_clips(shorts)
-                    result = {"shorts": shorts,
-                              "rejected": skill_result.get("rejected", [])}
-                    if skill_result.get("cost_analysis"):
-                        result["cost_analysis"] = skill_result["cost_analysis"]
-                    return result
-                if engine == "skill":
-                    raise RuntimeError(
-                        "VIRAL_ENGINE=skill but the viral-clip-finder engine "
-                        "returned no clips (provider failure or empty result).")
-        except RuntimeError:
-            raise  # hard requirement — surface the real reason
-        except Exception as e:
-            if engine == "skill":
-                raise RuntimeError(
-                    f"VIRAL_ENGINE=skill failed ({type(e).__name__}: {e})") from e
-            print(f"⚠️ DEGRADED OUTPUT: Viral Clip Finder engine failed ({type(e).__name__}: {e}) "
-                  "— falling back to the narrative engine.")
+    if clip_count is None:
+        raise RuntimeError(
+            "No clip count provided — auto mode was removed. The picker "
+            "fulfills an explicit count at all costs; pass --clip-count.")
 
-    # --- Existing narrative-arc engine (unchanged behavior) ---
-    deepseek_result = deepseek_worker.deepseek_select_narrative_clips(
+    picker_result = picker.select_viral_clips(
         transcript_result, video_duration, clip_count=clip_count,
-        long_context_count=long_context_count, style_variant=style_variant)
-    if deepseek_result and deepseek_result.get("term_corrections"):
-        _apply_term_corrections(transcript_result, deepseek_result["term_corrections"])
+        long_context_count=long_context_count, style_variant=style_variant,
+        context_blob=context_blob)
+    if not picker_result or not picker_result.get("shorts"):
+        raise RuntimeError(
+            "Clip detection failed — Gemini did not return usable clips for this video.")
+
+    # Repair ASR mishearings FIRST, then build the word list, so captions and
+    # cut snapping both see the corrected spelling (same order as before).
+    if picker_result.get("term_corrections"):
+        _apply_term_corrections(transcript_result, picker_result["term_corrections"])
 
     words = _build_word_list(transcript_result)
+    shorts = picker_result["shorts"]
+    for s in shorts:
+        _extend_start_for_preceding_question(s, transcript_result)
+    _snap_candidates(shorts, words, video_duration)
+    _scene_bounds = scene_boundaries_for(source_video_path)
+    for s in shorts:
+        _clamp_candidate_end_to_scene(s, _scene_bounds)
+    shorts = _dedup_overlapping_clips(shorts)
 
-    if deepseek_result and deepseek_result.get("clips"):
-        shorts = deepseek_result["clips"]
-        for s in shorts:
-            _extend_start_for_preceding_question(s, transcript_result)
+    result = {
+        "shorts": shorts,
+        "rejected": [],
+        "clip_count_requested": picker_result.get("requested", len(shorts)),
+        "clip_count_delivered": len(shorts),
+        "clip_count_shortfall": max(0, picker_result.get("requested", len(shorts)) - len(shorts)),
+    }
+    if picker_result.get("cost_analysis"):
+        result["cost_analysis"] = picker_result["cost_analysis"]
+    if context_blob and context_blob.get("cost_analysis"):
+        _fold_cost(result, context_blob["cost_analysis"])
+    if result["clip_count_shortfall"]:
+        print(f"⚠️ DELIVERED {len(shorts)}/{result['clip_count_requested']} clip(s) — "
+              f"short by {result['clip_count_shortfall']}. Written to metadata, never silent.")
+    return result
 
-        shorts = _vision_confirm_candidates(
-            shorts, source_video_path, video_duration, transcript_result,
-            output_dir=output_dir)
-        if shorts is None:
-            return None
-        _snap_candidates(shorts, words, video_duration)
-        _scene_bounds = scene_boundaries_for(source_video_path)
-        for s in shorts:
-            _clamp_candidate_end_to_scene(s, _scene_bounds)
-        shorts = _dedup_overlapping_clips(shorts)
-        result = {"shorts": shorts}
-        if deepseek_result.get("cost_analysis"):
-            result["cost_analysis"] = deepseek_result["cost_analysis"]
-        return result
 
-    print("\U0001f916  Analyzing with Gemini (2-pass: score → detail)...")
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        print("❌ Error: GEMINI_API_KEY not found in environment variables.")
-        return None
-
-    client = gemini_worker.make_client(api_key)
-    model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
-    language = str(transcript_result.get('language') or 'unknown')
-    print(f"\U0001f916  Model: {model_name} | language: {language}")
-
-    try:
-        windows = build_transcript_windows(transcript_result, video_duration)
-        print(f"   Built {len(windows)} scoring window(s).")
-        costs = []
-
-        # --- Pass 1: score windows in batches, keep the highest-scoring ---
-        scored = []
-        SCORE_BATCH = 8
-        for b in range(0, len(windows), SCORE_BATCH):
-            batch = windows[b:b + SCORE_BATCH]
-            payload = [{"id": w["id"], "start": w["start"], "end": w["end"], "text": w["text"]} for w in batch]
-            prompt = gemini_worker.SCORE_PROMPT_TEMPLATE.format(
-                video_duration=video_duration, language=language,
-                windows_json=json.dumps(payload, ensure_ascii=False))
-            parsed, cost = _run_gemini_stage(client, model_name, prompt, gemini_worker.ScoreResponse)
-            if cost:
-                costs.append(cost)
-            scored.extend(parsed.get("windows") or [])
-
-        # Shortlist the top windows; scale with duration so long videos surface
-        # more candidates without exploding the detail call.
-        scored.sort(key=lambda w: w.get("score", 0), reverse=True)
-        target = max(3, min(10, int(video_duration // 90) + 2))
-        by_id = {w["id"]: w for w in windows}
-        shortlist = [by_id[w["id"]] for w in scored[:target] if w.get("id") in by_id]
-        if not shortlist:
-            shortlist = windows[:target]  # scoring returned nothing usable
-        print(f"   Shortlisted {len(shortlist)} window(s) for detail.")
-
-        # --- Pass 2: detailed clip extraction on the shortlist ---
-        payload = [{"id": w["id"], "start": w["start"], "end": w["end"], "text": w["text"]} for w in shortlist]
-        prompt = gemini_worker.DETAIL_PROMPT_TEMPLATE.format(
-            video_duration=video_duration, language=language,
-            windows_json=json.dumps(payload, ensure_ascii=False))
-        detail, cost = _run_gemini_stage(client, model_name, prompt, gemini_worker.DetailResponse)
-        if cost:
-            costs.append(cost)
-
-        shorts = detail.get("shorts") or []
-        # Snap each proposed clip onto real word boundaries (+ a bit of silence).
-        for s in shorts:
-            ns, ne = snap_clip_to_words(
-                s.get("start", 0), s.get("end", 0), words, video_duration,
-                context_start=s.get("_context_start"))
-            s["start"], s["end"] = ns, ne
-            s.pop("_context_start", None)
-
-        # Aggregate cost across both passes.
-        cost_analysis = None
-        if costs:
-            cost_analysis = {
-                "input_tokens": sum(c.get("input_tokens", 0) for c in costs),
-                "output_tokens": sum(c.get("output_tokens", 0) for c in costs),
-                "total_cost": sum(c.get("total_cost", 0) for c in costs),
-                "model": model_name,
-            }
-            print(f"\U0001f4b0 Total cost ({model_name}, 2-pass, {len(costs)} calls): ${cost_analysis['total_cost']:.6f}")
-
-        if not shorts:
-            print("⚠️ 2-pass returned no clips.")
-            return None
-
-        result = {"shorts": shorts}
-        if cost_analysis:
-            result["cost_analysis"] = cost_analysis
-        return result
-    except gemini_worker.GeminiBlockedError as e:
-        # Content-policy rejection: propagate so the job fails with the real
-        # reason instead of a generic "no clips found".
-        print(f"🚫 {e}")
-        raise
-    except Exception as e:
-        print(f"❌ Gemini Error: {e}")
-        return None
+def _fold_cost(result, extra_cost):
+    """Merge the context layer's cost into the picker's cost summary."""
+    existing = result.get("cost_analysis")
+    if not existing:
+        result["cost_analysis"] = extra_cost
+        return
+    for key in ("input_tokens", "output_tokens", "total_cost"):
+        if key in existing and key in extra_cost:
+            existing[key] = existing.get(key, 0) + extra_cost.get(key, 0)
 
 
 def get_visual_clips(video_path, video_duration, language="en"):
@@ -2195,8 +1605,20 @@ if __name__ == '__main__':
         if path:
             os.makedirs(path, exist_ok=True)
         return path
+
+    # The clip count is ALWAYS explicit — auto mode was removed. Fail fast,
+    # before any download or Gemini call: the picker fulfills the requested
+    # count at all costs, so it needs a count to fulfill.
+    if not args.skip_analysis and args.clip_count is None:
+        parser.error(
+            "--clip-count is required for clip analysis — auto mode was "
+            "removed; the picker fulfills an explicit count at all costs.")
     
     # 1. Get Input Video
+    # The pre-download context layer starts the moment the URL is known: the
+    # link goes to Gemini (own key) IN PARALLEL with the download below, so
+    # by the time the transcript exists the picker already has the brain.
+    context_thread = None
     if args.url:
         # For multi-clip runs, treat --output as an OUTPUT DIRECTORY (create it if needed).
         # For whole-video runs (--skip-analysis), --output can be a file path.
@@ -2210,7 +1632,10 @@ if __name__ == '__main__':
                 output_dir = os.path.dirname(args.output) or "."
             else:
                 output_dir = "."
-        
+        if not args.skip_analysis:
+            context_thread = context_layer.analyze_url_async(
+                args.url, os.path.join(output_dir, context_layer.CONTEXT_BLOB_FILENAME))
+
         input_video, video_title = download_youtube_video(
             args.url, output_dir, require_hd=True)
         _write_progress(output_dir, "download", note="source downloaded")
@@ -2263,15 +1688,27 @@ if __name__ == '__main__':
         _stage_durations["transcribe"] = time.time() - _stage_t0
         _stage_t0 = time.time()
 
+        # Collect the parallel context layer (5s cap — it must never block
+        # the pipeline; the picker is fully functional transcript-only).
+        context_blob = None
+        if context_thread is not None:
+            context_thread.join(timeout=5.0)
+            context_blob = context_layer.load_context(
+                os.path.join(output_dir, context_layer.CONTEXT_BLOB_FILENAME))
+            if not context_blob:
+                print("ℹ️  Context blob not ready in time — the picker runs "
+                      "transcript-only; the count is still fulfilled.")
+
         # 4. Gemini Analysis (transcript-driven, or vision for silent videos)
-        _write_progress(output_dir, "analyze", note="analyzing narrative arcs")
+        _write_progress(output_dir, "analyze", note="finding the viral moments")
         if transcript is not None:
             clips_data = get_viral_clips(transcript, duration,
                                          source_video_path=input_video,
                                          clip_count=args.clip_count,
                                          long_context_count=args.long_context_clips,
                                          style_variant=args.style_variant,
-                                         output_dir=output_dir)
+                                         output_dir=output_dir,
+                                         context_blob=context_blob)
         else:
             clips_data = get_visual_clips(input_video, duration)
         _stage_durations["analyze"] = time.time() - _stage_t0
@@ -2378,7 +1815,7 @@ if __name__ == '__main__':
                           f"{clip_filename} (no re-render)")
                     return True
 
-                # keep_spans marks the sub-ranges DeepSeek judged essential —
+                # keep_spans marks the sub-ranges the picker judged essential —
                 # everything else in [start, end] is dead air/filler to jump-
                 # cut out, not just boundary trim (see RESEARCH_viral_clip_
                 # patterns.md §4 — 6/6 real published shorts studied do this,
@@ -2386,7 +1823,7 @@ if __name__ == '__main__':
                 keep_spans = _snap_keep_spans_to_words(
                     clip.get('keep_spans') or [], _all_words, start, end)
                 total_kept = sum(e - s for s, e in keep_spans)
-                # If DeepSeek returned nothing usable, or the kept spans
+                # If the picker returned nothing usable, or the kept spans
                 # already cover ~all of [start, end], there's nothing to cut
                 # — skip the extra re-encode/concat pass entirely.
                 do_jump_cut = bool(keep_spans) and total_kept < (end - start) * 0.97

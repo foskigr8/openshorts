@@ -239,8 +239,12 @@ Treat §1 and §2 as the actual actionable work in this document.
 
 ## 4. Explicitly out of scope — do not touch
 
-- **Stage 3 (clip selection)** — `viral_clip_finder.py`, `get_viral_clips` in
-  `main.py`. Unrelated to framing; parked by the owner for a separate effort.
+- **Stage 3 (clip selection)** — `picker.py` + `context_layer.py`,
+  orchestrated by `get_viral_clips` in `main.py`. Rebuilt as its own effort
+  (one Gemini planning pass over the whole transcript + a pre-download
+  context brain; explicit clip count fulfilled at all costs; no vision
+  confirmation, no skill/narrative engines). Unrelated to framing; do not
+  rewire it while working on §1/§2.
 - **Captions** (`subtitles.py`) — no changes needed for §1 or §2 above. If
   §2's audio work somehow touches subtitle timing, stop and flag it; that
   would be a scope violation of what was asked for.

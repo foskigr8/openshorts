@@ -5,7 +5,6 @@ from clip_selection import (
     sentence_boundaries,
     compact_words,
     lookup_model_prices,
-    lookup_deepseek_model_prices,
 )
 
 
@@ -167,6 +166,55 @@ class TestSentenceSnappingContextLock:
         assert sentence_boundaries(words) == ([0.0, 1.0], [0.9, 1.9])
 
 
+class TestContainingSentenceAnchoring:
+    """Stage 3 rebuild: a boundary proposed mid-sentence snaps to that
+    sentence's own start/end — mid-sentence opens become impossible, not
+    just unlikely."""
+
+    def _story_words(self):
+        # "First question?" 0-1.4, "And here is the full answer to it." 4-7,
+        # "Second point lands." 10-12.2, "The payoff hits." 15-16.9.
+        return [
+            _word("First", 0.0, 0.6), _word("question?", 0.6, 1.4),
+            _word("And", 4.0, 4.3), _word("here", 4.3, 4.6),
+            _word("is", 4.6, 4.9), _word("the", 4.9, 5.2),
+            _word("full", 5.2, 5.6), _word("answer", 5.6, 6.2),
+            _word("to", 6.2, 6.4), _word("it.", 6.4, 7.0),
+            _word("Second", 10.0, 10.7), _word("point", 10.7, 11.4),
+            _word("lands.", 11.4, 12.2),
+            _word("The", 15.0, 15.4), _word("payoff", 15.4, 16.1),
+            _word("hits.", 16.1, 16.9),
+        ]
+
+    def test_mid_sentence_start_snaps_to_containing_sentence_start(self):
+        words = self._story_words()
+        # Proposed start at 5.0 is mid-way through "And here is the full
+        # answer to it." (4.0-7.0) — must open at 4.0, never mid-thought.
+        start, _end = snap_clip_to_words(5.0, 12.5, words, 30.0)
+        assert 3.8 <= start <= 4.2  # sentence start 4.0 minus the tiny lead
+
+    def test_mid_sentence_end_snaps_to_a_sentence_end(self):
+        words = self._story_words()
+        # Proposed end at 6.6 is inside the same 4.0-7.0 sentence — must
+        # close at a real sentence end (the containing 7.0, or the repair
+        # extension that reaches the 15s floor), never at mid-sentence 6.6.
+        _, ends = sentence_boundaries(words)
+        start, end = snap_clip_to_words(4.0, 6.6, words, 30.0)
+        assert start >= 3.8  # anchored open
+        assert any(abs(end - min(30.0, e + 0.3)) <= 0.05 for e in ends), end
+
+    def test_clean_open_never_mid_sentence(self):
+        # Property-style check across many proposals: every returned start
+        # must coincide with a real sentence start (within the lead).
+        words = self._story_words()
+        starts, _ends = sentence_boundaries(words)
+        for t in [0.5, 2.0, 4.5, 5.5, 6.0, 10.5, 11.0, 15.2, 16.5]:
+            start, end = snap_clip_to_words(t, t + 8.0, words, 30.0)
+            assert any(abs(start - s) <= 0.35 for s in starts), \
+                f"start {start:.2f} is not a sentence start (proposal {t})"
+            assert end - start >= 8.0 or end >= 16.9
+
+
 class TestPricing:
     def test_known_models(self):
         assert lookup_model_prices("gemini-2.5-flash") == (0.30, 2.50)
@@ -178,25 +226,6 @@ class TestPricing:
     def test_unknown_model_returns_none(self):
         assert lookup_model_prices("gpt-9-mega") is None
         assert lookup_model_prices(None) is None
-
-
-class TestDeepseekPricing:
-    def test_known_models(self):
-        assert lookup_deepseek_model_prices("deepseek-v4-flash") == (0.14, 0.28)
-        assert lookup_deepseek_model_prices("deepseek-v4-pro") == (0.435, 0.87)
-
-    def test_prefix_match_with_suffix(self):
-        assert lookup_deepseek_model_prices("deepseek-v4-flash-2026-07-01") == (0.14, 0.28)
-
-    def test_unknown_model_returns_none(self):
-        assert lookup_deepseek_model_prices("gpt-9-mega") is None
-        assert lookup_deepseek_model_prices(None) is None
-
-    def test_independent_from_gemini_price_table(self):
-        # Regression guard for the _lookup_prices(table, ...) refactor: the
-        # two tables must never bleed into each other.
-        assert lookup_model_prices("deepseek-v4-flash") is None
-        assert lookup_deepseek_model_prices("gemini-2.5-flash") is None
 
 
 class TestCompactWords:

@@ -3,8 +3,8 @@ import { Plus, X, Check, Eye, EyeOff } from 'lucide-react';
 
 // Repeatable list of API keys for one provider — used where a single provider
 // can usefully hold more than one key (e.g. a Gemini key pool spread across
-// concurrent vision-confirmation calls so no single key's rate limit becomes
-// the bottleneck). Renders each key masked with a per-row visibility toggle,
+// picker + scene-direction calls so no single key's rate limit becomes the
+// bottleneck). Renders each key masked with a per-row visibility toggle,
 // an "add another key" control, and a Save that persists the whole list.
 export default function KeyListInput({ keys, onSave, placeholder = 'AIzaSy...' }) {
     const [draft, setDraft] = useState(keys && keys.length ? keys : ['']);

@@ -1,12 +1,11 @@
-"""Round-robin pool of Gemini API keys for parallel vision-confirmation calls.
+"""Round-robin pool of Gemini API keys for parallel pipeline calls.
 
-Spreads concurrent candidate-clip confirmation calls (main.py's
-confirm_clip_with_vision, one visual check + one context check per candidate)
-across multiple keys so a single key's rate limit doesn't serialize the
-whole job. A key that errors during a call is assumed rate-limited/broken
-and gets skipped for the rest of the run rather than retried immediately —
-the caller decides what to do about the failed call itself (main.py fails
-open: a confirmation call that couldn't run doesn't block the candidate).
+Spreads the picker's planning calls and the render-time scene-direction
+calls (main.py's analyze_scene_context) across multiple keys so a single
+key's rate limit doesn't serialize the whole job. A key that errors during
+a call is assumed rate-limited/broken and gets skipped for the rest of the
+run rather than retried immediately — the caller decides what to do about
+the failed call itself.
 """
 import itertools
 import os

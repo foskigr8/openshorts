@@ -145,24 +145,24 @@ async def resolve_assemblyai(request: Request) -> Optional[str]:
     return os.environ.get("ASSEMBLYAI_API_KEY")
 
 
-async def resolve_deepseek(request: Request) -> Optional[str]:
-    """Resolve the DeepSeek API key for a request (narrative clip selection).
-
-    Optional feature — a missing key just means clip selection falls back to
-    Gemini's text scoring, so this never raises. Self-host BYOK: header wins,
-    else the env fallback.
+async def resolve_context_gemini(request: Request) -> Optional[str]:
+    """Resolve the Gemini key for the pre-download context layer
+    (CONTEXT_GEMINI_API_KEY). Kept SEPARATE from the picker's key so the
+    context call (running in parallel with the download) never shares the
+    same rate budget. Self-host BYOK: header wins, else the env fallback.
+    Optional — when unset the context layer reuses the primary key.
     """
-    header = request.headers.get("X-DeepSeek-Key")
+    header = request.headers.get("X-Context-Gemini-Key")
     if header:
         return header
-    return os.environ.get("DEEPSEEK_API_KEY")
+    return os.environ.get("CONTEXT_GEMINI_API_KEY")
 
 
 async def resolve_gemini_pool(request: Request) -> List[str]:
     """Resolve the full pool of Gemini keys available for a request.
 
-    Vision-confirmation calls spread across this pool so a single key's rate
-    limit doesn't serialize the whole job. Order of preference, all merged
+    Picker + scene-direction calls spread across this pool so a single key's
+    rate limit doesn't serialize the whole job. Order of preference, all merged
     (not exclusive like resolve_gemini): the multi-key ``X-Gemini-Keys``
     header (comma-separated, from the Settings "extra keys" list) plus
     whatever ``resolve_gemini`` would have returned alone (the primary
@@ -1943,6 +1943,15 @@ async def process_endpoint(
     if not ack_flag:
         raise HTTPException(status_code=400, detail="You must confirm you own the content or have rights to process it.")
 
+    # Every analysis job carries an EXPLICIT clip target — auto mode was
+    # removed ("don't even give it that option"): the picker fulfills the
+    # requested count at all costs, so it needs a count to fulfill.
+    if parsed_clip_count is None:
+        raise HTTPException(
+            status_code=400,
+            detail="clip_count is required — auto clip count was removed; "
+                   "the picker fulfills an explicit count at all costs.")
+
     if url and DISABLE_YOUTUBE_URL:
         raise HTTPException(status_code=403, detail="YouTube URL ingest is disabled on this deployment. Please upload a file you own.")
 
@@ -2050,9 +2059,9 @@ async def process_endpoint(
     assemblyai_key = await resolve_assemblyai(request)
     if assemblyai_key:
         env["ASSEMBLYAI_API_KEY"] = assemblyai_key
-    deepseek_key = await resolve_deepseek(request)
-    if deepseek_key:
-        env["DEEPSEEK_API_KEY"] = deepseek_key
+    context_gemini_key = await resolve_context_gemini(request)
+    if context_gemini_key:
+        env["CONTEXT_GEMINI_API_KEY"] = context_gemini_key
     gemini_pool = await resolve_gemini_pool(request)
     if len(gemini_pool) > 1:
         # Primary key already lands in GEMINI_API_KEY above; only the extras

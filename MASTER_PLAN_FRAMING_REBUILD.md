@@ -534,13 +534,13 @@ different choice for v3 and needs the owner's confirmation if changed.
 
 ## 7. Explicitly OUT of scope — do not touch these while doing the above
 
-- **Stage 3 (clip selection — `viral_clip_finder.py`, `get_viral_clips` in
-  `main.py`, docstring literally says "Stage 3 — viral moment selection").**
-  This decides **which moments** become clips. Built before this rebuild
-  started (commit `98df856`); none of Phases 0-4b have touched it, they only
-  change **how** an already-chosen clip is cropped. The owner has explicitly
-  parked further Stage 3 work for a separate session — do not conflate the
-  two, and do not "improve" Stage 3 as a side effect of Phase 5 work.
+- **Stage 3 (clip selection — `picker.py` + `context_layer.py` via
+  `get_viral_clips` in `main.py`).** This decides **which moments** become
+  clips. Rebuilt in its own session (9-aug-2026: unified picker + parallel
+  Gemini context brain; the old `viral_clip_finder.py`/`deepseek_worker.py`
+  engines were deleted). None of Phases 0-4b touch it — they only change
+  **how** an already-chosen clip is cropped. Do not conflate the two, and
+  do not "improve" Stage 3 as a side effect of Phase 5 work.
   (Also worth knowing: `CLAUDE.md`'s top-of-file pipeline list numbers stages
   1-11 differently from how "Stage 3" is used everywhere else in the code —
   the code/skill/bootstrap usage of "Stage 3" means the AI-analysis/clip-

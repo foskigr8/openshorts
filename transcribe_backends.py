@@ -26,7 +26,7 @@ The assemblyai path (a real external paid API, not just a different local
 model) falls back to whisper on ANY error — bad/missing key, timeout,
 network failure. It additionally requests speaker-label utterances and
 per-sentence sentiment analysis, which the narrative clip-selection stage
-(deepseek_worker.py) consumes as extra signal on top of the base contract.
+(picker.py) consumes as extra signal on top of the base contract.
 GPU whisper in turn falls back to CPU whisper on CUDA errors (VRAM is shared
 with other models on the host, so loads can OOM under load).
 """

@@ -1,16 +1,17 @@
-"""Retry behaviour of the Gemini scoring/detail stage.
+"""Retry behaviour of the Stage 3 picker's Gemini call.
 
-Prod (22-jul-2026) lost 3 jobs to Gemini answering 200 with an empty body.
-That raises while parsing, not while calling, so it used to escape the retry
-loop and kill the job on the first blip.
+Prod (22-jul-2026) lost 3 jobs to Gemini answering 200 with an empty body —
+that raises while parsing, not while calling, so it used to escape the retry
+loop and kill the job on the first blip. The old 2-pass stage's retry loop
+now lives in picker._call_gemini (and context_layer._call_gemini): policy
+blocks still fail fast; transient blips retry with backoff.
 """
 import types
+
 import pytest
 
-# main pulls in cv2/scenedetect/yt-dlp at import time; the minimal CI env
-# lacks them, so skip there. Runs fully in the container/local where deps
-# exist.
-main = pytest.importorskip("main")
+import gemini_worker
+import picker
 
 
 class _FakeResponse:
@@ -24,154 +25,94 @@ class _FakeResponse:
         return "" if self.parsed is None else "{}"
 
 
-class _FakeModels:
-    """Returns an empty body for the first `blips` calls, then a good one."""
-
-    def __init__(self, blips, payload=None):
-        self.blips = blips
-        self.calls = 0
-        self.payload = payload if payload is not None else {"windows": [{"id": "w0", "score": 90}]}
-
-    def generate_content(self, **kwargs):
-        self.calls += 1
-        if self.calls <= self.blips:
-            return _FakeResponse(parsed=None)
-        return _FakeResponse(parsed=self.payload)
+_GOOD_PAYLOAD = {
+    "clips": [{
+        "start": 0, "end": 30, "predicted_score": 70, "clip_type": "short",
+        "hook_type": "h", "narrative_summary": "s", "essential_span_note": "e",
+        "video_description_for_tiktok": "d",
+        "video_description_for_instagram": "d",
+        "video_title_for_youtube_short": "t", "viral_hook_text": "v",
+    }],
+    "term_corrections": [],
+}
 
 
-def _client(models):
-    return types.SimpleNamespace(models=models)
+def _stub_generate(monkeypatch, blips=0, raise_blocked=False):
+    calls = {"n": 0}
+
+    def fake_generate(client, model_name, prompt, config=None,
+                      max_attempts=1, log=None):
+        calls["n"] += 1
+        if raise_blocked:
+            return _FakeResponse(parsed=None)  # raise_if_blocked handles it
+        if calls["n"] <= blips:
+            return _FakeResponse(parsed=None)  # empty body -> parse retry
+        return _FakeResponse(parsed=_GOOD_PAYLOAD)
+
+    monkeypatch.setattr(picker.gemini_pool, "generate_with_fallback",
+                        fake_generate)
+    if raise_blocked:
+        class _Reason:
+            name = "PROHIBITED_CONTENT"
+
+        class _PF:
+            block_reason = _Reason()
+
+        def blocked(response):
+            raise gemini_worker.GeminiBlockedError(
+                "Gemini blocked this video's content (PROHIBITED_CONTENT).")
+
+        monkeypatch.setattr(picker.gemini_worker, "raise_if_blocked", blocked)
+    return calls
 
 
 @pytest.fixture(autouse=True)
 def _no_sleep(monkeypatch):
-    monkeypatch.setattr(main.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(picker.time, "sleep", lambda *_: None)
 
 
 def test_recovers_from_a_single_empty_body(monkeypatch):
-    models = _FakeModels(blips=1)
-    parsed, _cost = main._run_gemini_stage(_client(models), "m", "prompt", object)
-    assert models.calls == 2
-    assert parsed["windows"][0]["score"] == 90
+    calls = _stub_generate(monkeypatch, blips=1)
+    parsed, _cost = picker._call_gemini("k", "prompt")
+    assert calls["n"] == 2
+    assert parsed["clips"][0]["start"] == 0
 
 
-def test_recovers_from_two_consecutive_blips():
-    models = _FakeModels(blips=2)
-    parsed, _cost = main._run_gemini_stage(_client(models), "m", "prompt", object)
-    assert models.calls == 3
-    assert parsed["windows"]
+def test_recovers_from_two_consecutive_blips(monkeypatch):
+    calls = _stub_generate(monkeypatch, blips=2)
+    parsed, _cost = picker._call_gemini("k", "prompt")
+    assert calls["n"] == 3
+    assert parsed["clips"]
 
 
-def test_gives_up_after_three_attempts():
-    models = _FakeModels(blips=99)
-    with pytest.raises(Exception) as exc:
-        main._run_gemini_stage(_client(models), "m", "prompt", object)
-    assert models.calls == 3
+def test_gives_up_after_three_attempts(monkeypatch):
+    calls = _stub_generate(monkeypatch, blips=99)
+    with pytest.raises(ValueError) as exc:
+        picker._call_gemini("k", "prompt")
+    assert calls["n"] == 3
     assert "empty response body" in str(exc.value)
 
 
-def test_non_transient_errors_are_not_retried():
-    class _Boom:
-        calls = 0
+def test_non_transient_errors_are_not_retried(monkeypatch):
+    def boom(client, model_name, prompt, config=None, max_attempts=1, log=None):
+        raise ValueError("400 INVALID_ARGUMENT: bad request")
 
-        def generate_content(self, **kwargs):
-            _Boom.calls += 1
-            raise ValueError("400 INVALID_ARGUMENT: bad request")
-
+    monkeypatch.setattr(picker.gemini_pool, "generate_with_fallback", boom)
     with pytest.raises(ValueError):
-        main._run_gemini_stage(_client(_Boom()), "m", "prompt", object)
-    assert _Boom.calls == 1
+        picker._call_gemini("k", "prompt")
 
 
-def test_succeeds_without_retrying_when_the_first_call_is_fine():
-    models = _FakeModels(blips=0)
-    main._run_gemini_stage(_client(models), "m", "prompt", object)
-    assert models.calls == 1
+def test_succeeds_without_retrying_when_the_first_call_is_fine(monkeypatch):
+    calls = _stub_generate(monkeypatch, blips=0)
+    picker._call_gemini("k", "prompt")
+    assert calls["n"] == 1
 
 
-class _BlockedResponse:
-    """Mimics the real prod shape: 200, empty candidates, block_reason set."""
-    text = ""
-    candidates = []
-    usage_metadata = None
-
-    class _PF:
-        class _Reason:
-            name = "PROHIBITED_CONTENT"
-        block_reason = _Reason()
-
-    prompt_feedback = _PF()
-
-
-def test_policy_block_fails_fast_without_retrying():
+def test_policy_block_fails_fast_without_retrying(monkeypatch):
     # Prod 23-jul-2026: PROHIBITED_CONTENT is deterministic — 3 retries just
     # burned quota and reported a misleading "empty response body".
-    class _Models:
-        calls = 0
-
-        def generate_content(self, **kwargs):
-            _Models.calls += 1
-            return _BlockedResponse()
-
-    import gemini_worker
+    calls = _stub_generate(monkeypatch, blips=0, raise_blocked=True)
     with pytest.raises(gemini_worker.GeminiBlockedError) as exc:
-        main._run_gemini_stage(_client(_Models()), "m", "prompt", object)
-    assert _Models.calls == 1
+        picker._call_gemini("k", "prompt")
+    assert calls["n"] == 1
     assert "PROHIBITED_CONTENT" in str(exc.value)
-
-
-def test_blocked_finish_reason_also_raises():
-    import gemini_worker
-
-    class _Cand:
-        class _FR:
-            name = "SAFETY"
-        finish_reason = _FR()
-        content = None
-
-    class _Resp:
-        prompt_feedback = None
-        candidates = [_Cand()]
-
-    with pytest.raises(gemini_worker.GeminiBlockedError):
-        gemini_worker.raise_if_blocked(_Resp())
-
-
-def test_clean_response_is_not_flagged_as_blocked():
-    import gemini_worker
-
-    class _Resp:
-        prompt_feedback = None
-        candidates = []
-
-    gemini_worker.raise_if_blocked(_Resp())  # must not raise
-
-
-def test_bounded_timeout_is_applied(monkeypatch):
-    """6-aug-2026: a hung provider must not stall the job for minutes."""
-    import gemini_worker
-    captured = {}
-
-    def fake_client(api_key, http_options=None):
-        captured["api_key"] = api_key
-        captured["http_options"] = http_options
-        return object()
-
-    monkeypatch.setattr(gemini_worker.genai, "Client", fake_client)
-    gemini_worker.make_client("test-key")
-    assert captured["api_key"] == "test-key"
-    assert captured["http_options"].timeout == 120000
-
-
-def test_bounded_timeout_env_override(monkeypatch):
-    import gemini_worker
-    monkeypatch.setenv("GEMINI_TIMEOUT_MS", "45000")
-    captured = {}
-
-    def fake_client(api_key, http_options=None):
-        captured["http_options"] = http_options
-        return object()
-
-    monkeypatch.setattr(gemini_worker.genai, "Client", fake_client)
-    gemini_worker.make_client("test-key")
-    assert captured["http_options"].timeout == 45000

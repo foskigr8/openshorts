@@ -30,7 +30,7 @@ export default function FloatingInputBar({ onProcess, isProcessing }) {
       setSending(true);
       onProcess({
         type: 'file', payload: file, acknowledged: true,
-        outputFormat: 'vertical', clipCount: null, longContextClips: 0,
+        outputFormat: 'vertical', clipCount: 8, longContextClips: 0,
       });
       setFile(null);
       setSending(false);
@@ -38,7 +38,7 @@ export default function FloatingInputBar({ onProcess, isProcessing }) {
       setSending(true);
       onProcess({
         type: 'url', payload: url, acknowledged: true,
-        outputFormat: 'vertical', clipCount: null, longContextClips: 0,
+        outputFormat: 'vertical', clipCount: 8, longContextClips: 0,
       });
       setUrl('');
       setSending(false);

@@ -243,15 +243,8 @@ function App() {
     return '';
   });
 
-  // DeepSeek API State (narrative clip selection) - Load encrypted
-  const [deepseekKey, setDeepseekKey] = useState(() => {
-    const stored = localStorage.getItem('deepseekKey_v1');
-    if (stored) return decrypt(stored);
-    return '';
-  });
-
   // Extra Gemini keys beyond the primary one above — a small pool spread
-  // across concurrent vision-confirmation calls so a single key's rate limit
+  // across the picker + scene-direction calls so a single key's rate limit
   // doesn't become the bottleneck. Stored as encrypted JSON.
   const [geminiExtraKeys, setGeminiExtraKeys] = useState(() => {
     const stored = localStorage.getItem('geminiExtraKeys_v1');
@@ -289,8 +282,9 @@ function App() {
   // Itemized system status for the status strip: {backend, cookies, gpu} from
   // /api/system, refreshed on an interval. null = never checked yet.
   const [systemStatus, setSystemStatus] = useState(null);
-  // The clip count the user requested at submit (or null = auto) — sizes the
-  // placeholder slots in the live grid before progress.json knows the total.
+  // The clip count the user requested at submit — sizes the placeholder
+  // slots in the live grid before progress.json knows the total. Always an
+  // explicit number; auto mode was removed.
   const [requestedClipCount, setRequestedClipCount] = useState(null);
   const [processingMedia, setProcessingMedia] = useState(null);
   const [submittedFormat, setSubmittedFormat] = useState('auto');
@@ -311,7 +305,6 @@ function App() {
   const [elevenLabsSaved, setElevenLabsSaved] = useState(false);
   const [falSaved, setFalSaved] = useState(false);
   const [assemblyaiSaved, setAssemblyaiSaved] = useState(false);
-  const [deepseekSaved, setDeepseekSaved] = useState(false);
 
   // Sync state for original video playback
   const [syncedTime, setSyncedTime] = useState(0);
@@ -818,7 +811,7 @@ function App() {
     setLogs(["Starting process..."]);
     setResults(null);
     setProgress(null);
-    setRequestedClipCount(data.clipCount ?? null);
+    setRequestedClipCount(data.clipCount ?? 8);
     setSubmittedFormat(data.outputFormat || 'auto');
     setRightTab('clips');
     setProcessingMedia(data);
@@ -829,12 +822,11 @@ function App() {
     try {
       let body;
       // BYOK sends the Gemini header; managed users rely on the bearer token
-      // that apiFetch attaches automatically. AssemblyAI/DeepSeek/extra Gemini
-      // pool keys are all optional — the pipeline falls back (Whisper /
-      // Gemini-only 2-pass / single Gemini key) when any of these are unset.
+      // that apiFetch attaches automatically. AssemblyAI + extra Gemini pool
+      // keys are optional — the pipeline falls back (Whisper / single Gemini
+      // key) when any of these are unset.
       const headers = apiKey ? { 'X-Gemini-Key': apiKey } : {};
       if (assemblyaiKey) headers['X-AssemblyAI-Key'] = assemblyaiKey;
-      if (deepseekKey) headers['X-DeepSeek-Key'] = deepseekKey;
       if (geminiExtraKeys.length > 0) headers['X-Gemini-Keys'] = geminiExtraKeys.join(',');
 
       if (data.type === 'url') {
@@ -844,7 +836,7 @@ function App() {
           acknowledged: !!data.acknowledged,
           output_format: data.outputFormat || 'auto',
           force_low_quality: forceLowQuality,
-          clip_count: data.clipCount ?? null,
+          clip_count: data.clipCount ?? 8,
           long_context_clips: data.longContextClips || 0,
           remove_background_audio: data.removeBackgroundAudio || '',
           // 7-aug-2026: reversed back to reuse-by-default. force_new:true was
@@ -1331,38 +1323,8 @@ function App() {
                   </div>
 
                   <div>
-                    <label className="block text-sm text-muted mb-2">DeepSeek API Key</label>
-                    <div className="flex flex-col sm:flex-row gap-2">
-                      <input
-                        type="password"
-                        value={deepseekKey}
-                        onChange={(e) => setDeepseekKey(e.target.value)}
-                        className="input-field"
-                        placeholder="sk-..."
-                      />
-                      <button
-                        onClick={() => {
-                          if (deepseekKey) {
-                            localStorage.setItem('deepseekKey_v1', encrypt(deepseekKey));
-                            setDeepseekSaved(true);
-                            setTimeout(() => setDeepseekSaved(false), 2000);
-                          }
-                        }}
-                        className={deepseekSaved ? 'badge-ok px-4' : 'btn-quiet py-2 px-4 text-sm'}
-                      >
-                        {deepseekSaved ? <><Check size={12} /> saved</> : 'Save'}
-                      </button>
-                    </div>
-                    <p className="mt-2 text-xs text-muted">
-                      <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noopener noreferrer" className="text-brass hover:underline">
-                        Get your DeepSeek API key →
-                      </a>
-                    </p>
-                  </div>
-
-                  <div>
                     <label className="block text-sm text-muted mb-2">
-                      Extra Gemini keys <span className="text-muted">(optional — spreads vision-confirmation calls across a pool so one key's rate limit isn't the bottleneck)</span>
+                      Extra Gemini keys <span className="text-muted">(optional — spreads picker + scene-direction calls across a pool so one key's rate limit isn't the bottleneck)</span>
                     </label>
                     <KeyListInput
                       keys={geminiExtraKeys}

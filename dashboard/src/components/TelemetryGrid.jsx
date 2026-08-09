@@ -52,7 +52,7 @@ function ParsedLogs({ logs, status, raw, onRawToggle }) {
       if (/transcrib/i.test(t)) return 'Transcribing and chunking the audio';
       if (/scene/i.test(t)) return 'Detecting scenes for framing decisions';
       if (/encoder/i.test(t)) return 'Initializing the video encoder';
-      if (/analyzing|gemini|deepseek|narrative/i.test(t)) return 'Analyzing narrative arcs and viral moments';
+      if (/analyzing|gemini|picker|narrative/i.test(t)) return 'Finding the viral moments';
       if (/error|❌|failed/i.test(t)) return `⚠ ${t}`;
       return null;
     })

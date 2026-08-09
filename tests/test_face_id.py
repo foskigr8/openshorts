@@ -98,18 +98,18 @@ def test_enrich_if_configured_noop_on_missing_video(monkeypatch, tmp_path):
     assert traj is None
 
 
-def test_enrich_returns_a_mapping_the_skill_can_consume():
-    """The second return value feeds format_transcript_for_skill's `in` lookup,
-    so it must be {label: name} — a trajectory dict silently never matches."""
-    import viral_clip_finder as vcf
-
+def test_enrich_returns_a_mapping_the_picker_can_consume():
+    """The second return value feeds the picker's named-speaker input, so it
+    must be {label: name} — a trajectory dict silently never matches."""
     transcript = {"segments": [
         {"start": 0.0, "end": 10.0, "text": "hello", "speaker": "SPEAKER_00"}]}
     traj = _trajectory({"Joe": [[0.0, 10.0]]})
     enriched, mapping = face_id.enrich_transcript_speakers(transcript, traj)
     assert mapping == {"SPEAKER_00": "Joe"}
-    line = vcf.format_transcript_for_skill(enriched, face_identities=mapping)
-    assert line.startswith("[00:00:00] Joe:")
+    # The enriched transcript carries the NAME on the segment (the picker's
+    # `sp` field) instead of the anonymous diarized label.
+    assert enriched["segments"][0]["speaker"] == "Joe"
+    assert enriched["segments"][0].get("speaker_named") is True
 
 
 def test_identify_faces_respects_the_scan_limit(monkeypatch):

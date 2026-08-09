@@ -165,12 +165,21 @@ order:
    fresh studio boot doesn't have the package, `pip install google-genai
    --break-system-packages`.
 6. **Server-side fallback API keys** for self-testing without the browser
-   (Gemini/DeepSeek/AssemblyAI) already live in `.env` — BYOK headers from
+   (Gemini/AssemblyAI; optionally `CONTEXT_GEMINI_API_KEY` for the
+   pre-download context layer) already live in `.env` — BYOK headers from
    the dashboard still take priority, this is only a fallback so pipeline
    runs can be triggered directly (`docker exec ... python3 main.py -u
    <url> ...`) without a browser session.
 
 ## 7. Session status (31-jul-2026) — what's been fixed vs. still open
+
+> **Superseded (9-aug-2026):** the Stage 3 rebuild replaced this session's
+> DeepSeek narrative engine + Gemini Vision confirmation with the unified
+> picker (`picker.py`) + pre-download context layer (`context_layer.py`).
+> The history below is kept as a record of the fixes that informed the new
+> design (ad/sponsor exclusion, REAL HOOK RULE, sentence anchoring, the
+> question backstop) — those rules now live in `picker.py`'s prompt and
+> `clip_selection.snap_clip_to_words`.
 
 Built across this session (spans two studio-stop pauses — see git-free
 history in this file since there's no git repo here): AssemblyAI

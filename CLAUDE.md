@@ -55,9 +55,9 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 | `s3_uploader.py` | AWS S3 upload with caching |
 | `subtitles.py` | SRT generation, FFmpeg subtitle burning, and dubbed video transcription |
 | `translate.py` | ElevenLabs dubbing API for AI voice translation |
-| `viral_clip_finder.py` | Stage 3 judgment engine: the viral-clip-finder skill (15 frameworks, 8-axis rubric, 18 anti-patterns, niche playbooks) as a schema-enforced LLM call returning scored clips with cut briefs + rejected candidates |
-| `face_id.py` | Optional named-identity enrichment (InsightFace known-faces DB) that upgrades the transcript to named-speaker input for the skill; fails open |
-| `viral_clip_finder_skill/` | Bundled skill package (SKILL.md + references) consumed by `viral_clip_finder.py` |
+| `picker.py` | Stage 3 planner: ONE Gemini call over the whole transcript + the context brain returns the EXACT requested clip count (keep-looking loop), sentence-anchored, niche-agnostic |
+| `context_layer.py` | Pre-download Gemini "brain": sends the YouTube LINK to Gemini in parallel with the download (own key) for a 3-part audiovisual summary consumed by the picker |
+| `face_id.py` | Optional named-identity enrichment (InsightFace known-faces DB) that upgrades the transcript to named-speaker input for the picker; fails open |
 | `hf_storage.py` | HuggingFace Hub clip storage: clips upload as each one finishes so they survive a Kaggle session ending; fails soft when unconfigured |
 | `gpu_affinity.py` | Per-clip-worker GPU assignment (thread-local torch device) so a second GPU is not left idle |
 | `kaggle_smoke_test.py` | Post-boot health check for the Kaggle host — lives in the repo so it improves via `git pull`, not a notebook re-import |
@@ -86,47 +86,40 @@ shot) → `reframe_v3.py` (saliency-aware composition, fail-loud
 See `MASTER_PLAN_FRAMING_REBUILD.md` for why MediaPipe/YOLO were replaced and
 how each v3 decision was tested.
 
-### Viral Clip Finder (Stage 3 engine)
+### Stage 3 picker (what actually runs)
 
-Stage 3 ("find viral moments") is engine-selectable via `VIRAL_ENGINE`:
+`picker.py` IS the planner: one Gemini call reads the WHOLE transcript (1M
+context — no slicing) plus the pre-loaded context brain and returns the
+EXACT requested number of distinct viral moments. No skill engine, no
+narrative engine, no vision confirmation — the old dual-engine machinery
+(`viral_clip_finder.py`, `viral_clip_finder_skill/`, `deepseek_worker.py`,
+`VIRAL_ENGINE`, `VISION_CONFIRM_FALLBACK`) was deleted.
 
-- `auto` (default): the viral-clip-finder skill runs first; the existing
-  narrative-arc engine (deepseek_worker → Gemini 2-pass) is the fallback on
-  any provider failure, so a hiccup can't zero out a job.
-- `skill`: the skill is a hard requirement — failure fails the job loudly.
-- `narrative`: the pre-upgrade behavior exactly.
-
-Every engine's candidates pass through the shared Gemini Vision confirmation
-and word-snapping tail (`_vision_confirm_candidates` / `_snap_candidates` in
-`main.py`), so the cut/reframe/subtitle stages are unchanged. The skill's
-extra fields (score, patterns, risk flags, cold-open, caption text, B-roll
-cues, cut list) ride along in `metadata.json` for the dashboard and editors.
-
-**Both engines emit the same clip contract**, and that is load-bearing:
-
-- `keep_spans` is a list of `{"start": float, "end": float}` **dicts**
-  (`deepseek_worker.KeepSpan`). Every consumer in `main.py` reads them with
-  `span.get("start")`. Emitting `[start, end]` pairs instead raises
-  `AttributeError` inside `_extend_keep_spans_to_cover_boundaries` — which is
-  swallowed by the engine's fallback and shows up as "the skill engine never
-  runs", not as an error. `tests/test_viral_clip_finder.py` pins this against
-  the real functions compiled out of `main.py`.
-- `narrative_summary` is what `confirm_clip_with_vision` shows the vision
-  judge; the skill path aliases `why_it_hits` onto it. Without it the judge
-  reviews clips with no idea what they are supposed to resolve.
-- `term_corrections` (ASR mishearings) must be applied **before** the word
-  list is built, or captions render the misheard spelling.
+- The count is ALWAYS explicit (`--clip-count`, dashboard slider). Auto
+  count was removed — the picker fulfills the requested count at all costs
+  via a bounded keep-looking loop (forbidden-span passes), and a physical
+  shortfall (video too short) is surfaced in logs + `metadata.json`.
+- `context_layer.py` runs in parallel with the download: the YouTube LINK is
+  sent to Gemini (`Part.from_uri`), which returns a 3-part audiovisual brain
+  (summary / highlights with approximate timestamps / parts people would
+  love) written to `gemini_context.json`. Uses its own key
+  (`CONTEXT_GEMINI_API_KEY`) so it never shares the picker's rate budget.
+- The shared tail in `main.py` is unchanged: ASR `term_corrections` applied
+  BEFORE the word list is built → `_extend_start_for_preceding_question` →
+  `_snap_candidates` (sentence-anchored: a boundary proposed mid-sentence
+  snaps to that sentence's own start/end, so mid-sentence opens are
+  impossible) → scene clamp → overlap dedup.
+- The clip contract is load-bearing: `keep_spans` is a list of
+  `{"start": float, "end": float}` **dicts** consumed by the jump-cutter;
+  `narrative_summary` / `hook_type` / titles / descriptions / `viral_hook_text`
+  ride along in `metadata.json` for the dashboard.
 
 Env vars:
 
-- `VIRAL_ENGINE` — `auto` | `skill` | `narrative` (default `auto`)
-- `VCF_ALLOW_DEEPSEEK` — `1` opts DeepSeek's own API back into the provider
-  chain (default: Gemini only, matching the existing narrative engine)
-- `VCF_LONG_FORM_REFS` — always include the seamless-cutting reference
-  (default: only when long-context clips are requested)
-- `VCF_REFERENCES` — `full` (default) | `lean` | explicit `a.md,b.md` list.
-  The full set is ~124KB (~35k tokens) prepended to every Stage 3 call; that
-  breadth is the point, `lean` trades it for cost/latency.
+- `CONTEXT_GEMINI_API_KEY` — dedicated key for the pre-download context
+  layer (default: reuses `GEMINI_API_KEY`)
+- `GEMINI_MODEL` / `GEMINI_FALLBACK_MODEL` / `GEMINI_API_KEYS` — picker
+  model + pool (unchanged)
 
 Note the two engines resolve keys differently: the narrative engine is
 `NARRATIVE_GEMINI_API_KEY`-only and is **inert without it** (so it cannot act

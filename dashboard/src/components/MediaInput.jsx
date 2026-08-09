@@ -30,8 +30,9 @@ export default function MediaInput({ onProcess, isProcessing }) {
     const [outputFormat, setOutputFormat] = useState('vertical'); // vertical | square | horizontal | custom
     const [customW, setCustomW] = useState(1080);
     const [customH, setCustomH] = useState(1350);
-    // Manual by default — the slider is the primary control; Auto is opt-in,
-    // not opt-out (the user picks a count, they don't get defaulted past it).
+    // The clip count is ALWAYS explicit — auto mode was removed. The picker
+    // fulfills the requested count at all costs, so the UI never offers
+    // "auto" as an option.
     const [clipCount, setClipCount] = useState(8);
     const [longContextClips, setLongContextClips] = useState(0);
     // AI Preferences — each control maps to a REAL per-job effect. Auto Zoom
@@ -129,9 +130,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
     };
 
     const isCustom = outputFormat === 'custom';
-    const sliderPct = clipCount == null
-        ? 0
-        : ((clipCount - 1) / (40 - 1)) * 100;
+    const sliderPct = ((clipCount - 1) / (40 - 1)) * 100;
 
     return (
         <div className="card card-lit p-4 sm:p-6 animate-fade">
@@ -305,50 +304,37 @@ export default function MediaInput({ onProcess, isProcessing }) {
                     )}
                 </div>
 
-                {/* Clip count: null = auto, a number = hard target */}
+                {/* Clip count: an explicit hard target, always */}
                 <div className="mt-5">
                     <div className="flex items-center justify-between mb-3">
                         <p className="eyebrow">Clip Count</p>
-                        <label className="flex items-center gap-1.5 text-xs text-muted cursor-pointer select-none">
-                            <input
-                                type="checkbox"
-                                checked={clipCount === null}
-                                onChange={(e) => setClipCount(e.target.checked ? null : 8)}
-                                className="accent-[var(--color-accent)] cursor-pointer"
-                            />
-                            Auto
-                        </label>
+                        <span className="readout text-[10px] text-muted">hard target</span>
                     </div>
                     <div className="relative pt-5 pb-1">
-                        {clipCount !== null && (
-                            <span
-                                className="absolute top-0 -translate-x-1/2 px-2 py-0.5 rounded-md bg-paper3 border border-brass/40 readout text-[10px] text-ink"
-                                style={{ left: `calc(${sliderPct}% + 9px)` }}
-                            >
-                                {clipCount}
-                            </span>
-                        )}
+                        <span
+                            className="absolute top-0 -translate-x-1/2 px-2 py-0.5 rounded-md bg-paper3 border border-brass/40 readout text-[10px] text-ink"
+                            style={{ left: `calc(${sliderPct}% + 9px)` }}
+                        >
+                            {clipCount}
+                        </span>
                         <input
                             type="range"
                             min="1"
                             max="40"
                             step="1"
-                            value={clipCount ?? 8}
-                            disabled={clipCount === null}
+                            value={clipCount}
                             onChange={(e) => setClipCount(Number(e.target.value))}
-                            className="slider-filled w-full cursor-pointer disabled:opacity-40"
+                            className="slider-filled w-full cursor-pointer"
                             style={{
-                                background: clipCount === null
-                                    ? 'var(--color-rule-2)'
-                                    : `linear-gradient(90deg, var(--color-accent) 0%, var(--color-accent) ${sliderPct}%, var(--color-rule-2) ${sliderPct}%, var(--color-rule-2) 100%)`,
+                                background: `linear-gradient(90deg, var(--color-accent) 0%, var(--color-accent) ${sliderPct}%, var(--color-rule-2) ${sliderPct}%, var(--color-rule-2) 100%)`,
                             }}
                             aria-label="Number of clips to generate"
                         />
                     </div>
                     <div className="flex justify-between text-[10px] text-muted mt-1">
                         <span>1</span>
-                        <span className={clipCount === null ? 'text-muted' : 'text-ink2 font-medium'}>
-                            {clipCount === null ? 'auto · based on video length' : `hard target: ${clipCount} clips`}
+                        <span className="text-ink2 font-medium">
+                            hard target: {clipCount} clips
                         </span>
                         <span>40</span>
                     </div>

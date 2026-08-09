@@ -17,17 +17,6 @@ MODEL_PRICES = {
     "gemini-2.0-flash": (0.10, 0.40),  # deprecated (shut down 2026-06-01)
 }
 
-# USD per 1M tokens (input cache-miss, output), from
-# api-docs.deepseek.com/quick_start/pricing (checked 2026-07-30). Cache-hit
-# input tokens are far cheaper (~50x) but we conservatively cost every run at
-# the cache-miss rate since hit/miss depends on DeepSeek's own cache state,
-# not something this pipeline controls run-to-run.
-DEEPSEEK_MODEL_PRICES = {
-    "deepseek-v4-flash": (0.14, 0.28),
-    "deepseek-v4-pro": (0.435, 0.87),
-}
-
-
 def _lookup_prices(table, model_name):
     """Longest-prefix match against a {model_prefix: (input, output)} table."""
     name = str(model_name or "").lower()
@@ -41,11 +30,6 @@ def _lookup_prices(table, model_name):
 def lookup_model_prices(model_name):
     """Longest-prefix match against MODEL_PRICES; None if unknown."""
     return _lookup_prices(MODEL_PRICES, model_name)
-
-
-def lookup_deepseek_model_prices(model_name):
-    """Longest-prefix match against DEEPSEEK_MODEL_PRICES; None if unknown."""
-    return _lookup_prices(DEEPSEEK_MODEL_PRICES, model_name)
 
 
 def compact_words(words, precision=2):
@@ -181,6 +165,73 @@ def _nearest_within(values, target, window, prefer_after=False, prefer_before=Fa
     return min(near, key=lambda v: abs(v - target))
 
 
+def _anchored_sentence_start(sent_starts, sent_ends, target, sentence_window):
+    """Start of the sentence CONTAINING ``target``, or the nearest sentence
+    start within ``sentence_window`` (biased at/before), or None.
+
+    Stage 3 rebuild: this is what makes mid-sentence opens impossible. A
+    proposed start that lands inside a sentence snaps to that sentence's own
+    start (a complete thought) instead of a nearby word edge. Transcripts
+    with no terminal punctuation produce no usable sentence structure, so
+    this returns None and the caller falls back to word-level snapping.
+    """
+    if not sent_starts or not sent_ends:
+        return None
+    for i, s in enumerate(sent_starts):
+        e = sent_ends[i] if i < len(sent_ends) else None
+        if e is not None and s <= target <= e:
+            return s
+    return _nearest_within(sent_starts, target, sentence_window, prefer_before=True)
+
+
+def _anchored_sentence_end(sent_starts, sent_ends, target, sentence_window):
+    """End of the sentence CONTAINING ``target``, or the nearest sentence end
+    within ``sentence_window`` (biased at/after), or None."""
+    if not sent_ends:
+        return None
+    ei = 0
+    for s in sent_starts:
+        while ei < len(sent_ends) and sent_ends[ei] < s:
+            ei += 1
+        if ei < len(sent_ends) and s <= target <= sent_ends[ei]:
+            return sent_ends[ei]
+    return _nearest_within(sent_ends, target, sentence_window, prefer_after=True)
+
+
+def _word_snap_start(starts, ends, target, search_window, max_lead):
+    """Snap a START to the nearest word start, leading into the silence
+    before it (unchanged word-level behavior)."""
+    new_start = float(target)
+    candidates = [s for s in starts if abs(s - new_start) <= search_window]
+    if candidates:
+        word_start = min(candidates, key=lambda s: abs(s - new_start))
+        prev_ends = [e for e in ends if e <= word_start]
+        if prev_ends:
+            gap = max(0.0, word_start - max(prev_ends))
+            lead = min(max_lead, gap / 2)
+        else:
+            lead = max_lead
+        new_start = max(0.0, word_start - lead)
+    return new_start
+
+
+def _word_snap_end(starts, ends, target, search_window, max_tail):
+    """Snap an END to the nearest word end, trailing into the silence after
+    it (unchanged word-level behavior)."""
+    new_end = float(target)
+    candidates = [e for e in ends if abs(e - new_end) <= search_window]
+    if candidates:
+        word_end = min(candidates, key=lambda e: abs(e - new_end))
+        next_starts = [s for s in starts if s >= word_end]
+        if next_starts:
+            gap = max(0.0, min(next_starts) - word_end)
+            tail = min(max_tail, gap / 2)
+        else:
+            tail = max_tail
+        new_end = word_end + tail
+    return new_end
+
+
 def snap_clip_to_words(start, end, words, video_duration,
                        min_duration=15.0, max_duration=180.0,
                        search_window=1.5, max_lead=0.35, max_tail=0.45,
@@ -209,74 +260,77 @@ def snap_clip_to_words(start, end, words, video_duration,
     if not words:
         return original
 
-    starts = [float(w.get("s", 0)) for w in words]
-    ends = [float(w.get("e", 0)) for w in words]
-
-    # Prefer a real sentence edge when one is close enough, so a clip opens on
-    # a complete thought and closes on a finished one. Falls through to
-    # word-level snapping below whenever no sentence edge is in range, so this
-    # can only ever improve a boundary, never strand one.
     sent_starts, sent_ends = sentence_boundaries(words)
-    snapped_start = _nearest_within(sent_starts, float(start), sentence_window,
-                                    prefer_before=True)
+
+    # START: deterministic sentence anchoring (Stage 3 rebuild). A proposal
+    # that lands INSIDE a sentence snaps to that sentence's own start, so a
+    # clip can never open mid-thought. Only proposals that are not inside any
+    # sentence (silence gaps, unpunctuated transcripts) fall through to the
+    # nearest sentence start within the window, then word-level snapping.
+    snapped_start = _anchored_sentence_start(
+        sent_starts, sent_ends, float(start), sentence_window)
+    if snapped_start is None:
+        starts = [float(w.get("s", 0)) for w in words]
+        ends = [float(w.get("e", 0)) for w in words]
+        snapped_start = _word_snap_start(
+            starts, ends, float(start), search_window, max_lead)
+    else:
+        snapped_start = max(0.0, snapped_start - min(max_lead, 0.2))
     if context_start is not None and snapped_start is not None:
         # Context lock (round-5 spec 1.2): when the question backstop pulled
         # the start back to include the question, snapping must never move it
         # forward past that point again — later is always a re-truncation.
         snapped_start = min(snapped_start, context_start)
-    snapped_end = _nearest_within(sent_ends, float(end), sentence_window,
-                                  prefer_after=True)
 
-    if snapped_start is not None and snapped_end is not None:
-        cand_start = max(0.0, snapped_start - min(max_lead, 0.2))
-        cand_end = min(float(video_duration), snapped_end + min(max_tail, 0.3))
-        # Only accept the sentence-aligned pair if it still satisfies the
-        # duration contract; otherwise fall back to word snapping.
-        if min_duration <= (cand_end - cand_start) <= max_duration:
-            return (round(cand_start, 3), round(cand_end, 3))
+    # END: sentence anchoring, then duration repair on the END only (the
+    # start stays locked on its sentence — trimming the start later is a
+    # re-truncation and trimming it earlier only ever adds context).
+    snapped_end = _anchored_sentence_end(
+        sent_starts, sent_ends, float(end), sentence_window)
+    if snapped_end is None:
+        starts = [float(w.get("s", 0)) for w in words]
+        ends = [float(w.get("e", 0)) for w in words]
+        new_end = _word_snap_end(starts, ends, float(end), search_window, max_tail)
+    else:
+        new_end = min(float(video_duration), snapped_end + min(max_tail, 0.3))
 
-    # START: snap to the nearest word start, then lead into the silence before it.
-    new_start = float(start)
-    candidates = [s for s in starts if abs(s - new_start) <= search_window]
-    if candidates:
-        word_start = min(candidates, key=lambda s: abs(s - new_start))
-        prev_ends = [e for e in ends if e <= word_start]
-        if prev_ends:
-            gap = max(0.0, word_start - max(prev_ends))
-            lead = min(max_lead, gap / 2)
-        else:
-            lead = max_lead
-        new_start = max(0.0, word_start - lead)
-    if context_start is not None:
-        new_start = min(new_start, context_start)
+    new_start = snapped_start
 
-    # END: snap to the nearest word end, then trail into the silence after it.
-    new_end = float(end)
-    candidates = [e for e in ends if abs(e - new_end) <= search_window]
-    if candidates:
-        word_end = min(candidates, key=lambda e: abs(e - new_end))
-        next_starts = [s for s in starts if s >= word_end]
-        if next_starts:
-            gap = max(0.0, min(next_starts) - word_end)
-            tail = min(max_tail, gap / 2)
-        else:
-            tail = max_tail
-        new_end = min(float(video_duration), word_end + tail)
-
-    # Repair duration bounds while staying on word boundaries.
+    # Repair duration bounds while staying on sentence/word boundaries. The
+    # start stays locked on its sentence; only the end may move.
     if new_end - new_start < min_duration:
         target = new_start + min_duration
-        later = sorted(e for e in ends if e >= target)
+        later = sorted(e for e in sent_ends if e >= target)
+        if not (later and later[0] - new_start <= max_duration):
+            later = sorted(e for e in [float(w.get("e", 0)) for w in words]
+                           if e >= target)
         if later and later[0] - new_start <= max_duration:
             new_end = min(float(video_duration), later[0] + 0.2)
+        elif new_start < float(video_duration):
+            # Tail of the video: no later boundary exists to reach the floor.
+            # Keep the anchored start and end at the last boundary at/after
+            # it — a short closing clip beats a mid-sentence open.
+            last_boundary = max(
+                [e for e in sent_ends + [float(w.get("e", 0)) for w in words]
+                 if e >= new_start] or [new_start])
+            new_end = min(float(video_duration),
+                          last_boundary + min(max_tail, 0.3))
+            if new_end - new_start < 1.0:
+                return original
         else:
             return original
     if new_end - new_start > max_duration:
         target = new_start + max_duration
-        earlier = [e for e in ends if new_start < e <= target]
+        earlier = [e for e in sent_ends if new_start < e <= target]
+        if not earlier:
+            earlier = [e for e in [float(w.get("e", 0)) for w in words]
+                       if new_start < e <= target]
         new_end = (max(earlier) + 0.2) if earlier else target
         new_end = min(new_end, new_start + max_duration, float(video_duration))
 
-    if new_end <= new_start or new_end - new_start < min_duration:
+    # The min-duration floor is enforced by the repair paths above; the tail
+    # clamp is the deliberate exception (a short closing clip beats a
+    # mid-sentence open). Only a degenerate result falls back to the input.
+    if new_end <= new_start:
         return original
     return (round(new_start, 3), round(new_end, 3))
