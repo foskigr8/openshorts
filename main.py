@@ -92,14 +92,30 @@ def _print_pipeline_diagnostics():
     try:
         import shutil
         import torch
+        decode_ok = gpu_render_available()
+        encode_ok = nvenc_available()
+        cuda = torch.cuda.is_available()
         print("🖥️  Pipeline diagnostics:")
         print(f"   ffmpeg: {shutil.which('ffmpeg') or 'ffmpeg (PATH)'}")
         print(f"   GPU decode (NVDEC + CUDA filters): "
-              f"{'YES' if gpu_render_available() else 'NO — CPU decode'}")
+              f"{'YES' if decode_ok else 'NO'}")
         print(f"   GPU encode (NVENC h264): "
-              f"{'YES' if nvenc_available() else 'NO — CPU x264 encode'}")
-        print(f"   torch CUDA: {torch.cuda.is_available()} "
-              f"({torch.cuda.device_count()} device(s))")
+              f"{'YES' if encode_ok else 'NO'}")
+        print(f"   torch CUDA: {cuda} ({torch.cuda.device_count()} device(s))")
+        # No CPU decode when a GPU exists — the owner's explicit requirement.
+        # Fail loudly with remediation instead of silently rendering on CPU.
+        if cuda and not decode_ok:
+            require = os.environ.get("REQUIRE_GPU_DECODE", "1").strip().lower()
+            if require not in ("0", "false", "no"):
+                print("❌ GPU detected but this ffmpeg cannot decode on the GPU "
+                      "(no NVDEC/CUDA hwaccel). CPU decode is disabled by "
+                      "default (REQUIRE_GPU_DECODE=1). Fix: make sure "
+                      "kaggle_bootstrap.sh installed the nvenc build to "
+                      "/kaggle/working/ffmpeg-nvenc and its log says 'CUDA "
+                      "decode (NVDEC) also present'; then re-run. To allow "
+                      "CPU decode anyway (not recommended), set "
+                      "REQUIRE_GPU_DECODE=0.")
+                sys.exit(1)
     except Exception as e:
         print(f"   ⚠️ Pipeline diagnostics incomplete: {type(e).__name__}: {e}")
 
@@ -354,22 +370,32 @@ def download_youtube_video(url, output_dir=".", require_hd=False):
         if proxy:
             return ('bestvideo[height<=720]+bestaudio/'
                     'best[height<=720][ext=mp4]/best[height<=720]/best')
-        # Capped at SOURCE_MAX_HEIGHT (default 1440p, 9-aug-2026): the old
-        # preference had no upper bound, so a long episode pulled 4K
-        # (3840x2160, 3.6 GiB — the Ep_115 run). Delivery is a portrait crop
-        # at ~1080 wide (platform max for Shorts/Reels/TikTok); a 1440p
-        # source crops to 810x1440 and upscales to exactly 1080x1920, so 4K
-        # added ~10x the bytes for a final clip the platform downscales
-        # anyway. Set SOURCE_MAX_HEIGHT=2160 (or higher) to prefer 4K again.
-        _max_h = (os.environ.get("SOURCE_MAX_HEIGHT") or "1440").strip() or "1440"
-        # Prefer H.264 (avc1) at or below the cap: AV1/VP9 CPU decode is
-        # 3-4x slower than H.264, and Kaggle's ffmpeg has no CUDA hwaccel, so
-        # the codec choice is the single biggest decode-speed lever. H.264 is
-        # usually capped at 1080p on YouTube; when the video offers no H.264
-        # at the cap, the second option takes the best stream any codec.
-        return (f'bestvideo[height<={_max_h}][vcodec^=avc1]+bestaudio/'
-                f'bestvideo[height<={_max_h}]+bestaudio/'
-                'bestvideo[height>=1080]+bestaudio/'
+        # QUALITY-FIRST default (restored 9-aug-2026): the earlier cap to
+        # SOURCE_MAX_HEIGHT=1440 plus an H.264 preference REDUCED download
+        # quality — with GPU decode enforced below (no CPU decode when a GPU
+        # exists), 4K/AV1 decodes fast, so nothing is gained by degrading the
+        # source. Both knobs remain as OPT-INS for hosts that want smaller or
+        # CPU-friendlier downloads:
+        #   SOURCE_MAX_HEIGHT=1440  cap the vertical resolution
+        #   SOURCE_PREFER_H264=1    prefer H.264 streams (CPU-decode speed)
+        _max_h = (os.environ.get("SOURCE_MAX_HEIGHT") or "").strip()
+        _prefer_h264 = os.environ.get("SOURCE_PREFER_H264") == "1"
+        if _max_h:
+            _pref = (f'bestvideo[height<={_max_h}][vcodec^=avc1]+bestaudio/'
+                     if _prefer_h264 else '')
+            return (f'{_pref}'
+                    f'bestvideo[height<={_max_h}]+bestaudio/'
+                    'bestvideo[height>=1080]+bestaudio/'
+                    'bestvideo[height>=720]+bestaudio/'
+                    'bestvideo+bestaudio/'
+                    'best[ext=mp4]/best')
+        if _prefer_h264:
+            return ('bestvideo[vcodec^=avc1]+bestaudio/'
+                    'bestvideo[height>=1080]+bestaudio/'
+                    'bestvideo[height>=720]+bestaudio/'
+                    'bestvideo+bestaudio/'
+                    'best[ext=mp4]/best')
+        return ('bestvideo[height>=1080]+bestaudio/'
                 'bestvideo[height>=720]+bestaudio/'
                 'bestvideo+bestaudio/'
                 'best[ext=mp4]/best')

@@ -33,6 +33,8 @@ import numpy as np
 from scenedetect import open_video, SceneManager, FrameTimecode
 from scenedetect.detectors import ContentDetector
 
+import ffmpeg_utils
+
 # TransNetV2 input size (width x height), fixed by the trained model.
 _TN2_W, _TN2_H = 48, 27
 _SCENE_DETECT_TIMEOUT = int(os.environ.get("SCENE_DETECT_TIMEOUT", "300"))
@@ -139,12 +141,23 @@ def _get_tn2_model():
 
 
 def _extract_frames_small(video_path):
-    """Decode the whole clip as 48x27 RGB frames via ffmpeg (~4KB/frame)."""
-    cmd = [
-        "ffmpeg", "-nostdin", "-i", video_path,
-        "-vf", f"scale={_TN2_W}:{_TN2_H}",
-        "-pix_fmt", "rgb24", "-f", "rawvideo", "-",
-    ]
+    """Decode the whole clip as 48x27 RGB frames via ffmpeg (~4KB/frame).
+
+    Uses CUDA decode when the ffmpeg on PATH supports it (the nvenc build) —
+    decoding a 103-min episode frame-by-frame is exactly the stage that
+    used to eat 15 CPU-minutes. When GPU decode is unavailable the owner has
+    REQUIRE_GPU_DECODE=1 in main.py, so the job fails before this runs
+    rather than silently decoding on CPU.
+    """
+    vf = f"scale={_TN2_W}:{_TN2_H}"
+    decode_args = ffmpeg_utils.gpu_decode_args(output_format=True)
+    if decode_args:
+        # Frames arrive in CUDA memory; pull them back to system memory for
+        # the tiny CPU resize + rawvideo pipe.
+        vf = "hwdownload,format=nv12," + vf
+    cmd = (["ffmpeg", "-nostdin"] + decode_args
+           + ["-i", video_path, "-vf", vf,
+              "-pix_fmt", "rgb24", "-f", "rawvideo", "-"])
     proc = subprocess.run(cmd, stdout=subprocess.PIPE,
                           stderr=subprocess.DEVNULL, check=True,
                           timeout=_SCENE_DETECT_TIMEOUT)

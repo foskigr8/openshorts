@@ -122,9 +122,12 @@ Env vars:
 - `SOURCE_CACHE_DIR` — where `source_store.py` keeps per-source videos,
   transcripts and context blobs (default: `sources/` next to the repo;
   point it at a mounted Kaggle Dataset for cross-session persistence)
-- `SOURCE_MAX_HEIGHT` — preferred YouTube height cap (default 1440p; the
-  downloader prefers H.264 at or below it because AV1 CPU decode is 3-4x
-  slower and Kaggle's ffmpeg has no CUDA hwaccel)
+- `SOURCE_MAX_HEIGHT` — OPT-IN YouTube height cap (default: no cap — quality
+  first, 4K sources are downloaded as-is). `SOURCE_PREFER_H264=1` adds an
+  H.264 preference (CPU-decode speed on hosts without GPU decode)
+- `REQUIRE_GPU_DECODE` — default `1` when a CUDA GPU is present: the job
+  fails loudly at startup if the ffmpeg on PATH cannot decode on the GPU
+  (no silent CPU decode). Set `0` only on hosts that must accept CPU decode
 - `SCENE_DETECT_TIMEOUT` — max seconds for the TransNetV2 whole-video scene
   decode (default 300; a 103-min AV1 source on CPU previously hit the old
   900s hardcap — the scene clamp fails open on timeout)
