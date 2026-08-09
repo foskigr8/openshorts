@@ -79,10 +79,12 @@ if [ "${GPU_COUNT:-0}" -gt 0 ] && [ "${SKIP_FFMPEG_NVENC:-0}" != "1" ]; then
                 if "$FFMPEG_DIR/ffmpeg" -hide_banner -hwaccels 2>/dev/null | grep -qiE 'cuda|nvdec|cuvid' \
                     && "$FFMPEG_DIR/ffmpeg" -hide_banner -filters 2>/dev/null | grep -qE 'scale_cuda|scale_npp'; then
                     echo "    CUDA decode (NVDEC + CUDA filters) also present — GPU decode + encode both active"
+                    export REQUIRE_GPU_DECODE="1"
+                    echo "    REQUIRE_GPU_DECODE=1 — jobs now FAIL if GPU decode is unavailable (no silent CPU)"
                 else
                     echo "    NOTE: this build has NVENC (GPU encode) but no CUDA decode/filters."
-                    echo "          main.py REQUIRES GPU decode when a GPU is present (REQUIRE_GPU_DECODE=1)"
-                    echo "          and will fail loudly until a decode-capable build is installed."
+                    echo "          REQUIRE_GPU_DECODE stays 'warn' — jobs run with a LOUD warning"
+                    echo "          that decode is on CPU until a decode-capable build is installed."
                 fi
                 echo "    main.py prepends $FFMPEG_DIR to PATH itself at job start,"
                 echo "    so uvicorn does NOT need this shell's PATH export."

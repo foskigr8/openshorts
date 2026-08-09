@@ -39,6 +39,28 @@ import json
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module='google.protobuf')
 
+# Encoding-safe console output: the app worker pipes stdout/stderr, and a
+# C/ASCII locale can crash a print that contains an emoji BEFORE the pipeline
+# even starts — which looks like a silent exit-1 with no log lines. Force
+# errors="replace" so log lines are never lost, and install an excepthook so
+# any uncaught exception always prints a traceback instead of exiting bare.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except Exception:
+        pass
+
+
+def _excepthook(exc_type, exc_value, exc_tb):
+    try:
+        import traceback
+        traceback.print_exception(exc_type, exc_value, exc_tb)
+    except Exception:
+        pass
+
+
+sys.excepthook = _excepthook
+
 # Load environment variables
 load_dotenv()
 
@@ -89,35 +111,41 @@ def _print_pipeline_diagnostics():
     GPU actually processing this" instead of silently falling back to CPU.
     The probes cache their verdict for the rest of the process, so calling
     them here costs nothing extra (the first render would pay it anyway)."""
+    import shutil
     try:
-        import shutil
         import torch
+        cuda = torch.cuda.is_available()
+        gpus = torch.cuda.device_count()
+    except Exception as e:
+        cuda, gpus = False, 0
+        print(f"   ⚠️ torch unavailable ({type(e).__name__}) — GPU check skipped")
+    print("🖥️  Pipeline diagnostics:", flush=True)
+    print(f"   ffmpeg: {shutil.which('ffmpeg') or 'ffmpeg (PATH)'}", flush=True)
+    try:
         decode_ok = gpu_render_available()
         encode_ok = nvenc_available()
-        cuda = torch.cuda.is_available()
-        print("🖥️  Pipeline diagnostics:")
-        print(f"   ffmpeg: {shutil.which('ffmpeg') or 'ffmpeg (PATH)'}")
-        print(f"   GPU decode (NVDEC + CUDA filters): "
-              f"{'YES' if decode_ok else 'NO'}")
-        print(f"   GPU encode (NVENC h264): "
-              f"{'YES' if encode_ok else 'NO'}")
-        print(f"   torch CUDA: {cuda} ({torch.cuda.device_count()} device(s))")
-        # No CPU decode when a GPU exists — the owner's explicit requirement.
-        # Fail loudly with remediation instead of silently rendering on CPU.
-        if cuda and not decode_ok:
-            require = os.environ.get("REQUIRE_GPU_DECODE", "1").strip().lower()
-            if require not in ("0", "false", "no"):
-                print("❌ GPU detected but this ffmpeg cannot decode on the GPU "
-                      "(no NVDEC/CUDA hwaccel). CPU decode is disabled by "
-                      "default (REQUIRE_GPU_DECODE=1). Fix: make sure "
-                      "kaggle_bootstrap.sh installed the nvenc build to "
-                      "/kaggle/working/ffmpeg-nvenc and its log says 'CUDA "
-                      "decode (NVDEC) also present'; then re-run. To allow "
-                      "CPU decode anyway (not recommended), set "
-                      "REQUIRE_GPU_DECODE=0.")
-                sys.exit(1)
     except Exception as e:
-        print(f"   ⚠️ Pipeline diagnostics incomplete: {type(e).__name__}: {e}")
+        decode_ok = encode_ok = False
+        print(f"   ⚠️ ffmpeg probe failed ({type(e).__name__}) — treated as no GPU", flush=True)
+    print(f"   GPU decode (NVDEC + CUDA filters): "
+          f"{'YES' if decode_ok else 'NO'}", flush=True)
+    print(f"   GPU encode (NVENC h264): "
+          f"{'YES' if encode_ok else 'NO'}", flush=True)
+    print(f"   torch CUDA: {cuda} ({gpus} device(s))", flush=True)
+    if cuda and not decode_ok:
+        require = (os.environ.get("REQUIRE_GPU_DECODE") or "warn").strip().lower()
+        if require == "1":
+            print("❌ GPU detected but this ffmpeg cannot decode on the GPU "
+                  "(no NVDEC/CUDA hwaccel) and REQUIRE_GPU_DECODE=1. Fix: "
+                  "install the decode-capable ffmpeg (kaggle_bootstrap.sh → "
+                  "'CUDA decode (NVDEC + CUDA filters) also present'), or set "
+                  "REQUIRE_GPU_DECODE=warn/0 to allow CPU decode.", flush=True)
+            sys.exit(1)
+        if require not in ("0", "false", "no"):
+            print("⚠️ GPU present but GPU decode is unavailable in the ffmpeg on "
+                  "PATH — decoding on CPU for this run. Install the nvenc build "
+                  "via kaggle_bootstrap.sh, or set REQUIRE_GPU_DECODE=1 to fail "
+                  "instead of running CPU decode.", flush=True)
 
 
 def source_logo_crop_vf_args():
