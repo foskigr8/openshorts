@@ -86,18 +86,24 @@ Return EXACTLY three sections:
      on-screen text. This audiovisual context is exactly what a transcript
      cannot provide, so be specific and concrete.
 
-2. HIGHLIGHTS — everything notable that happens, in chronological order,
-   each with an approximate time range {{start_s, end_s}}, a short concrete
-   description, and a type from: hook, reaction, joke, tension, payoff,
-   twist, stake, context. Cover the WHOLE video from start to finish.
-   Timestamps are approximations on purpose — a transcript will refine them
-   later, so do not stress about precision.
+2. HIGHLIGHTS — EVERY notable beat that happens, in chronological order.
+   This is an ENUMERATION, not a summary: do not merge beats, do not condense
+   the video down to a handful of items. Aim for roughly one highlight per
+   60-90 seconds of runtime — a 60-minute episode should produce 40-80+
+   highlights. Each entry has an approximate time range {{start_s, end_s}},
+   a short concrete description, and a type from: hook, reaction, joke,
+   tension, payoff, twist, stake, context. Cover the WHOLE video from start
+   to finish. Timestamps are approximations on purpose — a transcript will
+   refine them later, so do not stress about precision.
 
 3. LOVABLE_MOMENTS — the parts people would love / would keep watching /
-   would share: 2-8 candidate viral moments, each with an approximate time
-   range and a one-line "why it lands" (surprise, conflict, payoff, humor,
-   relatable stakes, a strong reaction, a satisfying twist, a quotable
-   line, high energy...). These are candidates only — the picker decides.
+   would share / would clip themselves: the viral moments. List MANY of
+   them, scaled to the runtime — at least one per 3-5 minutes, and never
+   fewer than 8 for a full-length episode (30-60+ minutes). Each with an
+   approximate time range and a one-line "why it lands" (surprise, conflict,
+   payoff, humor, relatable stakes, a strong reaction, a satisfying twist,
+   a quotable line, high energy...). These are candidates only — the picker
+   decides which become clips.
 
 RULES:
 - Be specific: names, numbers, actual claims — never "the video has
@@ -105,6 +111,10 @@ RULES:
 - Use absolute seconds from the start of the video for every timestamp.
 - If a timestamp is uncertain, give your best estimate — the transcript
   will fix it later.
+- DENSITY CHECK before you finish: if your HIGHLIGHTS list feels short for
+  the runtime (e.g. under 30 items for a long episode), you missed beats —
+  go back through the whole video and keep enumerating. A thin list is a
+  failure; the picker needs every candidate moment visible.
 """
 
 

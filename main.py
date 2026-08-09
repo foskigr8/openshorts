@@ -23,6 +23,7 @@ import context_layer
 import gemini_worker
 import gemini_pool
 import picker
+import source_store
 from clip_selection import snap_clip_to_words
 from ffmpeg_utils import (video_encode_args, audio_encode_args, QUALITY,
                           QUALITY_FAST, METADATA_SCRUB, gpu_decode_args)
@@ -57,6 +58,17 @@ ASPECT_RATIO = 9 / 16
 # so off by default; set for a specific source via env.
 SOURCE_LOGO_CROP_TOP_PX = max(int(os.environ.get("SOURCE_LOGO_CROP_TOP_PX", "0")), 0)
 SOURCE_LOGO_CROP_BOTTOM_PX = max(int(os.environ.get("SOURCE_LOGO_CROP_BOTTOM_PX", "0")), 0)
+
+
+def _link_or_copy(src, dst):
+    """Hardlink src -> dst with a cross-device copy fallback — multi-GB
+    source files must never be copied per job."""
+    if os.path.exists(dst):
+        return
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
 
 
 def source_logo_crop_vf_args():
@@ -1287,6 +1299,9 @@ def _build_word_list(transcript_result):
     return words
 
 
+_scene_boundary_cache = {}
+
+
 def scene_boundaries_for(video_path):
     """Cached scene boundaries in seconds for one source video.
 
@@ -1619,6 +1634,7 @@ if __name__ == '__main__':
     # link goes to Gemini (own key) IN PARALLEL with the download below, so
     # by the time the transcript exists the picker already has the brain.
     context_thread = None
+    cached_source = None
     if args.url:
         # For multi-clip runs, treat --output as an OUTPUT DIRECTORY (create it if needed).
         # For whole-video runs (--skip-analysis), --output can be a file path.
@@ -1632,15 +1648,32 @@ if __name__ == '__main__':
                 output_dir = os.path.dirname(args.output) or "."
             else:
                 output_dir = "."
-        if not args.skip_analysis:
+
+        # Per-source persistent reuse (source_store.py): a URL we have seen
+        # before skips the download entirely — the source video is hardlinked
+        # from the cache, and the transcript + context blob ride along.
+        cached_source = source_store.lookup(args.url)
+        if cached_source:
+            print(f"♻️  Source cached for this URL — reusing the downloaded "
+                  f"video (no re-download).")
+            input_video = os.path.join(output_dir, cached_source["filename"])
+            _link_or_copy(cached_source["video_path"], input_video)
+            video_title = cached_source["title"]
+            if not video_title:
+                video_title = os.path.splitext(cached_source["filename"])[0]
+        elif not args.skip_analysis:
             context_thread = context_layer.analyze_url_async(
                 args.url, os.path.join(output_dir, context_layer.CONTEXT_BLOB_FILENAME))
 
-        input_video, video_title = download_youtube_video(
-            args.url, output_dir, require_hd=True)
-        _write_progress(output_dir, "download", note="source downloaded")
-        _stage_durations["download"] = time.time() - _stage_t0
-        _stage_t0 = time.time()
+        if cached_source is None:
+            input_video, video_title = download_youtube_video(
+                args.url, output_dir, require_hd=True)
+            # Cache the source NOW (hardlink — instant even for multi-GB
+            # files) so a later failure in the job never forces a re-download.
+            source_store.save_source(args.url, input_video, video_title)
+            _write_progress(output_dir, "download", note="source downloaded")
+            _stage_durations["download"] = time.time() - _stage_t0
+            _stage_t0 = time.time()
     else:
         input_video = args.input
         video_title = os.path.splitext(os.path.basename(input_video))[0]
@@ -1679,22 +1712,34 @@ if __name__ == '__main__':
         # to Gemini vision (picks clips from the imagery instead of the speech).
         from transcribe_backends import NoAudioError
         transcript = None
-        try:
-            _write_progress(output_dir, "transcribe", note="transcribing audio",
-                            duration_seconds=duration)
-            transcript = transcribe_video(input_video)
-        except NoAudioError as e:
-            print(f"🔇 {e} — switching to visual analysis.")
+        if cached_source and cached_source.get("transcript"):
+            transcript = cached_source["transcript"]
+            print(f"♻️  Transcript loaded from cache ({len(transcript.get('segments') or [])} segments) — "
+                  f"no transcription API call.")
+        else:
+            try:
+                _write_progress(output_dir, "transcribe", note="transcribing audio",
+                                duration_seconds=duration)
+                transcript = transcribe_video(input_video)
+                if args.url:
+                    source_store.save_transcript(args.url, transcript)
+            except NoAudioError as e:
+                print(f"🔇 {e} — switching to visual analysis.")
         _stage_durations["transcribe"] = time.time() - _stage_t0
         _stage_t0 = time.time()
 
         # Collect the parallel context layer (5s cap — it must never block
         # the pipeline; the picker is fully functional transcript-only).
         context_blob = None
-        if context_thread is not None:
+        if cached_source and cached_source.get("context_blob"):
+            context_blob = cached_source["context_blob"]
+            print("♻️  Context blob loaded from cache.")
+        elif context_thread is not None:
             context_thread.join(timeout=5.0)
             context_blob = context_layer.load_context(
                 os.path.join(output_dir, context_layer.CONTEXT_BLOB_FILENAME))
+            if context_blob and args.url:
+                source_store.save_context(args.url, context_blob)
             if not context_blob:
                 print("ℹ️  Context blob not ready in time — the picker runs "
                       "transcript-only; the count is still fulfilled.")

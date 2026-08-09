@@ -12,6 +12,16 @@ class TestPromptContract:
         assert "never assume a niche" in t
         assert "audiovisual" in t
 
+    def test_highlights_are_an_enumeration_not_a_summary(self):
+        # The owner's feedback: a 90-minute episode returned only 7
+        # highlights + 3 lovable moments — far too thin. The prompt must
+        # force dense, runtime-scaled enumeration.
+        t = context_layer.CONTEXT_PROMPT_TEMPLATE
+        assert "ENUMERATION, not a summary" in t
+        assert "40-80+" in t
+        assert "fewer than 8" in t
+        assert "DENSITY CHECK" in t
+
 
 class TestKeyResolution:
     def test_dedicated_key_wins(self, monkeypatch):
@@ -90,4 +100,3 @@ class TestLoadContext:
         p = tmp_path / "ok.json"
         p.write_text(json.dumps({"summary": "x"}))
         assert context_layer.load_context(str(p)) == {"summary": "x"}
-

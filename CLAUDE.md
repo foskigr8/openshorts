@@ -57,6 +57,7 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 | `translate.py` | ElevenLabs dubbing API for AI voice translation |
 | `picker.py` | Stage 3 planner: ONE Gemini call over the whole transcript + the context brain returns the EXACT requested clip count (keep-looking loop), sentence-anchored, niche-agnostic |
 | `context_layer.py` | Pre-download Gemini "brain": sends the YouTube LINK to Gemini in parallel with the download (own key) for a 3-part audiovisual summary consumed by the picker |
+| `source_store.py` | Per-source persistent store: a seen URL reuses the downloaded video (hardlink), transcript and context blob — no re-download, no re-transcription API spend |
 | `face_id.py` | Optional named-identity enrichment (InsightFace known-faces DB) that upgrades the transcript to named-speaker input for the picker; fails open |
 | `hf_storage.py` | HuggingFace Hub clip storage: clips upload as each one finishes so they survive a Kaggle session ending; fails soft when unconfigured |
 | `gpu_affinity.py` | Per-clip-worker GPU assignment (thread-local torch device) so a second GPU is not left idle |
@@ -118,6 +119,9 @@ Env vars:
 
 - `CONTEXT_GEMINI_API_KEY` — dedicated key for the pre-download context
   layer (default: reuses `GEMINI_API_KEY`)
+- `SOURCE_CACHE_DIR` — where `source_store.py` keeps per-source videos,
+  transcripts and context blobs (default: `sources/` next to the repo;
+  point it at a mounted Kaggle Dataset for cross-session persistence)
 - `GEMINI_MODEL` / `GEMINI_FALLBACK_MODEL` / `GEMINI_API_KEYS` — picker
   model + pool (unchanged)
 

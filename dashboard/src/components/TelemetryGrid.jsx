@@ -37,8 +37,20 @@ function LogIcon({ text }) {
 
 function ParsedLogs({ logs, status, raw, onRawToggle }) {
   const [tab, setTab] = useState('logs');
+  const [copied, setCopied] = useState(false);
   const healthy = status === 'processing' || status === 'complete';
   const texts = (logs || []).map((l) => (typeof l === 'string' ? l : l.text || ''));
+
+  const copyLogs = async () => {
+    const text = (logs || [])
+      .map((l) => (typeof l === 'string' ? l : `${fmtClock(l.ts)} ${l.text || ''}`))
+      .join('\n');
+    try {
+      await navigator.clipboard.writeText(text || '(no logs yet)');
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch { /* clipboard unavailable — ignore */ }
+  };
 
   const insights = (logs || [])
     .map((l) => (typeof l === 'string' ? l : l.text || ''))
@@ -89,6 +101,15 @@ function ParsedLogs({ logs, status, raw, onRawToggle }) {
             title="Toggle the raw unfiltered pipeline stream"
           >
             raw
+          </button>
+          <button
+            onClick={copyLogs}
+            className={`text-[10px] readout px-2 py-1 rounded-full border transition-colors ${
+              copied ? 'border-ok/50 text-ok' : 'border-rule text-muted hover:border-rule2'
+            }`}
+            title="Copy the whole log to the clipboard (for sharing a run)"
+          >
+            {copied ? 'copied ✓' : 'copy'}
           </button>
         </div>
       </div>
