@@ -122,9 +122,12 @@ Env vars:
 - `SOURCE_CACHE_DIR` — where `source_store.py` keeps per-source videos,
   transcripts and context blobs (default: `sources/` next to the repo;
   point it at a mounted Kaggle Dataset for cross-session persistence)
-- `SOURCE_MAX_HEIGHT` — OPT-IN YouTube height cap (default: no cap — quality
-  first, 4K sources are downloaded as-is). `SOURCE_PREFER_H264=1` adds an
-  H.264 preference (CPU-decode speed on hosts without GPU decode)
+- `SOURCE_MAX_HEIGHT` — YouTube height cap, default `1440` (Option B, the
+  owner's choice: 1440p crops to exactly the 1080x1920 delivery). Within the
+  cap the downloader prefers VP9 then H.264 — the codecs the T4's NVDEC can
+  GPU-decode — and treats AV1 as last resort (Turing has no AV1 hardware
+  decoder). `SOURCE_MAX_HEIGHT=0` restores no-cap quality-first;
+  `SOURCE_PREFER_H264=1` flips the codec preference to H.264 first
 - `REQUIRE_GPU_DECODE` — default `1` when a CUDA GPU is present: the job
   fails loudly at startup if the ffmpeg on PATH cannot decode on the GPU
   (no silent CPU decode). Set `0` only on hosts that must accept CPU decode

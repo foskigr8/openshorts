@@ -370,31 +370,32 @@ def download_youtube_video(url, output_dir=".", require_hd=False):
         if proxy:
             return ('bestvideo[height<=720]+bestaudio/'
                     'best[height<=720][ext=mp4]/best[height<=720]/best')
-        # QUALITY-FIRST default (restored 9-aug-2026): the earlier cap to
-        # SOURCE_MAX_HEIGHT=1440 plus an H.264 preference REDUCED download
-        # quality — with GPU decode enforced below (no CPU decode when a GPU
-        # exists), 4K/AV1 decodes fast, so nothing is gained by degrading the
-        # source. Both knobs remain as OPT-INS for hosts that want smaller or
-        # CPU-friendlier downloads:
-        #   SOURCE_MAX_HEIGHT=1440  cap the vertical resolution
-        #   SOURCE_PREFER_H264=1    prefer H.264 streams (CPU-decode speed)
-        _max_h = (os.environ.get("SOURCE_MAX_HEIGHT") or "").strip()
-        _prefer_h264 = os.environ.get("SOURCE_PREFER_H264") == "1"
-        if _max_h:
-            _pref = (f'bestvideo[height<={_max_h}][vcodec^=avc1]+bestaudio/'
-                     if _prefer_h264 else '')
-            return (f'{_pref}'
-                    f'bestvideo[height<={_max_h}]+bestaudio/'
-                    'bestvideo[height>=1080]+bestaudio/'
+        # OPTION B default (owner choice, 9-aug-2026): cap the source at
+        # SOURCE_MAX_HEIGHT (1440) and prefer codecs the T4's NVDEC can
+        # actually decode on the GPU — VP9 first (YouTube serves VP9 up to
+        # 1440p), then H.264 (usually 1080p) — before falling back to any
+        # codec within the cap. AV1 is the last resort: Turing has no AV1
+        # hardware decoder, so an AV1 pick would mean CPU decode.
+        # SOURCE_MAX_HEIGHT=0 restores no-cap quality-first; SOURCE_PREFER_
+        # H264=1 flips the preference to H.264 before VP9.
+        _max_h = (os.environ.get("SOURCE_MAX_HEIGHT") or "1440").strip() or "1440"
+        if _max_h in ("0", "unlimited", "none"):
+            return ('bestvideo[height>=1080]+bestaudio/'
                     'bestvideo[height>=720]+bestaudio/'
                     'bestvideo+bestaudio/'
                     'best[ext=mp4]/best')
-        if _prefer_h264:
-            return ('bestvideo[vcodec^=avc1]+bestaudio/'
-                    'bestvideo[height>=1080]+bestaudio/'
-                    'bestvideo[height>=720]+bestaudio/'
-                    'bestvideo+bestaudio/'
-                    'best[ext=mp4]/best')
+        if os.environ.get("SOURCE_PREFER_H264") == "1":
+            pref = (f'bestvideo[height<={_max_h}][vcodec^=avc1]+bestaudio/'
+                    f'bestvideo[height<={_max_h}][vcodec^=vp09]+bestaudio/')
+        else:
+            pref = (f'bestvideo[height<={_max_h}][vcodec^=vp09]+bestaudio/'
+                    f'bestvideo[height<={_max_h}][vcodec^=avc1]+bestaudio/')
+        return (pref +
+                f'bestvideo[height<={_max_h}]+bestaudio/'
+                'bestvideo[height>=1080]+bestaudio/'
+                'bestvideo[height>=720]+bestaudio/'
+                'bestvideo+bestaudio/'
+                'best[ext=mp4]/best')
         return ('bestvideo[height>=1080]+bestaudio/'
                 'bestvideo[height>=720]+bestaudio/'
                 'bestvideo+bestaudio/'

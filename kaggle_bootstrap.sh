@@ -46,6 +46,11 @@ if [ "${GPU_COUNT:-0}" -gt 1 ]; then
     echo "    CLIP_GPUS=0,1 (both GPUs: LR-ASD + ffmpeg per-worker)"
 fi
 
+# Option B downloads (owner choice, 9-aug-2026): 1440p cap + VP9/H.264
+# preference — both codecs GPU-decode on the T4, AV1 does not. main.py's
+# default is already 1440, so this only surfaces the decision in the log.
+echo "    SOURCE_MAX_HEIGHT=1440 (Option B: VP9/H.264 <=1440p, GPU-decodable on T4)"
+
 # --- 1b. nvenc-capable ffmpeg -----------------------------------------------
 # Kaggle's preinstalled ffmpeg (apt) is a CPU-only build with no --enable-nvenc.
 # FFMPEG_ENCODER/GPU_RENDER above tell the app to use nvenc, but ffmpeg_utils.py
