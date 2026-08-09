@@ -321,13 +321,15 @@ def download_youtube_video(url, output_dir=".", require_hd=False):
         if proxy:
             return ('bestvideo[height<=720]+bestaudio/'
                     'best[height<=720][ext=mp4]/best[height<=720]/best')
-        # Capped at 1440p on purpose (9-aug-2026): the old preference had no
-        # upper bound, so a long episode pulled 4K (3840x2160, 3.6 GiB — the
-        # Ep_115 run). Delivery is 9:16 vertical at ~1080 wide; a 1440p source
-        # crops to 810x1440 and downscales cleanly. 4K added ~10x the bytes
-        # for an imperceptible sharpness gain. 4K-only sources still match
-        # via the >=1080 fallback below.
-        return ('bestvideo[height<=1440]+bestaudio/'
+        # Capped at SOURCE_MAX_HEIGHT (default 1440p, 9-aug-2026): the old
+        # preference had no upper bound, so a long episode pulled 4K
+        # (3840x2160, 3.6 GiB — the Ep_115 run). Delivery is a portrait crop
+        # at ~1080 wide (platform max for Shorts/Reels/TikTok); a 1440p
+        # source crops to 810x1440 and upscales to exactly 1080x1920, so 4K
+        # added ~10x the bytes for a final clip the platform downscales
+        # anyway. Set SOURCE_MAX_HEIGHT=2160 (or higher) to prefer 4K again.
+        _max_h = (os.environ.get("SOURCE_MAX_HEIGHT") or "1440").strip() or "1440"
+        return (f'bestvideo[height<={_max_h}]+bestaudio/'
                 'bestvideo[height>=1080]+bestaudio/'
                 'bestvideo[height>=720]+bestaudio/'
                 'bestvideo+bestaudio/'
