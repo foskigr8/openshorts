@@ -128,9 +128,11 @@ Env vars:
   GPU-decode — and treats AV1 as last resort (Turing has no AV1 hardware
   decoder). `SOURCE_MAX_HEIGHT=0` restores no-cap quality-first;
   `SOURCE_PREFER_H264=1` flips the codec preference to H.264 first
-- `REQUIRE_GPU_DECODE` — `1` (strict: fail if GPU decode is unavailable) |
-  `warn` (default: loud warning, run on CPU) | `0` (quiet). The Kaggle
-  bootstrap flips it to `1` once the decode-capable ffmpeg is confirmed
+- `REQUIRE_GPU_DECODE` — **`1` (default, owner's contract: GPU or nothing —
+  the job fails at startup if the ffmpeg on PATH cannot decode on the GPU)**
+  | `warn` (loud warning, run on CPU — emergencies only) | `0` (quiet).
+  The Kaggle bootstrap installs the decode-capable build and confirms
+  `CUDA decode (NVDEC + CUDA filters) also present`
 - `SCENE_DETECT_TIMEOUT` — max seconds for the TransNetV2 whole-video scene
   decode (default 300; a 103-min AV1 source on CPU previously hit the old
   900s hardcap — the scene clamp fails open on timeout)

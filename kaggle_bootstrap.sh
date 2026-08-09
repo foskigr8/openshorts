@@ -68,31 +68,46 @@ if [ "${GPU_COUNT:-0}" -gt 0 ] && [ "${SKIP_FFMPEG_NVENC:-0}" != "1" ]; then
     else
         FFMPEG_DIR="${FFMPEG_DIR:-/kaggle/working/ffmpeg-nvenc}"
         mkdir -p "$FFMPEG_DIR"
-        FFMPEG_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
-        if curl -fsSL --max-time 120 "$FFMPEG_URL" -o /tmp/ffmpeg-nvenc.tar.xz 2>"$LOG_DIR/ffmpeg_nvenc.log" \
-            && tar -xJf /tmp/ffmpeg-nvenc.tar.xz -C /tmp 2>>"$LOG_DIR/ffmpeg_nvenc.log" \
-            && cp /tmp/ffmpeg-*-linux64-gpl/bin/ffmpeg /tmp/ffmpeg-*-linux64-gpl/bin/ffprobe "$FFMPEG_DIR/" 2>>"$LOG_DIR/ffmpeg_nvenc.log"; then
+        # Two asset variants (gpl, then gpl-shared) with a retry each — the
+        # pipeline is GPU-or-nothing, so a flaky download must never silently
+        # leave the host CPU-decode-only.
+        FFMPEG_DL_OK=0
+        for VARIANT in "ffmpeg-master-latest-linux64-gpl.tar.xz" "ffmpeg-master-latest-linux64-gpl-shared.tar.xz"; do
+            for TRY in 1 2; do
+                FFMPEG_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/$VARIANT"
+                if curl -fsSL --max-time 180 "$FFMPEG_URL" -o /tmp/ffmpeg-nvenc.tar.xz 2>"$LOG_DIR/ffmpeg_nvenc.log" \
+                    && tar -xJf /tmp/ffmpeg-nvenc.tar.xz -C /tmp 2>>"$LOG_DIR/ffmpeg_nvenc.log" \
+                    && cp /tmp/ffmpeg-*-linux64-gpl*/bin/ffmpeg /tmp/ffmpeg-*-linux64-gpl*/bin/ffprobe "$FFMPEG_DIR/" 2>>"$LOG_DIR/ffmpeg_nvenc.log"; then
+                    FFMPEG_DL_OK=1
+                    break 2
+                fi
+                echo "    download attempt $TRY ($VARIANT) failed — retrying"
+            done
+        done
+        rm -rf /tmp/ffmpeg-nvenc.tar.xz /tmp/ffmpeg-*-linux64-gpl* 2>/dev/null
+        if [ "$FFMPEG_DL_OK" = "1" ]; then
             export PATH="$FFMPEG_DIR:$PATH"
-            rm -rf /tmp/ffmpeg-nvenc.tar.xz /tmp/ffmpeg-*-linux64-gpl
             if "$FFMPEG_DIR/ffmpeg" -hide_banner -encoders 2>/dev/null | grep -q h264_nvenc; then
                 echo "    installed to $FFMPEG_DIR, h264_nvenc confirmed present"
                 if "$FFMPEG_DIR/ffmpeg" -hide_banner -hwaccels 2>/dev/null | grep -qiE 'cuda|nvdec|cuvid' \
                     && "$FFMPEG_DIR/ffmpeg" -hide_banner -filters 2>/dev/null | grep -qE 'scale_cuda|scale_npp'; then
                     echo "    CUDA decode (NVDEC + CUDA filters) also present — GPU decode + encode both active"
                     export REQUIRE_GPU_DECODE="1"
-                    echo "    REQUIRE_GPU_DECODE=1 — jobs now FAIL if GPU decode is unavailable (no silent CPU)"
+                    echo "    REQUIRE_GPU_DECODE=1 — strict GPU-or-nothing mode confirmed"
                 else
                     echo "    NOTE: this build has NVENC (GPU encode) but no CUDA decode/filters."
-                    echo "          REQUIRE_GPU_DECODE stays 'warn' — jobs run with a LOUD warning"
-                    echo "          that decode is on CPU until a decode-capable build is installed."
+                    echo "          JOBS WILL FAIL at startup (REQUIRE_GPU_DECODE=1, GPU-or-nothing)"
+                    echo "          until a decode-capable build is installed."
                 fi
                 echo "    main.py prepends $FFMPEG_DIR to PATH itself at job start,"
                 echo "    so uvicorn does NOT need this shell's PATH export."
             else
-                echo "    downloaded build lacks h264_nvenc — falling back to system ffmpeg (libx264)"
+                echo "    downloaded build lacks h264_nvenc — JOBS WILL FAIL (GPU-or-nothing)"
             fi
         else
-            echo "    download/extract failed — falling back to system ffmpeg (libx264); see $LOG_DIR/ffmpeg_nvenc.log"
+            echo "    download/extract failed after all attempts — JOBS WILL FAIL (GPU-or-nothing)."
+            echo "    See $LOG_DIR/ffmpeg_nvenc.log. GitHub must be reachable from Kaggle"
+            echo "    (the notebook's own git pull uses it)."
         fi
     fi
 fi

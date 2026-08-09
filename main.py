@@ -133,19 +133,30 @@ def _print_pipeline_diagnostics():
           f"{'YES' if encode_ok else 'NO'}", flush=True)
     print(f"   torch CUDA: {cuda} ({gpus} device(s))", flush=True)
     if cuda and not decode_ok:
-        require = (os.environ.get("REQUIRE_GPU_DECODE") or "warn").strip().lower()
+        require = (os.environ.get("REQUIRE_GPU_DECODE") or "1").strip().lower()
         if require == "1":
+            # GPU or nothing (owner's explicit contract): a decode-capable
+            # ffmpeg is required, full stop. Say exactly what is missing so
+            # the fix is one step, not a hunt.
+            _nvenc_bin = os.path.join(
+                os.environ.get("FFMPEG_DIR") or "/kaggle/working/ffmpeg-nvenc",
+                "ffmpeg")
+            _state = ("present" if os.path.exists(_nvenc_bin)
+                      else "MISSING — kaggle_bootstrap.sh's download failed")
             print("❌ GPU detected but this ffmpeg cannot decode on the GPU "
-                  "(no NVDEC/CUDA hwaccel) and REQUIRE_GPU_DECODE=1. Fix: "
-                  "install the decode-capable ffmpeg (kaggle_bootstrap.sh → "
-                  "'CUDA decode (NVDEC + CUDA filters) also present'), or set "
-                  "REQUIRE_GPU_DECODE=warn/0 to allow CPU decode.", flush=True)
+                  f"(no NVDEC/CUDA hwaccel) and REQUIRE_GPU_DECODE=1 — CPU "
+                  "decode is refused. Decode-capable build at "
+                  f"{_nvenc_bin}: {_state}. Fix: run kaggle_bootstrap.sh and "
+                  "confirm it prints 'CUDA decode (NVDEC + CUDA filters) also "
+                  "present'. (REQUIRE_GPU_DECODE=warn runs on CPU with a loud "
+                  "warning; 0 disables the check — both only for emergencies.)",
+                  flush=True)
             sys.exit(1)
-        if require not in ("0", "false", "no"):
+        if require == "warn":
             print("⚠️ GPU present but GPU decode is unavailable in the ffmpeg on "
-                  "PATH — decoding on CPU for this run. Install the nvenc build "
-                  "via kaggle_bootstrap.sh, or set REQUIRE_GPU_DECODE=1 to fail "
-                  "instead of running CPU decode.", flush=True)
+                  "PATH — decoding on CPU for this run (REQUIRE_GPU_DECODE=warn). "
+                  "Install the nvenc build via kaggle_bootstrap.sh for the "
+                  "strict GPU-only mode.", flush=True)
 
 
 def source_logo_crop_vf_args():
