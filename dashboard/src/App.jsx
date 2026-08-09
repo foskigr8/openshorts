@@ -1809,6 +1809,7 @@ function App() {
                       auto: 'auto',
                     }[submittedFormat] || submittedFormat}
                     onCancel={status === 'processing' ? handleCancelJob : null}
+                    logs={logs}
                   />
                 )}
 

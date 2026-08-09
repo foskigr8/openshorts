@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Play, Pause, MoreVertical, Youtube, Clapperboard, Clock, X, VideoOff } from 'lucide-react';
+import { Play, Pause, MoreVertical, Youtube, Clapperboard, Clock, X, VideoOff,
+  Download, AudioLines, ScanSearch, Scissors, CheckCircle2 } from 'lucide-react';
 import { getApiUrl } from '../config';
 import { pauseAllOtherPlayers, registerPlayer } from '../lib/playerSync';
 import ProgressRing from './ProgressRing';
@@ -23,6 +24,7 @@ const ProcessingAnimation = ({
   title = '',
   format = '',
   onCancel = null,
+  logs = [],
 }) => {
   const [videoSrc, setVideoSrc] = useState(null);
   const [isYouTube, setIsYouTube] = useState(false);
@@ -141,6 +143,25 @@ const ProcessingAnimation = ({
     : status === 'cancelled' ? 'Cancelled'
       : isComplete ? 'Complete'
         : (progress?.stage || 'Queued');
+
+  // ---- live "now doing" step (backend progress.json's step/step_pct/note) --
+  const STAGE_GLYPH = {
+    download: { Icon: Download, label: 'downloading the source video' },
+    transcribe: { Icon: AudioLines, label: 'transcribing the audio' },
+    analyze: { Icon: ScanSearch, label: 'finding the viral moments' },
+    render: { Icon: Scissors, label: 'cutting + rendering the clips' },
+    finalize: { Icon: Clapperboard, label: 'finalizing' },
+  };
+  const activeStage = failed ? null : isComplete ? 'finalize' : (progress?.stage || 'download');
+  const glyph = STAGE_GLYPH[activeStage] || { Icon: ScanSearch, label: 'working' };
+  const StepIcon = glyph.Icon;
+  const stepText = failed
+    ? 'Failed — see the logs below'
+    : isComplete
+      ? 'Done — all clips rendered'
+      : (progress?.step || progress?.note || glyph.label);
+  const stepPct = typeof progress?.step_pct === 'number' ? progress.step_pct : null;
+  const logTail = (logs || []).slice(-4).map((l) => (typeof l === 'string' ? l : l.text || ''));
 
   return (
     // shrink-0 is load-bearing: this card sits in a `flex flex-col` column, so
@@ -349,6 +370,53 @@ const ProcessingAnimation = ({
               label={isComplete ? 'done' : failed ? 'failed' : 'processing'}
               className="mx-auto lg:mx-0"
             />
+          </div>
+
+          {/* LIVE STEP — "what is it doing right now", with a per-stage
+              animation, step progress and the raw log tail. This is the
+              answer to "I'm staring at 45% and don't know what's happening"
+              without reading the whole telemetry grid. */}
+          <div className="rounded-input border border-rule bg-paper2 px-3.5 py-3">
+            <div className="flex items-center gap-3">
+              <span
+                className={`icon-chip !w-9 !h-9 shrink-0 ${
+                  failed ? '!border-danger/30 text-danger'
+                    : isComplete ? '!border-ok/30 text-ok'
+                      : '!border-brass/40 text-brass'
+                } ${!failed && !isComplete ? 'animate-pulse' : ''}`}
+              >
+                {isComplete ? <CheckCircle2 size={17} /> : failed ? <X size={17} /> : <StepIcon size={17} />}
+              </span>
+              <div className="flex-1 min-w-0">
+                <p className="readout text-[9px] text-muted uppercase tracking-wider">now doing</p>
+                <p className="text-sm font-semibold text-ink truncate leading-snug" title={stepText}>
+                  {stepText}
+                </p>
+              </div>
+              {stepPct != null && !isComplete && !failed && (
+                <span className="readout text-[11px] text-brass tabular-nums shrink-0">{stepPct}%</span>
+              )}
+            </div>
+            <div className="mt-2 h-1.5 rounded-full bg-paper3 overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-[width] duration-500 ${
+                  failed ? 'bg-danger/70'
+                    : isComplete ? 'bg-ok'
+                      : stepPct == null ? 'w-full bg-brass/40 animate-pulse'
+                        : 'bg-brass'
+                }`}
+                style={stepPct == null && !failed && !isComplete ? undefined : { width: `${stepPct ?? 100}%` }}
+              />
+            </div>
+            {/* Raw log tail — always visible so the user sees the actual
+                pipeline lines, not just a summary word. */}
+            {!failed && logTail.length > 0 && (
+              <div className="mt-2 space-y-0.5 font-mono text-[9px] text-muted/80 leading-snug max-h-14 overflow-hidden">
+                {logTail.map((line, i) => (
+                  <p key={i} className="truncate" title={line}>{line}</p>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </div>

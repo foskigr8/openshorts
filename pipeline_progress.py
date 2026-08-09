@@ -27,8 +27,13 @@ STAGE_ORDER = ("download", "transcribe", "analyze", "render", "finalize")
 
 
 def write_progress(output_dir, stage, clips_done=0, clips_total=0, note=None,
-                   duration_seconds=None):
-    """Atomically persist a progress snapshot for app.py's poll loop."""
+                   duration_seconds=None, step=None, step_pct=None):
+    """Atomically persist a progress snapshot for app.py's poll loop.
+
+    ``step`` / ``step_pct`` carry the fine-grained "what is it doing RIGHT
+    NOW" detail the dashboard renders (e.g. step="rendering clip 3/8",
+    step_pct=37). ``stage`` stays the coarse pipeline stage for the tracker.
+    """
     try:
         if not output_dir:
             return
@@ -54,6 +59,10 @@ def write_progress(output_dir, stage, clips_done=0, clips_total=0, note=None,
             payload["note"] = note
         if duration_seconds is not None:
             payload["duration_seconds"] = duration_seconds
+        if step:
+            payload["step"] = step
+        if step_pct is not None:
+            payload["step_pct"] = min(100, max(0, int(step_pct)))
         tmp = os.path.join(output_dir, ".progress.json.tmp")
         with open(tmp, "w") as f:
             json.dump(payload, f)

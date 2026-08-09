@@ -41,6 +41,17 @@ warnings.filterwarnings("ignore", category=UserWarning, module='google.protobuf'
 # Load environment variables
 load_dotenv()
 
+# Kaggle's apt ffmpeg is a CPU-only build. kaggle_bootstrap.sh installs an
+# nvenc-capable static build to FFMPEG_DIR (/kaggle/working/ffmpeg-nvenc) but
+# only exports PATH inside its OWN shell, so the uvicorn -> main.py subprocess
+# never sees it and every decode/encode falls back to CPU ("GPU_RENDER=1 but
+# this ffmpeg build lacks CUDA hwaccel/filters"). Prepending the dir here —
+# when the build actually exists — makes every ffmpeg call in this process use
+# the CUDA build without relying on the bootstrap's shell environment.
+_nvenc_dir = os.environ.get("FFMPEG_DIR") or "/kaggle/working/ffmpeg-nvenc"
+if os.path.isdir(_nvenc_dir) and os.path.exists(os.path.join(_nvenc_dir, "ffmpeg")):
+    os.environ["PATH"] = _nvenc_dir + os.pathsep + os.environ.get("PATH", "")
+
 # --- Constants ---
 ASPECT_RATIO = 9 / 16
 
@@ -329,7 +340,13 @@ def download_youtube_video(url, output_dir=".", require_hd=False):
         # added ~10x the bytes for a final clip the platform downscales
         # anyway. Set SOURCE_MAX_HEIGHT=2160 (or higher) to prefer 4K again.
         _max_h = (os.environ.get("SOURCE_MAX_HEIGHT") or "1440").strip() or "1440"
-        return (f'bestvideo[height<={_max_h}]+bestaudio/'
+        # Prefer H.264 (avc1) at or below the cap: AV1/VP9 CPU decode is
+        # 3-4x slower than H.264, and Kaggle's ffmpeg has no CUDA hwaccel, so
+        # the codec choice is the single biggest decode-speed lever. H.264 is
+        # usually capped at 1080p on YouTube; when the video offers no H.264
+        # at the cap, the second option takes the best stream any codec.
+        return (f'bestvideo[height<={_max_h}][vcodec^=avc1]+bestaudio/'
+                f'bestvideo[height<={_max_h}]+bestaudio/'
                 'bestvideo[height>=1080]+bestaudio/'
                 'bestvideo[height>=720]+bestaudio/'
                 'bestvideo+bestaudio/'
@@ -1448,6 +1465,9 @@ def get_viral_clips(transcript_result, video_duration, source_video_path=None,
             "No clip count provided — auto mode was removed. The picker "
             "fulfills an explicit count at all costs; pass --clip-count.")
 
+    if output_dir:
+        _write_progress(output_dir, "analyze", note="picking clips with Gemini",
+                        step="picking the viral moments (Gemini)", step_pct=40)
     picker_result = picker.select_viral_clips(
         transcript_result, video_duration, clip_count=clip_count,
         long_context_count=long_context_count, style_variant=style_variant,
@@ -1466,6 +1486,11 @@ def get_viral_clips(transcript_result, video_duration, source_video_path=None,
     for s in shorts:
         _extend_start_for_preceding_question(s, transcript_result)
     _snap_candidates(shorts, words, video_duration)
+    if output_dir:
+        _write_progress(output_dir, "analyze",
+                        note="detecting scene boundaries",
+                        step="detecting scene boundaries (long videos take a while)",
+                        step_pct=85)
     _scene_bounds = scene_boundaries_for(source_video_path)
     for s in shorts:
         _clamp_candidate_end_to_scene(s, _scene_bounds)
@@ -1728,7 +1753,8 @@ if __name__ == '__main__':
         else:
             try:
                 _write_progress(output_dir, "transcribe", note="transcribing audio",
-                                duration_seconds=duration)
+                                duration_seconds=duration,
+                                step="transcribing audio (AssemblyAI)")
                 transcript = transcribe_video(input_video)
                 if args.url:
                     source_store.save_transcript(args.url, transcript)
@@ -1754,7 +1780,8 @@ if __name__ == '__main__':
                       "transcript-only; the count is still fulfilled.")
 
         # 4. Gemini Analysis (transcript-driven, or vision for silent videos)
-        _write_progress(output_dir, "analyze", note="finding the viral moments")
+        _write_progress(output_dir, "analyze", note="finding the viral moments",
+                        step="asking Gemini for the viral moments", step_pct=20)
         if transcript is not None:
             clips_data = get_viral_clips(transcript, duration,
                                          source_video_path=input_video,
@@ -1817,7 +1844,9 @@ if __name__ == '__main__':
             os.replace(_meta_tmp, metadata_file)
             print(f"   Saved metadata to {metadata_file}")
             _write_progress(output_dir, "render", 0, len(clips_data['shorts']),
-                            note="rendering clips")
+                            note="rendering clips",
+                            step=f"rendering clip 0/{len(clips_data['shorts'])}",
+                            step_pct=0)
 
             # Ground-truth word list for keep_span snapping — same source
             # get_viral_clips() uses for boundary snapping, rebuilt here
@@ -2051,9 +2080,14 @@ if __name__ == '__main__':
                         with _progress_lock:
                             _rendered_count[0] += 1
                             _write_progress(output_dir, "render",
-                                            _rendered_count[0], len(shorts))
+                                            _rendered_count[0], len(shorts),
+                                            step=f"rendering clip "
+                                                 f"{_rendered_count[0]}/{len(shorts)}",
+                                            step_pct=100 * _rendered_count[0] // len(shorts))
             _write_progress(output_dir, "finalize", len(shorts), len(shorts),
-                            note="job complete")
+                            note="job complete",
+                            step="finalizing — stitching the clips together",
+                            step_pct=100)
             _stage_durations["render"] = time.time() - _stage_t0
             _stage_t0 = time.time()
             _stage_durations["finalize"] = time.time() - _stage_t0

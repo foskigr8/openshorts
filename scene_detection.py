@@ -12,6 +12,11 @@ case can never kill a job.
 
 Environment variables:
   SCENE_ENGINE          "transnetv2" (default) | "pyscenedetect" (legacy)
+  SCENE_DETECT_TIMEOUT  max seconds for the TransNetV2 whole-video decode
+                        (default 300; a 103-min AV1 source on CPU took 900s+
+                        — the cap exists so scene detection can never hold a
+                        job hostage for a quarter hour; the scene clamp fails
+                        open when detection times out)
   SCENE_MIN_SEC         minimum scene length in seconds; shorter scenes are
                         merged into a neighbor (default 0.4, TransNetV2 path
                         only — the legacy path stays untouched)
@@ -30,6 +35,7 @@ from scenedetect.detectors import ContentDetector
 
 # TransNetV2 input size (width x height), fixed by the trained model.
 _TN2_W, _TN2_H = 48, 27
+_SCENE_DETECT_TIMEOUT = int(os.environ.get("SCENE_DETECT_TIMEOUT", "300"))
 
 # One shared model instance; clips can process in parallel (CLIP_WORKERS) so
 # inference is serialized like the other detectors in main.py.
@@ -140,7 +146,8 @@ def _extract_frames_small(video_path):
         "-pix_fmt", "rgb24", "-f", "rawvideo", "-",
     ]
     proc = subprocess.run(cmd, stdout=subprocess.PIPE,
-                          stderr=subprocess.DEVNULL, check=True, timeout=900)
+                          stderr=subprocess.DEVNULL, check=True,
+                          timeout=_SCENE_DETECT_TIMEOUT)
     frame_bytes = _TN2_H * _TN2_W * 3
     n = len(proc.stdout) // frame_bytes
     if n == 0:

@@ -122,6 +122,16 @@ Env vars:
 - `SOURCE_CACHE_DIR` — where `source_store.py` keeps per-source videos,
   transcripts and context blobs (default: `sources/` next to the repo;
   point it at a mounted Kaggle Dataset for cross-session persistence)
+- `SOURCE_MAX_HEIGHT` — preferred YouTube height cap (default 1440p; the
+  downloader prefers H.264 at or below it because AV1 CPU decode is 3-4x
+  slower and Kaggle's ffmpeg has no CUDA hwaccel)
+- `SCENE_DETECT_TIMEOUT` — max seconds for the TransNetV2 whole-video scene
+  decode (default 300; a 103-min AV1 source on CPU previously hit the old
+  900s hardcap — the scene clamp fails open on timeout)
+- `FFMPEG_DIR` — where the bootstrap's nvenc-capable ffmpeg lives
+  (default `/kaggle/working/ffmpeg-nvenc`); `main.py` prepends it to PATH
+  when present so GPU decode/encode is used even if the bootstrap's shell
+  export was lost
 - `GEMINI_MODEL` / `GEMINI_FALLBACK_MODEL` / `GEMINI_API_KEYS` — picker
   model + pool (unchanged)
 

@@ -47,6 +47,18 @@ def test_non_granular_stage_has_no_stage_pct(tmp_path):
     assert json.loads((tmp_path / "progress.json").read_text())["stage_pct"] is None
 
 
+def test_step_fields_ride_along_for_the_live_panel(tmp_path):
+    pp.write_progress(str(tmp_path), "render", clips_done=2, clips_total=4,
+                      step="rendering clip 2/4", step_pct=50)
+    payload = json.loads((tmp_path / "progress.json").read_text())
+    assert payload["step"] == "rendering clip 2/4"
+    assert payload["step_pct"] == 50
+    pp.write_progress(str(tmp_path), "analyze", note="detecting scenes")
+    payload = json.loads((tmp_path / "progress.json").read_text())
+    assert payload["note"] == "detecting scenes"
+    assert "step" not in payload  # step is optional
+
+
 def test_mark_clip_ready_writes_marker(tmp_path):
     pp.mark_clip_ready(str(tmp_path), "mytitle_clip_1.mp4")
     assert (tmp_path / "mytitle_clip_1.mp4.ready").exists()
