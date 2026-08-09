@@ -63,9 +63,19 @@ echo "    SOURCE_MAX_HEIGHT=1440 (Option B: VP9/H.264 <=1440p, GPU-decodable on 
 # leaves ffmpeg exactly as it was (CPU encode), same as before this block.
 if [ "${GPU_COUNT:-0}" -gt 0 ] && [ "${SKIP_FFMPEG_NVENC:-0}" != "1" ]; then
     say "nvenc-capable ffmpeg"
-    if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q h264_nvenc; then
-        echo "    ffmpeg already has h264_nvenc — nothing to do"
+    # Skip ONLY when the ffmpeg on PATH has BOTH GPU encode AND CUDA decode +
+    # filters — encode alone (h264_nvenc) is not enough: the pipeline is
+    # GPU-or-nothing, so a decode-capable build must be installed even when
+    # some other ffmpeg with just NVENC is on PATH.
+    if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q h264_nvenc \
+        && ffmpeg -hide_banner -hwaccels 2>/dev/null | grep -qiE 'cuda|nvdec|cuvid' \
+        && ffmpeg -hide_banner -filters 2>/dev/null | grep -qE 'scale_cuda|scale_npp'; then
+        echo "    ffmpeg already has GPU encode + CUDA decode/filters — nothing to do"
+        export REQUIRE_GPU_DECODE="1"
+        echo "    REQUIRE_GPU_DECODE=1 — strict GPU-or-nothing mode confirmed"
     else
+        echo "    CUDA decode/filters missing on the PATH ffmpeg — installing the"
+        echo "    full decode-capable build (BtbN master, verified: cuda + scale_cuda + nvenc)"
         FFMPEG_DIR="${FFMPEG_DIR:-/kaggle/working/ffmpeg-nvenc}"
         mkdir -p "$FFMPEG_DIR"
         # Two asset variants (gpl, then gpl-shared) with a retry each — the
