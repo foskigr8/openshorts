@@ -76,6 +76,20 @@ _nvenc_dir = os.environ.get("FFMPEG_DIR") or "/kaggle/working/ffmpeg-nvenc"
 if os.path.isdir(_nvenc_dir) and os.path.exists(os.path.join(_nvenc_dir, "ffmpeg")):
     os.environ["PATH"] = _nvenc_dir + os.pathsep + os.environ.get("PATH", "")
 
+# The decode-capable ffmpeg (and Kaggle's own) dlopen the NVIDIA driver at
+# runtime — the loader must find libcuda.so.1. Kaggle keeps driver libs in
+# /usr/lib/x86_64-linux-gnu and /usr/local/cuda/lib64; prepend both to
+# LD_LIBRARY_PATH so GPU decode/encode don't die on "cannot open shared
+# object file" inside the subprocess.
+_ld_lib = os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep)
+_nvidia_lib_dirs = [p for p in ("/usr/lib/x86_64-linux-gnu",
+                                "/usr/local/cuda/lib64")
+                    if os.path.isdir(p) and p not in _ld_lib]
+if _nvidia_lib_dirs:
+    os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(
+        _nvidia_lib_dirs + ([os.environ["LD_LIBRARY_PATH"]]
+                            if os.environ.get("LD_LIBRARY_PATH") else []))
+
 # --- Constants ---
 ASPECT_RATIO = 9 / 16
 

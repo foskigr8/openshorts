@@ -124,6 +124,8 @@ def _probe_gpu_render():
     except Exception:
         return False
     if not any(a in hw_names for a in ("cuda", "nvdec", "cuvid")):
+        print("⚠️ [GPU_RENDER] ffmpeg has no CUDA hwaccel in -hwaccels; "
+              "GPU decode unavailable for this build.")
         return False
     try:
         flt = subprocess.run(
@@ -139,6 +141,8 @@ def _probe_gpu_render():
             names.add(parts[1])
     present = sorted(n for n in GPU_RENDER_FILTERS if n in names)
     if not present:
+        print("⚠️ [GPU_RENDER] ffmpeg lacks CUDA filters "
+              f"({', '.join(GPU_RENDER_FILTERS)}) — GPU decode unavailable.")
         return False
     probe_dir = tempfile.mkdtemp(prefix="gpu_render_probe_")
     try:
@@ -157,6 +161,8 @@ def _probe_gpu_render():
              "-f", "null", "-"],
             capture_output=True, timeout=30)
         if dec.returncode != 0:
+            _err = str(getattr(dec, "stderr", "") or "")[-400:]
+            print(f"⚠️ [GPU_RENDER] real CUDA decode test failed: {_err}")
             return False
         flt = subprocess.run(
             ["ffmpeg", "-y", "-loglevel", "error",
@@ -165,6 +171,8 @@ def _probe_gpu_render():
              "-f", "null", "-"],
             capture_output=True, timeout=30)
         if flt.returncode != 0:
+            _err = str(getattr(flt, "stderr", "") or "")[-400:]
+            print(f"⚠️ [GPU_RENDER] real scale_cuda test failed: {_err}")
             return False
     except Exception:
         return False
