@@ -73,3 +73,35 @@ class TestCacheRoundtrip:
         monkeypatch.setenv("SOURCE_CACHE_DIR", str(tmp_path))
         source_store.save_transcript("https://youtu.be/abc123", {"segments": []})
         assert source_store.lookup("https://youtu.be/abc123") is None
+
+
+class TestListSources:
+    def test_list_is_empty_when_cache_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SOURCE_CACHE_DIR", str(tmp_path / "nope"))
+        assert source_store.list_sources() == []
+
+    def test_list_roundtrip_and_ordering(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SOURCE_CACHE_DIR", str(tmp_path))
+        older = tmp_path / "older.mp4"
+        older.write_bytes(b"old")
+        source_store.save_source("https://youtu.be/aaa111", str(older), "Older")
+        newer = tmp_path / "newer.mp4"
+        newer.write_bytes(b"new-new")
+        source_store.save_source("https://youtu.be/bbb222", str(newer), "Newer")
+        source_store.save_transcript("https://youtu.be/bbb222", {"segments": []})
+        sources = source_store.list_sources()
+        assert [s["title"] for s in sources] == ["Newer", "Older"]
+        n = sources[0]
+        assert n["has_transcript"] is True
+        assert n["has_context"] is False
+        assert n["size_bytes"] == len(b"new-new")
+
+    def test_video_path_for_key(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SOURCE_CACHE_DIR", str(tmp_path))
+        src = tmp_path / "Ep1.mp4"
+        src.write_bytes(b"x")
+        source_store.save_source("https://youtu.be/abc123", str(src), "Ep1")
+        assert source_store.video_path_for_key("abc123") == str(
+            tmp_path / "abc123" / "Ep1.mp4")
+        assert source_store.video_path_for_key("unknown") is None
+        assert source_store.video_path_for_key("") is None

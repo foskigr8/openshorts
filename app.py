@@ -18,6 +18,8 @@ from typing import Dict, Optional, List
 from contextlib import asynccontextmanager
 from hardware_defaults import default_max_concurrent_jobs
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header, BackgroundTasks
+
+import source_store
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, Response
@@ -2446,6 +2448,24 @@ async def job_logs_download(job_id: str):
         text, media_type="text/plain",
         headers={"Content-Disposition":
                  f'attachment; filename="{job_id}_logs.txt"'})
+
+
+@app.get("/api/sources")
+async def list_sources():
+    """Every saved source video (source_store's persistent cache), newest
+    first — the Sources tab's data. Disk-backed, same as /api/history, so it
+    works without sign-in on self-host."""
+    return {"sources": source_store.list_sources()}
+
+
+@app.get("/api/sources/{key}/video")
+async def source_video(key: str):
+    """Stream a cached source video. FileResponse handles Range requests, so
+    the <video> element can seek freely in a multi-GB source."""
+    path = source_store.video_path_for_key(key)
+    if not path:
+        raise HTTPException(status_code=404, detail="Source not found")
+    return FileResponse(path, media_type="video/mp4")
 
 
 @app.get("/api/history")

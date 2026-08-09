@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Search, Flame, TrendingUp, ChevronRight, Film } from 'lucide-react';
+import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Search, Flame, TrendingUp, ChevronRight, Film, HardDrive } from 'lucide-react';
 import KeyInput from './components/KeyInput';
 import KeyListInput from './components/KeyListInput';
 import MediaInput from './components/MediaInput';
@@ -18,6 +18,7 @@ import SaaShortsTab from './components/SaaShortsTab';
 import UGCGallery from './components/UGCGallery';
 import ScheduleWeekModal from './components/ScheduleWeekModal';
 import UsageMeter from './components/UsageMeter';
+import SourcesTab from './components/SourcesTab';
 import TopUpModal from './components/TopUpModal';
 import PlanChoiceModal from './components/PlanChoiceModal';
 import TrialUpgradeModal from './components/TrialUpgradeModal';
@@ -933,12 +934,15 @@ function App() {
       { id: 'ai-agent', ord: '03', icon: Bot, label: 'AI Agent', byok: true },
       { id: 'ugc-gallery', ord: '04', icon: LayoutGrid, label: 'UGC Gallery' },
       { id: 'thumbnails', ord: '05', icon: Image, label: 'YouTube Studio' },
+      // Sources are disk-backed like history — visible on self-host always,
+      // behind sign-in in cloud mode.
+      ...(!billingEnabled || isSignedIn ? [{ id: 'sources', ord: '06', icon: HardDrive, label: 'Sources' }] : []),
       // History must be reachable on self-host too: /api/history is disk-backed
       // and works without sign-in, so the tab was hidden exactly when the user
       // needed it most ("my projects disappeared" was this, not data loss).
       // Cloud mode still gates it behind sign-in (R2 library is per-account).
-      ...(!billingEnabled || isSignedIn ? [{ id: 'history', ord: '06', icon: History, label: 'History' }] : []),
-      { id: 'settings', ord: '07', icon: Settings, label: 'Settings' },
+      ...(!billingEnabled || isSignedIn ? [{ id: 'history', ord: '07', icon: History, label: 'History' }] : []),
+      { id: 'settings', ord: '08', icon: Settings, label: 'Settings' },
     ];
 
     return (
@@ -1648,6 +1652,15 @@ function App() {
             <div className="h-full overflow-y-auto custom-scrollbar animate-fade">
               <div className="max-w-6xl mx-auto p-6 md:p-8">
                 <HistoryTab onReopenProject={restoreProject} search={historySearch} />
+              </div>
+            </div>
+          )}
+
+          {/* View: Sources (the persistent saved-source library) */}
+          {activeTab === 'sources' && (
+            <div className="h-full overflow-y-auto custom-scrollbar animate-fade">
+              <div className="max-w-6xl mx-auto p-6 md:p-8">
+                <SourcesTab />
               </div>
             </div>
           )}

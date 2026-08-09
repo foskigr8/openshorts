@@ -138,3 +138,61 @@ def save_context(url, context_blob):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(context_blob, f, ensure_ascii=False)
     os.replace(tmp, path)
+
+
+def video_path_for_key(key):
+    """Absolute path of the cached source video for a store key, or None."""
+    if not key:
+        return None
+    d = os.path.join(cache_dir(), key)
+    meta = _read_json(os.path.join(d, "meta.json"))
+    if not meta:
+        return None
+    filename = str(meta.get("filename") or "")
+    path = os.path.join(d, filename)
+    return path if filename and os.path.exists(path) else None
+
+
+def list_sources():
+    """Every saved source, newest first — feeds the dashboard's Sources tab.
+
+    Shape: {"key", "title", "filename", "url", "size_bytes", "updated_at",
+    "has_transcript", "has_context"}. Entries without a stored video file are
+    skipped (a partial write must never surface a broken card).
+    """
+    base = cache_dir()
+    if not os.path.isdir(base):
+        return []
+    try:
+        entries = sorted(os.listdir(base))
+    except OSError:
+        return []
+    out = []
+    for key in entries:
+        d = os.path.join(base, key)
+        if not os.path.isdir(d):
+            continue
+        meta = _read_json(os.path.join(d, "meta.json"))
+        if not meta:
+            continue
+        filename = str(meta.get("filename") or "")
+        video_path = os.path.join(d, filename)
+        if not filename or not os.path.exists(video_path):
+            continue
+        try:
+            size = os.path.getsize(video_path)
+            mtime = os.path.getmtime(video_path)
+        except OSError:
+            continue
+        out.append({
+            "key": key,
+            "title": str(meta.get("title") or key),
+            "filename": filename,
+            "url": str(meta.get("url") or ""),
+            "size_bytes": size,
+            "updated_at": mtime,
+            "has_transcript": os.path.exists(os.path.join(d, "transcript.json")),
+            "has_context": os.path.exists(os.path.join(d, "context.json")),
+        })
+    out.sort(key=lambda s: s["updated_at"], reverse=True)
+    return out
