@@ -65,7 +65,7 @@ DEFAULT_DET_SIZE = (640, 640)
 # default (2) because this spine feeds tracking, which needs enough temporal
 # density for ByteTrack's motion model to hold a track across ordinary
 # movement — too sparse and every shot looks like a series of new people.
-DEFAULT_SAMPLE_FPS = float(os.environ.get("FACE_SPINE_SAMPLE_FPS", "5"))
+DEFAULT_SAMPLE_FPS = float(os.environ.get("FACE_SPINE_SAMPLE_FPS", "2"))
 
 # Cosine similarity floor for two raw tracks to be merged as the same person.
 # ArcFace's own convention (see face_id.KnownFacesDB.identify) uses 0.4 for
@@ -113,7 +113,15 @@ def _get_analyzer(model_name: str = DEFAULT_MODEL, ctx_id: int = 0,
     with _ANALYZER_LOCK:
         if key not in _ANALYZER_CACHE:
             import insightface
-            app = insightface.app.FaceAnalysis(name=model_name)
+            # Force CUDAExecutionProvider and SKIP TensorRTExecutionProvider:
+            # onnxruntime lists TensorRT first, and insightface picks the
+            # first provider — TensorRT then builds/optimises an engine per
+            # worker session, which is the measured 10-16 minute per-clip
+            # face spine (00:12-00:28 in the 11-aug run) despite the models
+            # being ~15ms/face on the T4.
+            app = insightface.app.FaceAnalysis(
+                name=model_name,
+                providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
             app.prepare(ctx_id=ctx_id, det_size=det_size)
             _ANALYZER_CACHE[key] = app
         return _ANALYZER_CACHE[key]

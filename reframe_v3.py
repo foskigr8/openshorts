@@ -46,6 +46,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
+import os
 
 import numpy as np
 
@@ -771,7 +772,6 @@ def _render_with_splits(input_video: str, output_video: str, composed: Sequence[
     BGR arrays it was designed for.
     """
     import cv2
-    import os
     import subprocess
     import tempfile
     import gpu_affinity
@@ -888,7 +888,6 @@ def render(input_video, final_output_video, aspect_ratio,
     dump_dir = os.environ.get("REFRAME_DUMP_PATH", "").strip()
     if dump_dir:
         try:
-            import os
             n_frames = max(1, int(round(duration * fps)))
             rects = []
             for i in range(n_frames):

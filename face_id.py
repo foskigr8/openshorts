@@ -114,7 +114,11 @@ class KnownFacesDB:
     def __init__(self, db_path: str, model_name: str = "buffalo_l",
                  ctx_id: int = 0):
         import insightface
-        self.app = insightface.app.FaceAnalysis(name=model_name)
+        # Same provider pin as face_spine: CUDA first, never TensorRT (TRT
+        # engine builds per session are what made face detection minutes slow).
+        self.app = insightface.app.FaceAnalysis(
+            name=model_name,
+            providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
         self.app.prepare(ctx_id=ctx_id, det_size=(640, 640))
         self.embeddings: Dict[str, "object"] = {}
         self._load_db(db_path)

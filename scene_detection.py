@@ -172,16 +172,15 @@ def _extract_frames_small(video_path):
     undiagnosable).
     """
     attempts = []
-    decode_args = ffmpeg_utils.gpu_decode_args(output_format=True)
+    # Same decode args as the render path (output_format=False — no
+    # hwdownload): ffmpeg decodes on the GPU and copies frames back to system
+    # memory automatically. The old -hwaccel_output_format cuda + hwdownload
+    # variant kept failing even on 8-bit H.264 ('gpu decode failed', see the
+    # 11-aug run) while the render's plain -hwaccel cuda decode worked — so
+    # mirror the proven-working path exactly.
+    decode_args = ffmpeg_utils.gpu_decode_args(output_format=False)
     if decode_args:
-        # Frames arrive in CUDA memory; pull them back to system memory for
-        # the tiny CPU resize + rawvideo pipe. hwdownload WITHOUT a format pin:
-        # pinning nv12 broke VP9 streams whose decoded sw format is p010
-        # (10-bit VP9) — 'hwdownload,format=nv12' then fails with "Invalid
-        # output format nv12 for hwframe download" and scene detection
-        # degraded even though the GPU can decode the file.
-        attempts.append(("gpu", decode_args,
-                         f"hwdownload,scale={_TN2_W}:{_TN2_H}"))
+        attempts.append(("gpu", decode_args, f"scale={_TN2_W}:{_TN2_H}"))
     # SCENE_GPU_ONLY=1 (default): never decode on the CPU — if the GPU cannot
     # handle this file, the failure propagates and detect_scenes skips the
     # stage entirely. "0" keeps the cheap 48x27 CPU retry as a safety net.
