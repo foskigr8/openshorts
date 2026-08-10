@@ -12,6 +12,12 @@ case can never kill a job.
 
 Environment variables:
   SCENE_ENGINE          "transnetv2" (default) | "pyscenedetect" (legacy)
+  SCENE_GPU_ONLY        "1" (default) — if the GPU cannot decode the source,
+                        scene detection SKIPS (no CPU decode, no
+                        PySceneDetect); the end-clamp polish is dropped with
+                        a clear log line. "0" allows the cheap 48x27 CPU
+                        retry and the PySceneDetect fallback for hosts that
+                        accept CPU decode.
   SCENE_DETECT_TIMEOUT  max seconds for the TransNetV2 whole-video decode
                         (default 300; a 103-min AV1 source on CPU took 900s+
                         — the cap exists so scene detection can never hold a
@@ -95,6 +101,13 @@ def detect_scenes(video_path):
         try:
             return _detect_transnetv2(video_path)
         except Exception as e:
+            gpu_only = os.environ.get("SCENE_GPU_ONLY", "1").strip().lower()
+            if gpu_only in ("1", "true", "yes"):
+                print(f"   ⚠️ TransNetV2 scene detection skipped: GPU decode "
+                      f"unavailable for this file ({type(e).__name__}: "
+                      f"{str(e)[:200]}). SCENE_GPU_ONLY=1 — no CPU decode, "
+                      f"scene clamp will no-op (clips still render).")
+                return [], 30.0
             print(f"   ⚠️ DEGRADED OUTPUT: TransNetV2 scene detection failed "
                   f"({type(e).__name__}: {e}) — falling back to PySceneDetect")
     return _detect_pyscenedetect(video_path)
@@ -165,7 +178,16 @@ def _extract_frames_small(video_path):
         # the tiny CPU resize + rawvideo pipe.
         attempts.append(("gpu", decode_args,
                          f"hwdownload,format=nv12,scale={_TN2_W}:{_TN2_H}"))
-    attempts.append(("cpu", [], f"scale={_TN2_W}:{_TN2_H}"))
+    # SCENE_GPU_ONLY=1 (default): never decode on the CPU — if the GPU cannot
+    # handle this file, the failure propagates and detect_scenes skips the
+    # stage entirely. "0" keeps the cheap 48x27 CPU retry as a safety net.
+    gpu_only = os.environ.get("SCENE_GPU_ONLY", "1").strip().lower()
+    if gpu_only not in ("1", "true", "yes"):
+        attempts.append(("cpu", [], f"scale={_TN2_W}:{_TN2_H}"))
+    if not attempts:
+        raise RuntimeError(
+            "GPU decode unavailable and SCENE_GPU_ONLY=1 — scene detection "
+            "skipped (no CPU decode).")
 
     last_err = None
     for label, args, vf in attempts:

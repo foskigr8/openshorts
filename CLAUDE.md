@@ -136,6 +136,11 @@ Env vars:
 - `SCENE_DETECT_TIMEOUT` — max seconds for the TransNetV2 whole-video scene
   decode (default 300; a 103-min AV1 source on CPU previously hit the old
   900s hardcap — the scene clamp fails open on timeout)
+- `SCENE_GPU_ONLY` — default `1` (matches the GPU-or-nothing contract): if
+  the GPU cannot decode the source, scene detection SKIPS (no CPU decode, no
+  PySceneDetect) and the end-clamp polish no-ops with a clear log line.
+  `0` allows the cheap 48×27 CPU retry + PySceneDetect for hosts that accept
+  CPU decode
 - `FFMPEG_DIR` — where the bootstrap's nvenc-capable ffmpeg lives
   (default `/kaggle/working/ffmpeg-nvenc`); `main.py` prepends it to PATH
   when present so GPU decode/encode is used even if the bootstrap's shell
