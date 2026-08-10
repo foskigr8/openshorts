@@ -94,14 +94,18 @@ def _gpu_decode():
          "ffmpeg_utils.prepend_gpu_env();"
          "print(ffmpeg_utils.gpu_render_available())"],
         capture_output=True, text=True, cwd=REPO_DIR)
-    raw = (out.stdout or "").strip()
-    ok = raw.startswith("True")
+    # The probe prints its verdict line to stdout BEFORE the result (e.g.
+    # "CUDA decode + filters verified on this device: [...]" then "True") —
+    # so the result is the LAST line, not the start of stdout.
+    lines = (out.stdout or "").strip().splitlines()
+    last = lines[-1].strip() if lines else ""
+    ok = last == "True"
     # The probe prints its real failure reason to stdout (e.g. "real CUDA
     # decode test failed: Cannot load libnvcuvid.so.1 ..."). Surface it so a
     # FAIL names the missing library instead of a generic message.
-    probe_detail = raw[len("True"):].strip()
+    probe_detail = (out.stdout or "").strip()
     detail = ("NVDEC + CUDA filters verified — GPU decode active" if ok
-              else (probe_detail[:300] or
+              else (probe_detail[-300:] or
                     (out.stderr or "").strip()[-200:] or
                     "GPU decode unavailable — REQUIRE_GPU_DECODE=1 will "
                     "refuse to run (re-run Cell 3 and check the nvenc line)"))
