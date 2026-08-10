@@ -181,19 +181,25 @@ PYVER
             echo "    onnxruntime is CPU-only — uninstalling it and installing the"
             echo "    pinned onnxruntime-gpu (requirements-gpu.txt) for GPU face spine"
             pip uninstall -y onnxruntime 2>&1 | tail -1
-            if pip install -q -c /tmp/constraints-kaggle.txt -r requirements-gpu.txt 2>&1 | tail -3; then
+            # No constraints file here: /tmp/constraints-kaggle.txt is never
+            # created by this script (a dead reference from an earlier draft),
+            # and onnxruntime-gpu's deps don't need the Kaggle numpy/opencv
+            # guard anyway.
+            if pip install -q -r requirements-gpu.txt 2>&1 | tail -3; then
                 if python3 -c "import onnxruntime; print('CUDAExecutionProvider' in onnxruntime.get_available_providers())" 2>/dev/null | grep -q True; then
                     echo "    onnxruntime-gpu installed: CUDAExecutionProvider available — face spine on GPU"
                 else
                     echo "    onnxruntime-gpu installed but CUDA provider unavailable (CUDA/cuDNN mismatch) — face spine stays CPU"
                 fi
             else
-                echo "    onnxruntime-gpu install failed (see requirements-gpu.txt) — face spine stays CPU"
+                echo "    onnxruntime-gpu install FAILED — reinstalling CPU onnxruntime so face spine still works"
+                pip install -q "onnxruntime==1.28.0" 2>&1 | tail -3 || \
+                    echo "    CPU onnxruntime reinstall also failed — face ID will stay off"
             fi
         fi
     else
         # CPU-only host: plain onnxruntime (not the 2GB GPU wheel).
-        pip install -q -c /tmp/constraints-kaggle.txt "onnxruntime==1.28.0" 2>&1 | tail -3 || \
+        pip install -q "onnxruntime==1.28.0" 2>&1 | tail -3 || \
             echo "    onnxruntime install reported errors — face ID will stay off"
     fi
     if python3 -c "import insightface" >/dev/null 2>&1; then
