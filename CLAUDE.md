@@ -20,11 +20,15 @@ in Cell 2).
    the download runs. Returns the 3-part audiovisual brain (summary /
    highlights / parts people would love) into `gemini_context.json`. Own
    key (`CONTEXT_GEMINI_API_KEY`), rotates across all keys on 429.
-3. **Download** — yt-dlp. Option B (owner's default): 16:9, **≤1440p**, codec
-   preference **VP9 → H.264 → any non-AV1**. AV1 is excluded everywhere
-   (Turing's NVDEC has no AV1 decoder — an AV1 source silently CPU-decodes).
-   `SOURCE_MAX_HEIGHT=0` restores no-cap; `SOURCE_PREFER_H264=1` flips the
-   codec order. The landed codec prints in the source specs.
+3. **Download** — yt-dlp. **1080p is the hard floor, nothing below is ever
+   accepted** (no 720p/480p/360p): the format chain has no sub-1080 option
+   and the HD gate rejects anything lower. Option B caps at 1440p
+   (`SOURCE_MAX_HEIGHT`) and only picks GPU-decodable codecs — H.264 first
+   (up to 1080p, always 8-bit), then 8-bit VP9, then H.265. 10-bit VP9 and
+   AV1 are excluded (Turing's NVDEC can't decode either — they'd silently
+   CPU-decode). A video whose GPU-decodable streams cap below 1080p fails
+   loudly instead of shipping soft clips. The landed codec + pixel format
+   print in the source specs.
 4. **Transcribe** — AssemblyAI (API, diarization + sentiment + highlights)
    when `ASSEMBLYAI_API_KEY` is set, else CPU faster-whisper. Silent video →
    `get_visual_clips` (Gemini watches the footage).
@@ -135,9 +139,11 @@ GPU pieces that were silently wrong and are now deterministic:
 - `SOURCE_MAX_HEIGHT` — download height cap, default `1440` (Option B);
   `0` = no cap. **Only GPU-decodable codecs are ever picked**: H.264 first
   (up to 1080p, always 8-bit), then 8-bit VP9, then H.265. 10-bit VP9 and
-  AV1 are excluded (Turing's NVDEC can't decode either). A video whose HD
-  tiers are 10-bit VP9/AV1 will therefore cap at its H.264 ceiling (the
-  HD gate then fails loudly if that's below 720p).
+  AV1 are excluded. **1080p is the hard floor** — no 720p/480p/360p is ever
+  accepted; a video whose GPU-decodable streams cap below 1080p fails loudly.
+- `MIN_SOURCE_HEIGHT` — quality gate floor, default **1080** (a sub-1080 or
+  non-GPU-decodable source fails the job loudly; `ALLOW_LOW_QUALITY_SOURCE=1`
+  is the explicit escape hatch).
 - `REQUIRE_GPU_DECODE` — `1` (default; fail if GPU decode unavailable) |
   `warn` (loud warning, run CPU — emergencies only) | `0`.
 - `SCENE_GPU_ONLY` — `1` (default; skip scene detection if GPU can't decode

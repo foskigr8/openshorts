@@ -334,12 +334,24 @@ def _probe_video_specs(path):
 
 def _download_quality_floor(specs):
     """Is this source below the HD floor? Returns the reason string or None."""
-    min_h = int(os.environ.get("MIN_SOURCE_HEIGHT", "720"))
+    min_h = int(os.environ.get("MIN_SOURCE_HEIGHT", "1080"))
     min_b = float(os.environ.get("MIN_SOURCE_BITRATE_Mbps", "1.2"))
     if specs["height"] < min_h:
         return (f"height {specs['height']}p < {min_h}p")
     if specs["bitrate_mbps"] < min_b:
         return (f"bitrate {specs['bitrate_mbps']} Mbps < {min_b} Mbps")
+    # GPU-or-nothing: even a 1080p source is rejected if its codec cannot be
+    # decoded on the GPU (AV1, or 10-bit VP9 on Turing) — otherwise ffmpeg
+    # would silently software-decode it during render.
+    codec = str(specs.get("codec") or "").lower()
+    pix_fmt = str(specs.get("pix_fmt") or "").lower()
+    if codec in ("av1",) or codec.startswith("av01"):
+        return ("codec AV1 — Turing's NVDEC has no AV1 decoder "
+                "(GPU-or-nothing)")
+    if codec.startswith(("vp9", "vp09")) and pix_fmt.startswith(
+            ("p010", "p016", "yuv420p10")):
+        return ("10-bit VP9 — Turing's NVDEC has no VP9 10-bit decoder "
+                "(GPU-or-nothing)")
     return None
 
 
@@ -524,39 +536,34 @@ def download_youtube_video(url, output_dir=".", require_hd=False):
     # every YouTube source arrived at 720p and, since the reframe inherits the
     # source height, 80% of delivered clips came out 406x720 (audited 25-jul-2026).
     def _hd_fmt_for(proxy):
-        if proxy:
-            return ('bestvideo[height<=720]+bestaudio/'
-                    'best[height<=720][ext=mp4]/best[height<=720]/best')
-        # OPTION B default (owner choice, 9-aug-2026): cap the source at
-        # SOURCE_MAX_HEIGHT (1440) and ONLY pick codecs the T4's NVDEC can
-        # decode on the GPU. H.264 (avc1) comes FIRST: YouTube serves H.264
-        # up to 1080p and it is always 8-bit, so it is both the highest
-        # GPU-decodable quality and guaranteed to decode on the GPU. Then
-        # 8-bit VP9 (vcodec^=vp09.00.10 — profile 0), then H.265 (h265/hevc).
-        # 10-bit VP9 (vp09.00.40, profile 2) and AV1 are EXCLUDED: Turing has
-        # no hardware decoder for either, so ffmpeg silently software-decodes
-        # them (the "GPU decode failed / render on CPU" failure from the
-        # 16:53 run — the 1440p stream was VP9 10-bit; and the 22:50 run —
-        # this video's only GPU-decodable streams were 144p/360p).
+        # 1080p is the HARD FLOOR (owner, 10-aug-2026): nothing below 1080 is
+        # ever accepted. The chain has NO sub-1080 option, so yt-dlp cannot
+        # land 720p/480p/360p on the HD attempt; the HD gate then rejects any
+        # lower source that slips through the ladder's fallback attempts.
+        # Only GPU-decodable codecs are selectable: H.264 first (up to 1080p,
+        # always 8-bit), then 8-bit VP9 (vp09.00.10), then H.265. 10-bit VP9
+        # (vp09.00.40) and AV1 are excluded — Turing's NVDEC can't decode
+        # either, so they would silently CPU-decode.
         # SOURCE_MAX_HEIGHT=0 restores no-cap quality-first.
         _max_h = (os.environ.get("SOURCE_MAX_HEIGHT") or "1440").strip() or "1440"
+        if proxy:
+            # Same 1080 floor on the proxy path — the old 720p bandwidth cap
+            # is gone; the quality contract outranks bandwidth cost.
+            _max_h = "1440"
         if _max_h in ("0", "unlimited", "none"):
             return ('bestvideo[vcodec^=avc1][height>=1080]+bestaudio/'
-                    'bestvideo[vcodec^=avc1][height>=720]+bestaudio/'
-                    'bestvideo[vcodec^=avc1]+bestaudio/'
                     'bestvideo[vcodec^=vp09.00.10][height>=1080]+bestaudio/'
-                    'bestvideo[vcodec^=vp09.00.10]+bestaudio/'
-                    'bestvideo[vcodec^=h265]+bestaudio/'
-                    'bestvideo[vcodec^=hevc]+bestaudio/'
-                    'bestvideo[vcodec!=av01][vcodec!=vp09.00.40]+bestaudio/'
+                    'bestvideo[vcodec^=h265][height>=1080]+bestaudio/'
+                    'bestvideo[vcodec^=hevc][height>=1080]+bestaudio/'
+                    'bestvideo[height>=1080][vcodec!=av01][vcodec!=vp09.00.40]+bestaudio/'
                     'best[vcodec!=av01][ext=mp4]/best[vcodec!=av01]')
-        return (f'bestvideo[height<={_max_h}][vcodec^=avc1]+bestaudio/'
-                f'bestvideo[height<={_max_h}][vcodec^=vp09.00.10]+bestaudio/'
-                f'bestvideo[height<={_max_h}][vcodec^=h265]+bestaudio/'
-                f'bestvideo[height<={_max_h}][vcodec^=hevc]+bestaudio/'
-                f'bestvideo[height<={_max_h}][vcodec!=av01][vcodec!=vp09.00.40]+bestaudio/'
-                'bestvideo[vcodec^=avc1]+bestaudio/'
-                'bestvideo[vcodec!=av01][vcodec!=vp09.00.40]+bestaudio/'
+        return (f'bestvideo[height>={1080}][height<={_max_h}][vcodec^=avc1]+bestaudio/'
+                f'bestvideo[height>={1080}][height<={_max_h}][vcodec^=vp09.00.10]+bestaudio/'
+                f'bestvideo[height>={1080}][height<={_max_h}][vcodec^=h265]+bestaudio/'
+                f'bestvideo[height>={1080}][height<={_max_h}][vcodec^=hevc]+bestaudio/'
+                f'bestvideo[height>={1080}][height<={_max_h}][vcodec!=av01][vcodec!=vp09.00.40]+bestaudio/'
+                'bestvideo[height>=1080][vcodec^=avc1]+bestaudio/'
+                'bestvideo[height>=1080][vcodec!=av01][vcodec!=vp09.00.40]+bestaudio/'
                 'best[vcodec!=av01][ext=mp4]/best[vcodec!=av01]')
     fallback_fmt = 'bestvideo+bestaudio/best'
 
