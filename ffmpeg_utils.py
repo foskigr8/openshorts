@@ -167,17 +167,23 @@ def _probe_gpu_render():
         flt = subprocess.run(
             ["ffmpeg", "-y", "-loglevel", "error",
              "-f", "lavfi", "-i", "color=red:s=64x64:d=0.2",
-             # hwdownload is REQUIRED after scale_cuda. Without it the frames
-             # are still in CUDA memory, `format` cannot pull them back, and
-             # ffmpeg injects an auto_scaler that can't accept GPU frames:
-             #   "Impossible to convert between the formats supported by the
-             #    filter 'Parsed_scale_cuda_1' and the filter 'auto_scaler_0'"
-             # That aborted the probe on hosts whose GPU decode works fine,
-             # so REQUIRE_GPU_DECODE=1 killed the job (and first burned a
-             # pointless ffmpeg re-download via _ensure_gpu_decode_ffmpeg).
-             # Newer ffmpeg reports the same fault as "Could not open encoder
-             # before EOF" / "Nothing was written into output file" instead.
-             "-vf", "hwupload_cuda,scale_cuda=32:32,hwdownload,format=nv12",
+             # BOTH format=nv12 pins are load-bearing, and so is hwdownload:
+             #  - trailing hwdownload: without it the frames are still in CUDA
+             #    memory and ffmpeg injects an auto_scaler that cannot accept
+             #    GPU frames ("Impossible to convert between the formats
+             #    supported by ... 'auto_scaler_0'").
+             #  - leading format=nv12: hwdownload can only emit the frame
+             #    context's own sw_format, so uploading as yuv420p and asking
+             #    for nv12 back fails ("Invalid output format nv12 for hwframe
+             #    download"). Pinning nv12 before the upload makes both ends
+             #    agree. Dropping the trailing format is NOT a fix either —
+             #    the sink then negotiates something absurd ("Invalid output
+             #    format monow").
+             # This probe failing aborts jobs on hosts whose GPU decode works
+             # fine (REQUIRE_GPU_DECODE=1), after first burning a pointless
+             # ffmpeg re-download via _ensure_gpu_decode_ffmpeg.
+             "-vf", ("format=nv12,hwupload_cuda,scale_cuda=32:32,"
+                     "hwdownload,format=nv12"),
              "-f", "null", "-"],
             capture_output=True, timeout=30)
         if flt.returncode != 0:
