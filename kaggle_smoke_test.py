@@ -90,11 +90,19 @@ def _gpu_decode():
     'GPU or nothing' gate. REQUIRE_GPU_DECODE=1 refuses to run without it."""
     out = subprocess.run(
         [sys.executable, "-c",
-         "import ffmpeg_utils;print(ffmpeg_utils.gpu_render_available())"],
+         "import ffmpeg_utils;"
+         "ffmpeg_utils.prepend_gpu_env();"
+         "print(ffmpeg_utils.gpu_render_available())"],
         capture_output=True, text=True, cwd=REPO_DIR)
-    ok = (out.stdout or "").strip() == "True"
+    raw = (out.stdout or "").strip()
+    ok = raw.startswith("True")
+    # The probe prints its real failure reason to stdout (e.g. "real CUDA
+    # decode test failed: Cannot load libnvcuvid.so.1 ..."). Surface it so a
+    # FAIL names the missing library instead of a generic message.
+    probe_detail = raw[len("True"):].strip()
     detail = ("NVDEC + CUDA filters verified — GPU decode active" if ok
-              else ((out.stderr or "").strip()[-200:] or
+              else (probe_detail[:300] or
+                    (out.stderr or "").strip()[-200:] or
                     "GPU decode unavailable — REQUIRE_GPU_DECODE=1 will "
                     "refuse to run (re-run Cell 3 and check the nvenc line)"))
     return ok, detail
@@ -107,6 +115,7 @@ def _onnxruntime_gpu():
     active when torch sees CUDA."""
     out = subprocess.run(
         [sys.executable, "-c",
+         "import ffmpeg_utils; ffmpeg_utils.prepend_gpu_env();"
          "import onnxruntime, torch;"
          "print(onnxruntime.__version__,"
          " 'CUDAExecutionProvider' in onnxruntime.get_available_providers(),"

@@ -28,7 +28,7 @@ from clip_selection import snap_clip_to_words
 from ffmpeg_utils import (video_encode_args, audio_encode_args, QUALITY,
                           QUALITY_FAST, METADATA_SCRUB, gpu_decode_args,
                           gpu_render_available, nvenc_available,
-                          reset_gpu_render_cache)
+                          reset_gpu_render_cache, prepend_gpu_env)
 from pipeline_progress import write_progress as _write_progress
 from pipeline_progress import mark_clip_ready as _mark_clip_ready
 from pipeline_progress import record_stage_durations
@@ -65,44 +65,12 @@ sys.excepthook = _excepthook
 # Load environment variables
 load_dotenv()
 
-# Kaggle's apt ffmpeg is a CPU-only build. kaggle_bootstrap.sh installs an
-# nvenc-capable static build to FFMPEG_DIR (/kaggle/working/ffmpeg-nvenc) but
-# only exports PATH inside its OWN shell, so the uvicorn -> main.py subprocess
-# never sees it and every decode/encode falls back to CPU ("GPU_RENDER=1 but
-# this ffmpeg build lacks CUDA hwaccel/filters"). Prepending the dir here —
-# when the build actually exists — makes every ffmpeg call in this process use
-# the CUDA build without relying on the bootstrap's shell environment.
-_nvenc_dir = os.environ.get("FFMPEG_DIR") or "/kaggle/working/ffmpeg-nvenc"
-if os.path.isdir(_nvenc_dir) and os.path.exists(os.path.join(_nvenc_dir, "ffmpeg")):
-    os.environ["PATH"] = _nvenc_dir + os.pathsep + os.environ.get("PATH", "")
-
-# The decode-capable ffmpeg (and Kaggle's own) dlopen the NVIDIA driver at
-# runtime — the loader must find libcuda.so.1. Kaggle keeps driver libs in
-# /usr/lib/x86_64-linux-gnu and /usr/local/cuda/lib64. The pip nvidia wheels
-# (onnxruntime-gpu's CUDA-12 libs: libcublasLt.so.12, libcudnn.so.9) land in
-# site-packages/nvidia/*/lib. Prepend all of them to LD_LIBRARY_PATH so GPU
-# decode/encode AND onnxruntime's CUDA provider load inside the subprocess
-# without depending on the bootstrap's shell export.
-_ld_lib = os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep)
-_nvidia_lib_dirs = [p for p in ("/usr/lib/x86_64-linux-gnu",
-                                "/usr/local/cuda/lib64")
-                    if os.path.isdir(p) and p not in _ld_lib]
-try:
-    import site
-    for _base in site.getsitepackages():
-        _nvidia_root = os.path.join(_base, "nvidia")
-        if os.path.isdir(_nvidia_root):
-            for _sub in sorted(os.listdir(_nvidia_root)):
-                _lib = os.path.join(_nvidia_root, _sub, "lib")
-                if (os.path.isdir(_lib) and _lib not in _ld_lib
-                        and _lib not in _nvidia_lib_dirs):
-                    _nvidia_lib_dirs.append(_lib)
-except Exception:
-    pass
-if _nvidia_lib_dirs:
-    os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(
-        _nvidia_lib_dirs + ([os.environ["LD_LIBRARY_PATH"]]
-                            if os.environ.get("LD_LIBRARY_PATH") else []))
+# Kaggle's apt ffmpeg is a CPU-only build; the bootstrap installs a
+# decode-capable one to FFMPEG_DIR but only exports PATH inside its own shell.
+# Put the nvenc ffmpeg + the NVIDIA runtime libs on PATH / LD_LIBRARY_PATH for
+# THIS process (see ffmpeg_utils.prepend_gpu_env) so every ffmpeg/onnxruntime
+# call here finds them without relying on the bootstrap's shell environment.
+prepend_gpu_env()
 
 # --- Constants ---
 ASPECT_RATIO = 9 / 16

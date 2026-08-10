@@ -15,6 +15,41 @@ import subprocess
 import threading
 import tempfile
 
+
+def prepend_gpu_env():
+    """Put the decode-capable ffmpeg (FFMPEG_DIR) and the NVIDIA runtime libs
+    (system driver dirs + the pip nvidia wheels under site-packages/nvidia/*/lib)
+    on PATH / LD_LIBRARY_PATH for THIS process.
+
+    main.py calls this at startup so every ffmpeg/onnxruntime call inside the
+    job subprocess finds libcuda/libcublas/libcudnn. kaggle_smoke_test.py calls
+    it before probing so the smoke test measures the SAME environment a job
+    runs in (without it, the probe fails in the notebook process even though
+    the job works — a false negative).
+    """
+    nvenc_dir = os.environ.get("FFMPEG_DIR") or "/kaggle/working/ffmpeg-nvenc"
+    if os.path.isdir(nvenc_dir) and os.path.exists(os.path.join(nvenc_dir, "ffmpeg")):
+        os.environ["PATH"] = nvenc_dir + os.pathsep + os.environ.get("PATH", "")
+    ld = os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep)
+    dirs = [p for p in ("/usr/lib/x86_64-linux-gnu", "/usr/local/cuda/lib64")
+            if os.path.isdir(p) and p not in ld]
+    try:
+        import site
+        for base in site.getsitepackages():
+            root = os.path.join(base, "nvidia")
+            if os.path.isdir(root):
+                for sub in sorted(os.listdir(root)):
+                    lib = os.path.join(root, sub, "lib")
+                    if os.path.isdir(lib) and lib not in ld and lib not in dirs:
+                        dirs.append(lib)
+    except Exception:
+        pass
+    if dirs:
+        os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(
+            dirs + ([os.environ["LD_LIBRARY_PATH"]]
+                    if os.environ.get("LD_LIBRARY_PATH") else []))
+
+
 # Quality tiers pinning the historical libx264 settings.
 QUALITY = "quality"            # was: -preset medium -crf 18
 QUALITY_FAST = "quality_fast"  # was: -preset fast -crf 18
