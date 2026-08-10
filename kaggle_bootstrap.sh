@@ -175,21 +175,67 @@ PYVER
     # wheel first (both ship the same module).
     say "Face ID runtime (onnxruntime-gpu from requirements-gpu.txt)"
     if [ "${GPU_COUNT:-0}" -gt 0 ]; then
+        # The pip nvidia wheels (CUDA-12 libs for onnxruntime) install into
+        # site-packages/nvidia/*/lib — put them on the loader path for this
+        # shell (main.py re-adds them at job start as a belt-and-suspenders).
+        export LD_LIBRARY_PATH="$(python3 -c "
+import os, site, glob
+dirs = []
+for base in site.getsitepackages():
+    for p in glob.glob(os.path.join(base, 'nvidia', '*', 'lib')):
+        if p not in dirs:
+            dirs.append(p)
+print(':'.join(dirs))
+" 2>/dev/null):$LD_LIBRARY_PATH"
         if python3 -c "import onnxruntime; print('CUDAExecutionProvider' in onnxruntime.get_available_providers())" 2>/dev/null | grep -q True; then
             echo "    onnxruntime-gpu active: CUDAExecutionProvider available"
         else
             echo "    onnxruntime is CPU-only — uninstalling it and installing the"
             echo "    pinned onnxruntime-gpu (requirements-gpu.txt) for GPU face spine"
             pip uninstall -y onnxruntime 2>&1 | tail -1
-            # No constraints file here: /tmp/constraints-kaggle.txt is never
-            # created by this script (a dead reference from an earlier draft),
-            # and onnxruntime-gpu's deps don't need the Kaggle numpy/opencv
-            # guard anyway.
             if pip install -q -r requirements-gpu.txt 2>&1 | tail -3; then
                 if python3 -c "import onnxruntime; print('CUDAExecutionProvider' in onnxruntime.get_available_providers())" 2>/dev/null | grep -q True; then
                     echo "    onnxruntime-gpu installed: CUDAExecutionProvider available — face spine on GPU"
                 else
-                    echo "    onnxruntime-gpu installed but CUDA provider unavailable (CUDA/cuDNN mismatch) — face spine stays CPU"
+                    echo "    CUDAExecutionProvider listed but the provider's libs must"
+                    echo "    actually load — running the real load test:"
+                    if python3 - <<'PY'
+import ctypes
+missing = []
+for lib in ("libcublas.so.12", "libcublasLt.so.12", "libcudart.so.12",
+            "libcurand.so.10", "libcudnn.so.9"):
+    try:
+        ctypes.CDLL(lib)
+    except OSError:
+        missing.append(lib)
+print("    missing:", missing or "none — CUDA 12 libs load")
+raise SystemExit(1 if missing else 0)
+PY
+                    then
+                        echo "    CUDA 12 libs load — face spine on GPU"
+                    else
+                        echo "    missing CUDA 12 libs — installing the nvidia cu12 wheels"
+                        pip install -q "nvidia-cublas-cu12<13" "nvidia-cudnn-cu12>=9,<10" \
+                            "nvidia-cuda-runtime-cu12<13" "nvidia-curand-cu12<13" 2>&1 | tail -3
+                        export LD_LIBRARY_PATH="$(python3 -c "
+import os, site, glob
+dirs = []
+for base in site.getsitepackages():
+    for p in glob.glob(os.path.join(base, 'nvidia', '*', 'lib')):
+        if p not in dirs:
+            dirs.append(p)
+print(':'.join(dirs))
+" 2>/dev/null):$LD_LIBRARY_PATH"
+                        if python3 -c "
+import ctypes
+for lib in ('libcublas.so.12','libcublasLt.so.12','libcudart.so.12','libcudnn.so.9'):
+    ctypes.CDLL(lib)
+" 2>/dev/null; then
+                            echo "    nvidia cu12 wheels installed — CUDA 12 libs load — face spine on GPU"
+                        else
+                            echo "    still missing CUDA libs — face spine stays CPU (check CUDA version)"
+                        fi
+                    fi
                 fi
             else
                 echo "    onnxruntime-gpu install FAILED — reinstalling CPU onnxruntime so face spine still works"

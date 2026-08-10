@@ -78,13 +78,27 @@ if os.path.isdir(_nvenc_dir) and os.path.exists(os.path.join(_nvenc_dir, "ffmpeg
 
 # The decode-capable ffmpeg (and Kaggle's own) dlopen the NVIDIA driver at
 # runtime — the loader must find libcuda.so.1. Kaggle keeps driver libs in
-# /usr/lib/x86_64-linux-gnu and /usr/local/cuda/lib64; prepend both to
-# LD_LIBRARY_PATH so GPU decode/encode don't die on "cannot open shared
-# object file" inside the subprocess.
+# /usr/lib/x86_64-linux-gnu and /usr/local/cuda/lib64. The pip nvidia wheels
+# (onnxruntime-gpu's CUDA-12 libs: libcublasLt.so.12, libcudnn.so.9) land in
+# site-packages/nvidia/*/lib. Prepend all of them to LD_LIBRARY_PATH so GPU
+# decode/encode AND onnxruntime's CUDA provider load inside the subprocess
+# without depending on the bootstrap's shell export.
 _ld_lib = os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep)
 _nvidia_lib_dirs = [p for p in ("/usr/lib/x86_64-linux-gnu",
                                 "/usr/local/cuda/lib64")
                     if os.path.isdir(p) and p not in _ld_lib]
+try:
+    import site
+    for _base in site.getsitepackages():
+        _nvidia_root = os.path.join(_base, "nvidia")
+        if os.path.isdir(_nvidia_root):
+            for _sub in sorted(os.listdir(_nvidia_root)):
+                _lib = os.path.join(_nvidia_root, _sub, "lib")
+                if (os.path.isdir(_lib) and _lib not in _ld_lib
+                        and _lib not in _nvidia_lib_dirs):
+                    _nvidia_lib_dirs.append(_lib)
+except Exception:
+    pass
 if _nvidia_lib_dirs:
     os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(
         _nvidia_lib_dirs + ([os.environ["LD_LIBRARY_PATH"]]
@@ -298,20 +312,23 @@ def _probe_video_specs(path):
     duration = (frames / fps) if fps and frames > 0 else 0.0
     bitrate_mbps = round(size_mb * 8 / duration, 2) if duration else 0.0
     codec = ""
+    pix_fmt = ""
     try:
         _probe = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "v:0",
-             "-show_entries", "stream=codec_name",
+             "-show_entries", "stream=codec_name,pix_fmt",
              "-of", "csv=p=0", path],
             capture_output=True, text=True, timeout=20)
         if _probe.returncode == 0:
-            codec = _probe.stdout.strip()
+            parts = _probe.stdout.strip().split(",")
+            codec = parts[0] if parts else ""
+            pix_fmt = parts[1] if len(parts) > 1 else ""
     except Exception:
         pass
     return {
         "width": w, "height": h, "fps": round(fps, 2),
         "duration_s": round(duration, 2), "size_mb": size_mb,
-        "bitrate_mbps": bitrate_mbps, "codec": codec,
+        "bitrate_mbps": bitrate_mbps, "codec": codec, "pix_fmt": pix_fmt,
     }
 
 
@@ -511,35 +528,37 @@ def download_youtube_video(url, output_dir=".", require_hd=False):
             return ('bestvideo[height<=720]+bestaudio/'
                     'best[height<=720][ext=mp4]/best[height<=720]/best')
         # OPTION B default (owner choice, 9-aug-2026): cap the source at
-        # SOURCE_MAX_HEIGHT (1440) and prefer codecs the T4's NVDEC can
-        # actually decode on the GPU — VP9 first (YouTube serves VP9 up to
-        # 1440p), then H.264 (usually 1080p), then any non-AV1 codec. AV1 is
-        # EXCLUDED everywhere except the absolute final resort: Turing has no
-        # AV1 hardware decoder, so an AV1 download silently falls back to CPU
-        # decode in ffmpeg (confirmed in the Ep_115 run — GPU decode hard-
-        # failed, render software-decoded).
+        # SOURCE_MAX_HEIGHT (1440) and ONLY pick codecs the T4's NVDEC can
+        # decode on the GPU — 8-bit VP9 (vcodec^=vp09.00.10 — YouTube tags
+        # profile 0 as vp09.00.10.xx), H.264 (avc1), then H.265 (h265/hevc).
+        # 10-bit VP9 (vp09.00.40, profile 2) and AV1 are EXCLUDED: Turing has
+        # no hardware decoder for either, so ffmpeg silently software-decodes
+        # them — the "GPU decode failed / render on CPU" failure from the
+        # 16:53 run (the 1440p stream was VP9 10-bit).
         # SOURCE_MAX_HEIGHT=0 restores no-cap quality-first; SOURCE_PREFER_
         # H264=1 flips the preference to H.264 before VP9.
         _max_h = (os.environ.get("SOURCE_MAX_HEIGHT") or "1440").strip() or "1440"
         if _max_h in ("0", "unlimited", "none"):
-            return ('bestvideo[vcodec!=av01][height>=1080]+bestaudio/'
-                    'bestvideo[vcodec!=av01][height>=720]+bestaudio/'
-                    'bestvideo[vcodec!=av01]+bestaudio/'
+            return ('bestvideo[vcodec^=vp09.00.10][height>=1080]+bestaudio/'
+                    'bestvideo[vcodec^=avc1][height>=1080]+bestaudio/'
+                    'bestvideo[vcodec^=vp09.00.10]+bestaudio/'
+                    'bestvideo[vcodec^=avc1]+bestaudio/'
+                    'bestvideo[vcodec^=h265]+bestaudio/'
+                    'bestvideo[vcodec^=hevc]+bestaudio/'
+                    'bestvideo[vcodec!=av01][vcodec!=vp09.00.40]+bestaudio/'
                     'best[vcodec!=av01][ext=mp4]/best[vcodec!=av01]')
         if os.environ.get("SOURCE_PREFER_H264") == "1":
             pref = (f'bestvideo[height<={_max_h}][vcodec^=avc1]+bestaudio/'
-                    f'bestvideo[height<={_max_h}][vcodec^=vp09]+bestaudio/')
+                    f'bestvideo[height<={_max_h}][vcodec^=vp09.00.10]+bestaudio/')
         else:
-            pref = (f'bestvideo[height<={_max_h}][vcodec^=vp09]+bestaudio/'
+            pref = (f'bestvideo[height<={_max_h}][vcodec^=vp09.00.10]+bestaudio/'
                     f'bestvideo[height<={_max_h}][vcodec^=avc1]+bestaudio/')
         return (pref +
-                f'bestvideo[height<={_max_h}][vcodec!=av01]+bestaudio/'
-                'bestvideo[vcodec!=av01]+bestaudio/'
+                f'bestvideo[height<={_max_h}][vcodec^=h265]+bestaudio/'
+                f'bestvideo[height<={_max_h}][vcodec^=hevc]+bestaudio/'
+                f'bestvideo[height<={_max_h}][vcodec!=av01][vcodec!=vp09.00.40]+bestaudio/'
+                'bestvideo[vcodec!=av01][vcodec!=vp09.00.40]+bestaudio/'
                 'best[vcodec!=av01][ext=mp4]/best[vcodec!=av01]')
-        return ('bestvideo[height>=1080]+bestaudio/'
-                'bestvideo[height>=720]+bestaudio/'
-                'bestvideo+bestaudio/'
-                'best[ext=mp4]/best')
     fallback_fmt = 'bestvideo+bestaudio/best'
 
     def _base_opts(extractor_args, proxy, use_cookies=True):
@@ -657,7 +676,8 @@ def download_youtube_video(url, output_dir=".", require_hd=False):
                     print(f"📐 Source specs ({label}): {_specs['width']}x"
                           f"{_specs['height']} @ {_specs['fps']}fps · "
                           f"{_specs['bitrate_mbps']} Mbps · "
-                          f"codec {_specs.get('codec') or '?'} · "
+                          f"codec {_specs.get('codec') or '?'} "
+                          f"({_specs.get('pix_fmt') or '?'}) · "
                           f"{_specs['size_mb']} MiB")
                     _reason = _download_quality_floor(_specs)
                     if _reason:
@@ -741,6 +761,7 @@ Technical Details: {str(last_err)}
         print(f"📐 Source specs (final): {source_specs['width']}x{source_specs['height']} "
               f"@ {source_specs['fps']}fps · {source_specs['bitrate_mbps']} Mbps · "
               f"codec {source_specs.get('codec') or '?'} "
+              f"({source_specs.get('pix_fmt') or '?'}) "
               f"· {source_specs['size_mb']} MiB")
         reason = _enforce_hd_gate(source_specs, require_hd=require_hd)
         if reason:

@@ -4,4 +4,18 @@
 # path. Pinned: insightface (face spine) runs on this exact runtime, so a
 # silent version drift is what the "stuck in Reframe engine v3 with GPU at 0"
 # class of bugs looks like from the inside.
-onnxruntime-gpu==1.28.0
+#
+# onnxruntime-gpu MUST be a CUDA-12 build: 1.22.0/1.23.0 link
+# libcublasLt.so.12 / libcudart.so.12 / libcudnn.so.9 — exactly what
+# Kaggle's system CUDA 12 provides. 1.28.0 links CUDA 13 libs
+# (libcublas.so.13) that Kaggle does NOT have, so the CUDA provider fails to
+# load and face spine silently runs on CPU ("Failed to load library
+# libonnxruntime_providers_cuda.so ... libcublasLt.so.13: cannot open shared
+# object file" — confirmed in the 16:53 run). The nvidia-* cu12 wheels ship
+# the same libs into site-packages/nvidia/*/lib, which main.py adds to
+# LD_LIBRARY_PATH at job start, so cuDNN 9 is guaranteed present.
+onnxruntime-gpu==1.22.0
+nvidia-cublas-cu12<13
+nvidia-cudnn-cu12>=9,<10
+nvidia-cuda-runtime-cu12<13
+nvidia-curand-cu12<13
