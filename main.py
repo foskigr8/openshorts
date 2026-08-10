@@ -674,16 +674,43 @@ def download_youtube_video(url, output_dir=".", require_hd=False):
             except Exception as e:
                 last_err = e
                 print(f"⚠️  Download attempt '{label}' failed: {str(e)[:200]}")
-                retryable = '403' in str(e) or 'Forbidden' in str(e)
+                # 403s and YouTube's bot wall ("Sign in to confirm you're not
+                # a bot") are often transient IP-level flags — the earlier
+                # ladder pass may have succeeded on the same video minutes
+                # ago. Retry them once with a short backoff before moving on.
+                _msg = str(e)
+                retryable = (any(t in _msg for t in (
+                    '403', 'Forbidden', 'Sign in to confirm', 'not a bot',
+                    'Sign in', 'confirm you'))
+                    or 'bot' in _msg.lower())
                 if not retryable or retry == 1:
                     break
-                time.sleep(3)
+                time.sleep(8 if '403' not in _msg else 3)
         if sanitized_title is not None:
             break
 
     if sanitized_title is None:
         import sys
-        error_msg = f"""
+        _wall = ('Sign in to confirm' in str(last_err) or 'bot' in str(last_err).lower())
+        if _wall:
+            error_msg = f"""
+❌ ================================================================= ❌
+❌ FATAL ERROR: YOUTUBE DOWNLOAD FAILED — BOT WALL
+❌ ================================================================= ❌
+YouTube is asking Kaggle's IP to "sign in to confirm you're not a bot".
+This is INTERMITTENT (the same video downloaded fine minutes ago) — simply
+re-run the job and it often passes. If it keeps happening, the durable fix
+is cookies:
+  1. Install the "Get cookies.txt LOCALLY" browser extension (Chrome/Edge/
+     Firefox) and export cookies for youtube.com as a Netscape-format file.
+  2. Paste the file contents as a Kaggle Secret named YOUTUBE_COOKIES
+     (Add-ons → Secrets, tick the checkbox) and re-run Cells 1-3 once.
+  3. The pipeline writes it to cookies.txt automatically on the next job.
+Manual path: download the video and use the 'Upload Video' tab.
+Technical Details: {str(last_err)}
+"""
+        else:
+            error_msg = f"""
 ❌ ================================================================= ❌
 ❌ FATAL ERROR: YOUTUBE DOWNLOAD FAILED (all strategies)
 ❌ ================================================================= ❌
