@@ -85,6 +85,46 @@ def _nvenc():
     return out.isdigit() and int(out) > 0, f"{out} nvenc encoders"
 
 
+def _gpu_decode():
+    """REAL ffmpeg GPU-decode probe (NVDEC + CUDA filters) — the
+    'GPU or nothing' gate. REQUIRE_GPU_DECODE=1 refuses to run without it."""
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "import ffmpeg_utils;print(ffmpeg_utils.gpu_render_available())"],
+        capture_output=True, text=True, cwd=REPO_DIR)
+    ok = (out.stdout or "").strip() == "True"
+    detail = ("NVDEC + CUDA filters verified — GPU decode active" if ok
+              else ((out.stderr or "").strip()[-200:] or
+                    "GPU decode unavailable — REQUIRE_GPU_DECODE=1 will "
+                    "refuse to run (re-run Cell 3 and check the nvenc line)"))
+    return ok, detail
+
+
+def _onnxruntime_gpu():
+    """Face spine (insightface) runs on onnxruntime. Kaggle ships the CPU
+    build, which makes the reframe stage run on CPU while the GPUs idle —
+    the 'stuck in Reframe engine v3' failure. CUDAExecutionProvider must be
+    active when torch sees CUDA."""
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "import onnxruntime, torch;"
+         "print(onnxruntime.__version__,"
+         " 'CUDAExecutionProvider' in onnxruntime.get_available_providers(),"
+         " torch.cuda.is_available())"],
+        capture_output=True, text=True, cwd=REPO_DIR)
+    parts = (out.stdout or "").strip().split()
+    if len(parts) != 3:
+        return False, (out.stderr or out.stdout).strip()[-200:]
+    ver, cuda_ep, has_cuda = parts[0], parts[1] == "True", parts[2] == "True"
+    if cuda_ep:
+        return True, f"{ver} — CUDAExecutionProvider active (face spine on GPU)"
+    if has_cuda:
+        return False, (f"{ver} — CPU-only onnxruntime while torch has CUDA: "
+                       "face spine runs on CPU (re-run Cell 3 and check the "
+                       "onnxruntime-gpu line)")
+    return True, f"{ver} — CPU-only host, CPU runtime expected"
+
+
 def _transcription():
     """AssemblyAI (API + diarization) vs local whisper.
 
@@ -314,6 +354,8 @@ CHECKS = [
     ("CUDA in app env", _cuda),
     ("GPU sharding", _gpu_sharding),
     ("NVENC", _nvenc),
+    ("GPU decode (NVDEC)", _gpu_decode),
+    ("Face spine runtime (onnxruntime)", _onnxruntime_gpu),
     ("Transcription backend", _transcription),
     ("Stage 3 clip selection", _stage3),
     ("Server-side keys", _server_keys),
