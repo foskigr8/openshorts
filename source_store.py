@@ -92,8 +92,9 @@ def lookup(url):
     # AV1 sources are never reusable: Turing's NVDEC has no AV1 hardware
     # decoder, so an AV1 file would silently force CPU decode everywhere.
     # Treat them as a cache miss so the fixed download policy re-fetches a
-    # VP9/H.264 source.
-    if str(meta.get("codec") or "").startswith("av01"):
+    # VP9/H.264 source. ffprobe reports codec_name "av1"; yt-dlp's format tag
+    # is "av01" — match both.
+    if str(meta.get("codec") or "").lower().startswith(("av1", "av01")):
         return None
     return {
         "video_path": video_path,

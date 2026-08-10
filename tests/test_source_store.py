@@ -69,6 +69,20 @@ class TestCacheRoundtrip:
         assert hit["transcript"] == transcript
         assert hit["context_blob"] == context
 
+    def test_av1_cached_source_is_treated_as_a_miss(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SOURCE_CACHE_DIR", str(tmp_path))
+        src = tmp_path / "Ep1.mp4"
+        src.write_bytes(b"x")
+        source_store.save_source("https://youtu.be/abc123", str(src), "Ep1")
+        # ffprobe reports codec_name "av1" — must be rejected like "av01".
+        d = tmp_path / "abc123"
+        meta_path = d / "meta.json"
+        import json
+        meta = json.loads(meta_path.read_text())
+        meta["codec"] = "av1"
+        meta_path.write_text(json.dumps(meta))
+        assert source_store.lookup("https://youtu.be/abc123") is None
+
     def test_save_without_source_is_noop(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SOURCE_CACHE_DIR", str(tmp_path))
         source_store.save_transcript("https://youtu.be/abc123", {"segments": []})
