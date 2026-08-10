@@ -529,34 +529,33 @@ def download_youtube_video(url, output_dir=".", require_hd=False):
                     'best[height<=720][ext=mp4]/best[height<=720]/best')
         # OPTION B default (owner choice, 9-aug-2026): cap the source at
         # SOURCE_MAX_HEIGHT (1440) and ONLY pick codecs the T4's NVDEC can
-        # decode on the GPU — 8-bit VP9 (vcodec^=vp09.00.10 — YouTube tags
-        # profile 0 as vp09.00.10.xx), H.264 (avc1), then H.265 (h265/hevc).
+        # decode on the GPU. H.264 (avc1) comes FIRST: YouTube serves H.264
+        # up to 1080p and it is always 8-bit, so it is both the highest
+        # GPU-decodable quality and guaranteed to decode on the GPU. Then
+        # 8-bit VP9 (vcodec^=vp09.00.10 — profile 0), then H.265 (h265/hevc).
         # 10-bit VP9 (vp09.00.40, profile 2) and AV1 are EXCLUDED: Turing has
         # no hardware decoder for either, so ffmpeg silently software-decodes
-        # them — the "GPU decode failed / render on CPU" failure from the
-        # 16:53 run (the 1440p stream was VP9 10-bit).
-        # SOURCE_MAX_HEIGHT=0 restores no-cap quality-first; SOURCE_PREFER_
-        # H264=1 flips the preference to H.264 before VP9.
+        # them (the "GPU decode failed / render on CPU" failure from the
+        # 16:53 run — the 1440p stream was VP9 10-bit; and the 22:50 run —
+        # this video's only GPU-decodable streams were 144p/360p).
+        # SOURCE_MAX_HEIGHT=0 restores no-cap quality-first.
         _max_h = (os.environ.get("SOURCE_MAX_HEIGHT") or "1440").strip() or "1440"
         if _max_h in ("0", "unlimited", "none"):
-            return ('bestvideo[vcodec^=vp09.00.10][height>=1080]+bestaudio/'
-                    'bestvideo[vcodec^=avc1][height>=1080]+bestaudio/'
-                    'bestvideo[vcodec^=vp09.00.10]+bestaudio/'
+            return ('bestvideo[vcodec^=avc1][height>=1080]+bestaudio/'
+                    'bestvideo[vcodec^=avc1][height>=720]+bestaudio/'
                     'bestvideo[vcodec^=avc1]+bestaudio/'
+                    'bestvideo[vcodec^=vp09.00.10][height>=1080]+bestaudio/'
+                    'bestvideo[vcodec^=vp09.00.10]+bestaudio/'
                     'bestvideo[vcodec^=h265]+bestaudio/'
                     'bestvideo[vcodec^=hevc]+bestaudio/'
                     'bestvideo[vcodec!=av01][vcodec!=vp09.00.40]+bestaudio/'
                     'best[vcodec!=av01][ext=mp4]/best[vcodec!=av01]')
-        if os.environ.get("SOURCE_PREFER_H264") == "1":
-            pref = (f'bestvideo[height<={_max_h}][vcodec^=avc1]+bestaudio/'
-                    f'bestvideo[height<={_max_h}][vcodec^=vp09.00.10]+bestaudio/')
-        else:
-            pref = (f'bestvideo[height<={_max_h}][vcodec^=vp09.00.10]+bestaudio/'
-                    f'bestvideo[height<={_max_h}][vcodec^=avc1]+bestaudio/')
-        return (pref +
+        return (f'bestvideo[height<={_max_h}][vcodec^=avc1]+bestaudio/'
+                f'bestvideo[height<={_max_h}][vcodec^=vp09.00.10]+bestaudio/'
                 f'bestvideo[height<={_max_h}][vcodec^=h265]+bestaudio/'
                 f'bestvideo[height<={_max_h}][vcodec^=hevc]+bestaudio/'
                 f'bestvideo[height<={_max_h}][vcodec!=av01][vcodec!=vp09.00.40]+bestaudio/'
+                'bestvideo[vcodec^=avc1]+bestaudio/'
                 'bestvideo[vcodec!=av01][vcodec!=vp09.00.40]+bestaudio/'
                 'best[vcodec!=av01][ext=mp4]/best[vcodec!=av01]')
     fallback_fmt = 'bestvideo+bestaudio/best'

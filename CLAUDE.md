@@ -133,8 +133,11 @@ GPU pieces that were silently wrong and are now deterministic:
 - `SOURCE_CACHE_DIR` — source store location (default `sources/` next to the
   repo). Point at a mounted Kaggle Dataset for cross-session persistence.
 - `SOURCE_MAX_HEIGHT` — download height cap, default `1440` (Option B);
-  `0` = no cap. Prefers VP9 → H.264 → any non-AV1 within the cap.
-- `SOURCE_PREFER_H264=1` — flip the codec preference to H.264 first.
+  `0` = no cap. **Only GPU-decodable codecs are ever picked**: H.264 first
+  (up to 1080p, always 8-bit), then 8-bit VP9, then H.265. 10-bit VP9 and
+  AV1 are excluded (Turing's NVDEC can't decode either). A video whose HD
+  tiers are 10-bit VP9/AV1 will therefore cap at its H.264 ceiling (the
+  HD gate then fails loudly if that's below 720p).
 - `REQUIRE_GPU_DECODE` — `1` (default; fail if GPU decode unavailable) |
   `warn` (loud warning, run CPU — emergencies only) | `0`.
 - `SCENE_GPU_ONLY` — `1` (default; skip scene detection if GPU can't decode
