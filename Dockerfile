@@ -27,7 +27,7 @@ ARG GPU=0
 RUN if [ "$GPU" = "1" ]; then \
       pip install --no-cache-dir \
         "nvidia-cublas-cu12<13" "nvidia-cudnn-cu12>=9,<10" \
-        onnx-asr onnxruntime-gpu; \
+        onnx-asr "onnxruntime-gpu==1.28.0"; \
     fi
 
 # Final stage

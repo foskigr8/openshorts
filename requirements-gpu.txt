@@ -1,0 +1,7 @@
+# GPU-only dependencies for OpenShorts — installed by kaggle_bootstrap.sh on
+# GPU hosts AFTER the base requirements.txt, with any conflicting CPU wheels
+# (onnxruntime) uninstalled first so there is exactly one runtime on the
+# path. Pinned: insightface (face spine) runs on this exact runtime, so a
+# silent version drift is what the "stuck in Reframe engine v3 with GPU at 0"
+# class of bugs looks like from the inside.
+onnxruntime-gpu==1.28.0

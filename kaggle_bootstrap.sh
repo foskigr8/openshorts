@@ -173,30 +173,28 @@ PYVER
     # frame on the CPU while the GPUs idle ("stuck in Reframe engine v3 with
     # GPU at 0"). On a GPU host, force the CUDA build and uninstall the CPU
     # wheel first (both ship the same module).
-    say "Face ID runtime (onnxruntime)"
+    say "Face ID runtime (onnxruntime-gpu from requirements-gpu.txt)"
     if [ "${GPU_COUNT:-0}" -gt 0 ]; then
         if python3 -c "import onnxruntime; print('CUDAExecutionProvider' in onnxruntime.get_available_providers())" 2>/dev/null | grep -q True; then
             echo "    onnxruntime-gpu active: CUDAExecutionProvider available"
         else
-            echo "    onnxruntime is CPU-only — installing onnxruntime-gpu for GPU face spine"
+            echo "    onnxruntime is CPU-only — uninstalling it and installing the"
+            echo "    pinned onnxruntime-gpu (requirements-gpu.txt) for GPU face spine"
             pip uninstall -y onnxruntime 2>&1 | tail -1
-            if pip install -q -c /tmp/constraints-kaggle.txt onnxruntime-gpu 2>&1 | tail -3; then
+            if pip install -q -c /tmp/constraints-kaggle.txt -r requirements-gpu.txt 2>&1 | tail -3; then
                 if python3 -c "import onnxruntime; print('CUDAExecutionProvider' in onnxruntime.get_available_providers())" 2>/dev/null | grep -q True; then
                     echo "    onnxruntime-gpu installed: CUDAExecutionProvider available — face spine on GPU"
                 else
                     echo "    onnxruntime-gpu installed but CUDA provider unavailable (CUDA/cuDNN mismatch) — face spine stays CPU"
                 fi
             else
-                echo "    onnxruntime-gpu install reported errors — face spine stays CPU"
+                echo "    onnxruntime-gpu install failed (see requirements-gpu.txt) — face spine stays CPU"
             fi
         fi
     else
-        if python3 -c "import onnxruntime" >/dev/null 2>&1; then
-            echo "    onnxruntime already present ($(python3 -c 'import onnxruntime;print(onnxruntime.__version__)' 2>/dev/null))"
-        else
-            pip install -q -c /tmp/constraints-kaggle.txt onnxruntime-gpu 2>&1 | tail -3 || \
-                echo "    onnxruntime-gpu install reported errors — face ID will stay off"
-        fi
+        # CPU-only host: plain onnxruntime (not the 2GB GPU wheel).
+        pip install -q -c /tmp/constraints-kaggle.txt "onnxruntime==1.28.0" 2>&1 | tail -3 || \
+            echo "    onnxruntime install reported errors — face ID will stay off"
     fi
     if python3 -c "import insightface" >/dev/null 2>&1; then
         echo "    insightface imports"
@@ -462,6 +460,11 @@ if [ "$GPU_COUNT" -gt 0 ]; then
     export WHISPER_DEVICE="${WHISPER_DEVICE:-cuda}"
     export USE_ASD="${USE_ASD:-1}"
     echo "    encoder=nvenc  whisper_device=cuda  gpus=$GPU_COUNT"
+    if python3 -c "import onnxruntime; print('CUDAExecutionProvider' in onnxruntime.get_available_providers())" 2>/dev/null | grep -q True; then
+        echo "    onnxruntime: CUDAExecutionProvider ACTIVE (face spine on GPU)"
+    else
+        echo "    onnxruntime: CUDAExecutionProvider MISSING (face spine would run on CPU!)"
+    fi
 fi
 export OUTPUT_DIR="${OUTPUT_DIR:-$PWD/output}"
 mkdir -p "$OUTPUT_DIR" uploads
