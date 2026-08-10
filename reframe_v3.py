@@ -837,6 +837,8 @@ def render(input_video, final_output_video, aspect_ratio,
     import shot_planner
 
     print("   🚀 Reframe engine v3 (planned static shots)")
+    import time as _time
+    _t0 = _time.time()
     duration, fps, frame_w, frame_h = _duration_and_size(input_video)
     effective_end = clip_end if clip_end is not None else clip_start + duration
     # Thread the worker's assigned GPU (gpu_affinity.current_device()) into
@@ -844,6 +846,7 @@ def render(input_video, final_output_video, aspect_ratio,
     # None and every stage keeps its existing default behaviour.
     worker_device = gpu_affinity.current_device()
     tracks = face_spine.build_face_spine(input_video, device=worker_device)
+    print(f"   ↳ face spine: {_time.time() - _t0:.0f}s ({len(tracks)} track(s))")
     if not tracks:
         raise RuntimeError("Reframe v3 found no face tracks; refusing to silently fall back")
 
@@ -854,6 +857,7 @@ def render(input_video, final_output_video, aspect_ratio,
             asd_boxes = asd_worker.score_clip(
                 input_video, face_spine.detect_faces_per_frame,
                 device=worker_device).get("per_second_box") or []
+            print(f"   ↳ LR-ASD: {_time.time() - _t0:.0f}s")
     except Exception as exc:
         print(f"   ⚠️ LR-ASD unavailable for v3 ({type(exc).__name__}: {exc})")
     segments = (transcript or {}).get("segments", [])
@@ -872,7 +876,9 @@ def render(input_video, final_output_video, aspect_ratio,
     planned = shot_planner.plan_shots(active, tracks, total_duration=duration)
     planned = shot_planner.insert_reaction_shots(
         planned, _directive_dicts(focus_directives), tracks, frame_w)
+    print(f"   ↳ shot planning: {_time.time() - _t0:.0f}s")
     composed = compose_shots(planned, tracks, active, input_video, frame_w, frame_h, aspect_ratio)
+    print(f"   ↳ saliency + composition: {_time.time() - _t0:.0f}s")
     validate_composition(composed, frame_w, frame_h, aspect_ratio)
 
     # Path instrumentation (same contract as the old v2 engine): when
@@ -899,6 +905,7 @@ def render(input_video, final_output_video, aspect_ratio,
             print(f"   ⚠️ REFRAME_DUMP_PATH failed ({exc}) — continuing")
 
     out_w, out_h = delivery_size(frame_w, frame_h, aspect_ratio)
+    print(f"   ↳ encoding to {out_w}x{out_h} (GPU NVENC)...")
     if any(shot.layout == LAYOUT_SPLIT for shot in composed):
         if ass_filter or captioned_output:
             raise RuntimeError("v3 split-screen captions are not implemented; refusing to misplace captions")
