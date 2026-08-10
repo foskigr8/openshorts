@@ -286,10 +286,21 @@ def _probe_video_specs(path):
     size_mb = round(os.path.getsize(path) / (1024 ** 2), 2)
     duration = (frames / fps) if fps and frames > 0 else 0.0
     bitrate_mbps = round(size_mb * 8 / duration, 2) if duration else 0.0
+    codec = ""
+    try:
+        _probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name",
+             "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=20)
+        if _probe.returncode == 0:
+            codec = _probe.stdout.strip()
+    except Exception:
+        pass
     return {
         "width": w, "height": h, "fps": round(fps, 2),
         "duration_s": round(duration, 2), "size_mb": size_mb,
-        "bitrate_mbps": bitrate_mbps,
+        "bitrate_mbps": bitrate_mbps, "codec": codec,
     }
 
 
@@ -491,17 +502,19 @@ def download_youtube_video(url, output_dir=".", require_hd=False):
         # OPTION B default (owner choice, 9-aug-2026): cap the source at
         # SOURCE_MAX_HEIGHT (1440) and prefer codecs the T4's NVDEC can
         # actually decode on the GPU — VP9 first (YouTube serves VP9 up to
-        # 1440p), then H.264 (usually 1080p) — before falling back to any
-        # codec within the cap. AV1 is the last resort: Turing has no AV1
-        # hardware decoder, so an AV1 pick would mean CPU decode.
+        # 1440p), then H.264 (usually 1080p), then any non-AV1 codec. AV1 is
+        # EXCLUDED everywhere except the absolute final resort: Turing has no
+        # AV1 hardware decoder, so an AV1 download silently falls back to CPU
+        # decode in ffmpeg (confirmed in the Ep_115 run — GPU decode hard-
+        # failed, render software-decoded).
         # SOURCE_MAX_HEIGHT=0 restores no-cap quality-first; SOURCE_PREFER_
         # H264=1 flips the preference to H.264 before VP9.
         _max_h = (os.environ.get("SOURCE_MAX_HEIGHT") or "1440").strip() or "1440"
         if _max_h in ("0", "unlimited", "none"):
-            return ('bestvideo[height>=1080]+bestaudio/'
-                    'bestvideo[height>=720]+bestaudio/'
-                    'bestvideo+bestaudio/'
-                    'best[ext=mp4]/best')
+            return ('bestvideo[vcodec!=av01][height>=1080]+bestaudio/'
+                    'bestvideo[vcodec!=av01][height>=720]+bestaudio/'
+                    'bestvideo[vcodec!=av01]+bestaudio/'
+                    'best[vcodec!=av01][ext=mp4]/best[vcodec!=av01]')
         if os.environ.get("SOURCE_PREFER_H264") == "1":
             pref = (f'bestvideo[height<={_max_h}][vcodec^=avc1]+bestaudio/'
                     f'bestvideo[height<={_max_h}][vcodec^=vp09]+bestaudio/')
@@ -509,11 +522,9 @@ def download_youtube_video(url, output_dir=".", require_hd=False):
             pref = (f'bestvideo[height<={_max_h}][vcodec^=vp09]+bestaudio/'
                     f'bestvideo[height<={_max_h}][vcodec^=avc1]+bestaudio/')
         return (pref +
-                f'bestvideo[height<={_max_h}]+bestaudio/'
-                'bestvideo[height>=1080]+bestaudio/'
-                'bestvideo[height>=720]+bestaudio/'
-                'bestvideo+bestaudio/'
-                'best[ext=mp4]/best')
+                f'bestvideo[height<={_max_h}][vcodec!=av01]+bestaudio/'
+                'bestvideo[vcodec!=av01]+bestaudio/'
+                'best[vcodec!=av01][ext=mp4]/best[vcodec!=av01]')
         return ('bestvideo[height>=1080]+bestaudio/'
                 'bestvideo[height>=720]+bestaudio/'
                 'bestvideo+bestaudio/'
@@ -635,6 +646,7 @@ def download_youtube_video(url, output_dir=".", require_hd=False):
                     print(f"📐 Source specs ({label}): {_specs['width']}x"
                           f"{_specs['height']} @ {_specs['fps']}fps · "
                           f"{_specs['bitrate_mbps']} Mbps · "
+                          f"codec {_specs.get('codec') or '?'} · "
                           f"{_specs['size_mb']} MiB")
                     _reason = _download_quality_floor(_specs)
                     if _reason:
@@ -716,7 +728,8 @@ Technical Details: {str(last_err)}
     source_specs = _probe_video_specs(downloaded_file)
     if source_specs:
         print(f"📐 Source specs (final): {source_specs['width']}x{source_specs['height']} "
-              f"@ {source_specs['fps']}fps · {source_specs['bitrate_mbps']} Mbps "
+              f"@ {source_specs['fps']}fps · {source_specs['bitrate_mbps']} Mbps · "
+              f"codec {source_specs.get('codec') or '?'} "
               f"· {source_specs['size_mb']} MiB")
         reason = _enforce_hd_gate(source_specs, require_hd=require_hd)
         if reason:

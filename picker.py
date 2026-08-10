@@ -473,7 +473,45 @@ def _long_context_directive(long_context_count):
 
 
 def _call_gemini(api_key, prompt):
-    """One structured picker call. Returns (parsed_dict, cost_analysis)."""
+    """One structured picker call. Returns (parsed_dict, cost_analysis).
+
+    Rotates across every configured Gemini key (GEMINI_API_KEY + the
+    GEMINI_API_KEYS pool) on transient failures — the picker used to hammer
+    the single primary key and hit 429 RESOURCE_EXHAUSTED while the extra
+    keys sat unused (confirmed in the Ep_115 run: 4 extra keys configured,
+    context layer still got quota-exhausted on the primary).
+    """
+    keys = _api_keys(api_key)
+    last_exc = None
+    for i, key in enumerate(keys):
+        try:
+            return _call_with_key(key, prompt)
+        except gemini_worker.GeminiBlockedError:
+            raise  # deterministic policy block — never retry, surface the reason
+        except Exception as e:
+            last_exc = e
+            if not any(tok in str(e) for tok in _TRANSIENT_TOKENS):
+                raise
+            if i < len(keys) - 1:
+                print(f"⚠️ Gemini key {i + 1}/{len(keys)} hit a transient "
+                      f"error ({str(e)[:120]}) — rotating to the next key")
+    raise last_exc
+
+
+def _api_keys(primary):
+    """Primary key + every GEMINI_API_KEYS extra, deduplicated, in order."""
+    keys = []
+    if primary:
+        keys.append(primary)
+    for k in (os.environ.get("GEMINI_API_KEYS") or "").split(","):
+        k = k.strip()
+        if k and k not in keys:
+            keys.append(k)
+    return keys or [primary]
+
+
+def _call_with_key(api_key, prompt):
+    """One structured call against one key (per-key 3-attempt backoff)."""
     client = gemini_worker.make_client(api_key)
     model_name = _model_name()
     config = genai_types.GenerateContentConfig(

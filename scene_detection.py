@@ -145,28 +145,54 @@ def _extract_frames_small(video_path):
 
     Uses CUDA decode when the ffmpeg on PATH supports it (the nvenc build) —
     decoding a 103-min episode frame-by-frame is exactly the stage that
-    used to eat 15 CPU-minutes. When GPU decode is unavailable the owner has
-    REQUIRE_GPU_DECODE=1 in main.py, so the job fails before this runs
-    rather than silently decoding on CPU.
+    used to eat 15 CPU-minutes.
+
+    If the GPU decode command itself fails (hwdownload/pixel-format mismatch,
+    NVDEC rejecting the stream, all decode surfaces busy because five clip
+    workers are hammering both cards), retry the SAME decode on the CPU
+    before giving up (10-aug-2026). The alternative is not "CPU ffmpeg vs GPU
+    ffmpeg" — it is falling through to PySceneDetect, which walks the full
+    2560x1440 video on the CPU and took 26 minutes on a 103-min episode.
+    A 48x27 rawvideo decode is a fraction of that, so the retry is strictly
+    the cheaper failure mode, and the ffmpeg stderr is printed either way
+    (it used to go to DEVNULL, which is why the first failure was
+    undiagnosable).
     """
-    vf = f"scale={_TN2_W}:{_TN2_H}"
+    attempts = []
     decode_args = ffmpeg_utils.gpu_decode_args(output_format=True)
     if decode_args:
         # Frames arrive in CUDA memory; pull them back to system memory for
         # the tiny CPU resize + rawvideo pipe.
-        vf = "hwdownload,format=nv12," + vf
-    cmd = (["ffmpeg", "-nostdin"] + decode_args
-           + ["-i", video_path, "-vf", vf,
-              "-pix_fmt", "rgb24", "-f", "rawvideo", "-"])
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE,
-                          stderr=subprocess.DEVNULL, check=True,
-                          timeout=_SCENE_DETECT_TIMEOUT)
-    frame_bytes = _TN2_H * _TN2_W * 3
-    n = len(proc.stdout) // frame_bytes
-    if n == 0:
-        raise RuntimeError("ffmpeg produced no frames")
-    return np.frombuffer(proc.stdout[:n * frame_bytes],
-                         dtype=np.uint8).reshape(n, _TN2_H, _TN2_W, 3)
+        attempts.append(("gpu", decode_args,
+                         f"hwdownload,format=nv12,scale={_TN2_W}:{_TN2_H}"))
+    attempts.append(("cpu", [], f"scale={_TN2_W}:{_TN2_H}"))
+
+    last_err = None
+    for label, args, vf in attempts:
+        cmd = (["ffmpeg", "-nostdin"] + args
+               + ["-i", video_path, "-vf", vf,
+                  "-pix_fmt", "rgb24", "-f", "rawvideo", "-"])
+        try:
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, check=True,
+                                  timeout=_SCENE_DETECT_TIMEOUT)
+            frame_bytes = _TN2_H * _TN2_W * 3
+            n = len(proc.stdout) // frame_bytes
+            if n == 0:
+                raise RuntimeError("ffmpeg produced no frames")
+            return np.frombuffer(proc.stdout[:n * frame_bytes],
+                                 dtype=np.uint8).reshape(n, _TN2_H, _TN2_W, 3)
+        except Exception as e:
+            detail = ""
+            if isinstance(e, subprocess.CalledProcessError) and e.stderr:
+                detail = e.stderr.decode("utf-8", "replace").strip()
+                detail = " | ".join(detail.splitlines()[-3:])
+            last_err = RuntimeError(
+                f"{label} decode failed ({type(e).__name__}: {e})"
+                + (f" — ffmpeg: {detail}" if detail else ""))
+            if label != attempts[-1][0]:
+                print(f"   ⚠️ TransNetV2 {last_err} — retrying on CPU decode")
+    raise last_err
 
 
 def _detect_transnetv2(video_path):

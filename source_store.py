@@ -21,6 +21,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 
 _YT_ID_RE = re.compile(
     r"(?:youtube\.com/(?:watch\?[^#\s]*v=|shorts/|embed/|live/)|youtu\.be/)"
@@ -88,6 +89,12 @@ def lookup(url):
     video_path = os.path.join(d, filename) if filename else ""
     if not video_path or not os.path.exists(video_path):
         return None
+    # AV1 sources are never reusable: Turing's NVDEC has no AV1 hardware
+    # decoder, so an AV1 file would silently force CPU decode everywhere.
+    # Treat them as a cache miss so the fixed download policy re-fetches a
+    # VP9/H.264 source.
+    if str(meta.get("codec") or "").startswith("av01"):
+        return None
     return {
         "video_path": video_path,
         "title": str(meta.get("title") or ""),
@@ -106,12 +113,27 @@ def save_source(url, video_path, title):
     os.makedirs(d, exist_ok=True)
     filename = os.path.basename(video_path)
     _link_file(video_path, os.path.join(d, filename))
+    codec = _probe_codec(video_path)
     meta_path = os.path.join(d, "meta.json")
     tmp = meta_path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"url": url, "title": title or "", "filename": filename},
+        json.dump({"url": url, "title": title or "", "filename": filename,
+                   "codec": codec},
                   f, ensure_ascii=False)
     os.replace(tmp, meta_path)
+
+
+def _probe_codec(video_path):
+    """Best-effort video codec name (e.g. vp09/avc1/av01) via ffprobe."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name",
+             "-of", "csv=p=0", video_path],
+            capture_output=True, text=True, timeout=20)
+        return out.stdout.strip() if out.returncode == 0 else ""
+    except Exception:
+        return ""
 
 
 def save_transcript(url, transcript):
