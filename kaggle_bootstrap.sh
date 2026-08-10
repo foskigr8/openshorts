@@ -168,15 +168,35 @@ PYVER
     # Face ID needs an ONNX runtime to execute; requirements.txt deliberately
     # ships only insightface (onnxruntime-gpu is ~2GB and lives in the
     # Dockerfile's GPU block so the CPU image stays slim). Kaggle IS a GPU host,
-    # so install it here — and only if it is not already importable, because
-    # Kaggle images sometimes carry onnxruntime already and installing both the
-    # CPU and GPU wheels puts two copies of the same module on the path.
+    # so install it here. Kaggle images ship the CPU onnxruntime, which makes
+    # insightface (face spine — the first heavy substage of reframe) run every
+    # frame on the CPU while the GPUs idle ("stuck in Reframe engine v3 with
+    # GPU at 0"). On a GPU host, force the CUDA build and uninstall the CPU
+    # wheel first (both ship the same module).
     say "Face ID runtime (onnxruntime)"
-    if python3 -c "import onnxruntime" >/dev/null 2>&1; then
-        echo "    onnxruntime already present ($(python3 -c 'import onnxruntime;print(onnxruntime.__version__)' 2>/dev/null))"
+    if [ "${GPU_COUNT:-0}" -gt 0 ]; then
+        if python3 -c "import onnxruntime; print('CUDAExecutionProvider' in onnxruntime.get_available_providers())" 2>/dev/null | grep -q True; then
+            echo "    onnxruntime-gpu active: CUDAExecutionProvider available"
+        else
+            echo "    onnxruntime is CPU-only — installing onnxruntime-gpu for GPU face spine"
+            pip uninstall -y onnxruntime 2>&1 | tail -1
+            if pip install -q -c /tmp/constraints-kaggle.txt onnxruntime-gpu 2>&1 | tail -3; then
+                if python3 -c "import onnxruntime; print('CUDAExecutionProvider' in onnxruntime.get_available_providers())" 2>/dev/null | grep -q True; then
+                    echo "    onnxruntime-gpu installed: CUDAExecutionProvider available — face spine on GPU"
+                else
+                    echo "    onnxruntime-gpu installed but CUDA provider unavailable (CUDA/cuDNN mismatch) — face spine stays CPU"
+                fi
+            else
+                echo "    onnxruntime-gpu install reported errors — face spine stays CPU"
+            fi
+        fi
     else
-        pip install -q -c /tmp/constraints-kaggle.txt onnxruntime-gpu 2>&1 | tail -3 || \
-            echo "    onnxruntime-gpu install reported errors — face ID will stay off"
+        if python3 -c "import onnxruntime" >/dev/null 2>&1; then
+            echo "    onnxruntime already present ($(python3 -c 'import onnxruntime;print(onnxruntime.__version__)' 2>/dev/null))"
+        else
+            pip install -q -c /tmp/constraints-kaggle.txt onnxruntime-gpu 2>&1 | tail -3 || \
+                echo "    onnxruntime-gpu install reported errors — face ID will stay off"
+        fi
     fi
     if python3 -c "import insightface" >/dev/null 2>&1; then
         echo "    insightface imports"

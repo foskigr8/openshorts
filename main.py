@@ -212,6 +212,17 @@ def _print_pipeline_diagnostics():
     print(f"   GPU encode (NVENC h264): "
           f"{'YES' if encode_ok else 'NO'}", flush=True)
     print(f"   torch CUDA: {cuda} ({gpus} device(s))", flush=True)
+    try:
+        import onnxruntime
+        _providers = onnxruntime.get_available_providers()
+        print(f"   onnxruntime: {onnxruntime.__version__} "
+              f"providers={_providers}", flush=True)
+        if cuda and "CUDAExecutionProvider" not in _providers:
+            print("⚠️ onnxruntime is CPU-only — insightface (face spine) will "
+                  "run on CPU. Install onnxruntime-gpu via kaggle_bootstrap.sh "
+                  "so the reframe stage uses the GPU.", flush=True)
+    except Exception:
+        pass
     if cuda and not decode_ok:
         if require == "1":
             # GPU or nothing (owner's explicit contract): a decode-capable
