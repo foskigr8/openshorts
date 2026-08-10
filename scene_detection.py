@@ -175,9 +175,13 @@ def _extract_frames_small(video_path):
     decode_args = ffmpeg_utils.gpu_decode_args(output_format=True)
     if decode_args:
         # Frames arrive in CUDA memory; pull them back to system memory for
-        # the tiny CPU resize + rawvideo pipe.
+        # the tiny CPU resize + rawvideo pipe. hwdownload WITHOUT a format pin:
+        # pinning nv12 broke VP9 streams whose decoded sw format is p010
+        # (10-bit VP9) — 'hwdownload,format=nv12' then fails with "Invalid
+        # output format nv12 for hwframe download" and scene detection
+        # degraded even though the GPU can decode the file.
         attempts.append(("gpu", decode_args,
-                         f"hwdownload,format=nv12,scale={_TN2_W}:{_TN2_H}"))
+                         f"hwdownload,scale={_TN2_W}:{_TN2_H}"))
     # SCENE_GPU_ONLY=1 (default): never decode on the CPU — if the GPU cannot
     # handle this file, the failure propagates and detect_scenes skips the
     # stage entirely. "0" keeps the cheap 48x27 CPU retry as a safety net.
@@ -209,6 +213,19 @@ def _extract_frames_small(video_path):
             if isinstance(e, subprocess.CalledProcessError) and e.stderr:
                 detail = e.stderr.decode("utf-8", "replace").strip()
                 detail = " | ".join(detail.splitlines()[-3:])
+            if label == "gpu":
+                try:
+                    _probe = subprocess.run(
+                        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                         "-show_entries", "stream=codec_name,profile,pix_fmt",
+                         "-of", "csv=p=0", video_path],
+                        capture_output=True, text=True, timeout=20)
+                    _stream = (_probe.stdout.strip()
+                               if _probe.returncode == 0 else "")
+                    if _stream:
+                        detail = f"{detail} | source: {_stream}".strip(" |")
+                except Exception:
+                    pass
             last_err = RuntimeError(
                 f"{label} decode failed ({type(e).__name__}: {e})"
                 + (f" — ffmpeg: {detail}" if detail else ""))
