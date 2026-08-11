@@ -1370,7 +1370,14 @@ def _build_jump_cut_source(source_video_path, keep_spans, workdir):
                '-ss', f'{s:.3f}', '-to', f'{e:.3f}', '-i', source_video_path,
                *source_logo_crop_vf_args(),
                *video_encode_args(QUALITY_FAST, device=gpu_affinity.current_device()), *audio_encode_args(), seg_path]
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=300)
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.PIPE, timeout=300)
+        except subprocess.CalledProcessError as exc:
+            _err = (exc.stderr or b"").decode("utf-8", "replace").strip()
+            raise RuntimeError(
+                f"jump-cut segment extract failed [{s:.1f}s-{e:.1f}s]"
+                + (f": {_err[-400:]}" if _err else "")) from exc
         segment_paths.append(seg_path)
 
     list_path = os.path.join(workdir, 'jump_cut_concat.txt')
@@ -2175,7 +2182,13 @@ if __name__ == '__main__':
                             *audio_encode_args(),
                             clip_temp_path
                         ]
-                        subprocess.run(cut_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                        _cut = subprocess.run(cut_command, stdout=subprocess.DEVNULL,
+                                             stderr=subprocess.PIPE)
+                        if _cut.returncode != 0:
+                            _err = (_cut.stderr or b"").decode("utf-8", "replace").strip()
+                            raise RuntimeError(
+                                f"ffmpeg cut failed for clip {i + 1}"
+                                + (f": {_err[-400:]}" if _err else ""))
                         clip_transcript = transcript
                         render_clip_start, render_clip_end = start, end
 

@@ -714,8 +714,14 @@ def _render_regular(input_video: str, output_video: str, composed: Sequence[Comp
            "-movflags", "+faststart", output_video]
     if ass_filter and captioned_output:
         cmd += caption_output_args(ass_filter, captioned_output, device=device)
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                   timeout=1800)
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.PIPE, timeout=1800)
+    except subprocess.CalledProcessError as e:
+        _err = (e.stderr or b"").decode("utf-8", "replace").strip()
+        raise RuntimeError(
+            f"ffmpeg render failed for {os.path.basename(output_video)}"
+            + (f": {_err[-400:]}" if _err else "")) from e
 
 
 DELIVERY_MIN_WIDTH = 1080
@@ -815,12 +821,19 @@ def _render_with_splits(input_video: str, output_video: str, composed: Sequence[
     # generation vs the regular path, which encodes once from the source.
     device = gpu_affinity.current_device()
     try:
-        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", silent, "-i", input_video,
-                        "-map", "0:v:0", "-map", "1:a?",
-                        *video_encode_args(QUALITY_FAST, device=device),
-                        "-c:a", "copy", *METADATA_SCRUB,
-                        "-movflags", "+faststart", output_video], check=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=1800)
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error", "-i", silent, "-i", input_video,
+                 "-map", "0:v:0", "-map", "1:a?",
+                 *video_encode_args(QUALITY_FAST, device=device),
+                 "-c:a", "copy", *METADATA_SCRUB,
+                 "-movflags", "+faststart", output_video], check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=1800)
+        except subprocess.CalledProcessError as e:
+            _err = (e.stderr or b"").decode("utf-8", "replace").strip()
+            raise RuntimeError(
+                f"ffmpeg split mux failed for {os.path.basename(output_video)}"
+                + (f": {_err[-400:]}" if _err else "")) from e
     finally:
         if os.path.exists(silent):
             os.remove(silent)
