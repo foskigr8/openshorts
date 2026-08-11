@@ -706,14 +706,27 @@ def _render_regular(input_video: str, output_video: str, composed: Sequence[Comp
 
     device = gpu_affinity.current_device()
     graph = _regular_filtergraph(composed, frame_w, frame_h, out_w, out_h)
+    main_label = "[v]"
+    cap_label = None
+    if ass_filter and captioned_output:
+        # The filter graph emits [v] once — mapping it to TWO outputs is the
+        # "Output with label 'v' ... was already used elsewhere" failure that
+        # killed clips 1 & 4 in the 04:06 run. Split it into [vmain] (clean
+        # clip) and [vcap], and apply the ASS captions INSIDE the graph (a
+        # -vf on a complex-graph stream is rejected: "simple and complex
+        # filtering cannot be used together").
+        cap_label = "[vcapass]"
+        graph += f"; [v]split=2[vmain][vcap]; [vcap]{ass_filter}[vcapass]"
+        main_label = "[vmain]"
     cmd = ["ffmpeg", "-y", "-loglevel", "error",
            *gpu_decode_args(device=device), "-i", input_video,
-           "-filter_complex", graph, "-map", "[v]", "-map", "0:a?",
+           "-filter_complex", graph, "-map", main_label, "-map", "0:a?",
            *video_encode_args(QUALITY_FAST, device=device),
            "-c:a", "copy", *METADATA_SCRUB,
            "-movflags", "+faststart", output_video]
     if ass_filter and captioned_output:
-        cmd += caption_output_args(ass_filter, captioned_output, device=device)
+        cmd += caption_output_args(ass_filter, captioned_output, device=device,
+                                   label=cap_label)
     try:
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL,
                        stderr=subprocess.PIPE, timeout=1800)
@@ -749,7 +762,8 @@ def delivery_size(orig_w: int, orig_h: int, aspect_ratio: float):
 
 
 def caption_output_args(ass_filter: str, captioned_output: str,
-                        encode_tier: str = "quality", device=None):
+                        encode_tier: str = "quality", device=None,
+                        label="[v]"):
     """Second-output args for the one-pass clean+captioned render.
 
     With these args the same ffmpeg invocation encodes BOTH files from the
@@ -760,8 +774,7 @@ def caption_output_args(ass_filter: str, captioned_output: str,
     from ffmpeg_utils import METADATA_SCRUB, video_encode_args
 
     return [
-        "-map", "[v]", "-map", "0:a?",
-        "-vf", ass_filter,
+        "-map", label, "-map", "0:a?",
         *video_encode_args(encode_tier, device=device),
         "-c:a", "copy", *METADATA_SCRUB,
         "-movflags", "+faststart", captioned_output,
