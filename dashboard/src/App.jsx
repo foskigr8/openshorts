@@ -556,6 +556,18 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobId, status, results, activeTab, noSource, projectState]);
 
+  // True persistence: whenever the dashboard re-mounts a completed job
+  // (tab switch, view re-mount), re-fetch the clips from the backend's disk
+  // so they always come back — no disappearing-until-restart.
+  useEffect(() => {
+    if (activeTab === 'dashboard' && status === 'complete' && jobId) {
+      apiJson(`/api/jobs/${jobId}/result`)
+        .then((d) => { if (d?.clips?.length) setResults(d); })
+        .catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
   useEffect(() => {
     // Encrypt Gemini Key too for consistency if desired, but user asked specifically about Social integration not saving well.
     // For now keeping gemini plain for compatibility unless requested.

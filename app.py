@@ -2432,6 +2432,30 @@ async def restore_from_storage(job_id: str, filename: str, request: Request):
     return FileResponse(local_path, media_type="video/mp4")
 
 
+@app.get("/api/jobs/{job_id}/result")
+async def job_result(job_id: str):
+    """Return a completed job's clips straight from DISK — the persistent
+    source of truth. The dashboard re-fetches this whenever it returns to a
+    job, so clips survive tab switches / view re-mounts without a restart
+    (the 'clips disappear until I restart' complaint)."""
+    job_path = os.path.join(OUTPUT_DIR, job_id)
+    if not os.path.isdir(job_path):
+        raise HTTPException(status_code=404, detail="Job not found on disk")
+    meta_matches = _sorted_metadata(glob.glob(os.path.join(job_path, "*_metadata.json")))
+    if not meta_matches:
+        raise HTTPException(status_code=404, detail="Job metadata not found")
+    meta_path = meta_matches[0]
+    try:
+        with open(meta_path, "r") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        raise HTTPException(status_code=404, detail="Job metadata unreadable")
+    base_name = os.path.basename(meta_path).replace("_metadata.json", "")
+    clips = data.get("shorts", [])
+    ready = _collect_ready_clips(job_path, base_name, clips, job_id)
+    return {"clips": ready, "cost_analysis": data.get("cost_analysis")}
+
+
 @app.get("/api/jobs/{job_id}/logs")
 async def job_logs_download(job_id: str):
     """Download a job's logs as plain text (6-aug-2026).
