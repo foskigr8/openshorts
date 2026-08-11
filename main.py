@@ -602,6 +602,14 @@ def download_youtube_video(url, output_dir=".", require_hd=False):
     # Deliberately use_cookies=False: sending a STALE jar is worse than sending
     # none, because an invalid session reads as more suspicious than an
     # anonymous request (see the ios_spoof_args note above).
+    #
+    # PO-token + iOS client FIRST (11-aug-2026): on a YouTube-flagged Kaggle
+    # IP the old ordering ran plain anonymous first, which hit the bot wall
+    # before ever reaching the PO-token path — "worked effortlessly before,
+    # now walls" was the IP flag + bad ordering, not a code regression (the
+    # same code downloaded fine minutes apart). The spoofed+token path is the
+    # strongest anti-bot config, so it goes first; plain anonymous stays as
+    # a later fallback for clean IPs.
     attempts = (
         # HD format on purpose: fallback_fmt is 'best[ext=mp4]/best', which is a
         # PRE-MERGED (progressive) stream, and YouTube caps those at ~360-720p.
@@ -609,8 +617,8 @@ def download_youtube_video(url, output_dir=".", require_hd=False):
         # builds. Measured 5-aug-2026: with fallback_fmt this attempt pulled a
         # 10.5-minute source in 28.41 MiB (~360p) and the reframe inherited that
         # resolution, so every delivered clip was low quality.
-        [('anonymous', {}, _hd_fmt_for(None), None, False)]
-        + [('ios-spoof', ios_spoof_args, _hd_fmt_for(None), None, False)]
+        [('ios-spoof', ios_spoof_args, _hd_fmt_for(None), None, False)]
+        + [('anonymous', {}, _hd_fmt_for(None), None, False)]
         + ([('HD-direct', hd_args, _hd_fmt_for(None), None, True)] if _direct_first else [])
         + ([('HD', hd_args, _hd_fmt_for(_proxy), _proxy, True)] if hd_args else [])
         + [('fallback-hd', fallback_args, _hd_fmt_for(_proxy), _proxy, True)]

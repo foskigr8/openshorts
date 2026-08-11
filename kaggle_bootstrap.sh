@@ -165,6 +165,14 @@ for mod in ("numpy", "cv2"):
         print(f"    {mod} MISSING ({type(e).__name__})")
 PYVER
 
+    # YouTube changes their anti-bot constantly; yt-dlp updates are the other
+    # half of dodging the bot wall. Refresh it every boot (the requirement is
+    # unpinned on purpose).
+    if [ "${SKIP_INSTALL:-0}" != "1" ]; then
+        pip install -q -U yt-dlp 2>&1 | tail -1
+        python3 -c "import yt_dlp; print('    yt-dlp', yt_dlp.version.__version__)"
+    fi
+
     # Face ID needs an ONNX runtime to execute; requirements.txt deliberately
     # ships only insightface (onnxruntime-gpu is ~2GB and lives in the
     # Dockerfile's GPU block so the CPU image stays slim). Kaggle IS a GPU host,
