@@ -1184,13 +1184,13 @@ def analyze_scene_context(pool, model_name, clip_path, clip_duration,
     31-jul-2026). See gemini_worker.VISION_SCENE_CONTEXT_PROMPT_TEMPLATE for
     the universal rule this encodes.
 
-    Returns a list of focus-directive dicts (clip-relative seconds), or []
-    when unavailable — the renderer treats an empty list as "fall back to
-    pure heuristic tracking", so this stays a quality layer, never a hard
-    dependency.
+    Returns a dict {"directives": [...], "primary_subject": str,
+    "primary_subject_x": float|None} — with empty directives when unavailable
+    (the renderer treats an empty list as "fall back to pure heuristic
+    tracking", so this stays a quality layer, never a hard dependency).
     """
     if not pool or not clip_duration:
-        return []
+        return {"directives": [], "primary_subject": "", "primary_subject_x": None}
     key = pool.acquire()
     if not key:
         return []
@@ -1210,12 +1210,12 @@ def analyze_scene_context(pool, model_name, clip_path, clip_duration,
             client, model_name, clip_path, prompt,
             gemini_worker.SceneContextResponse)
     except gemini_worker.GeminiBlockedError:
-        return []
+        return {"directives": [], "primary_subject": "", "primary_subject_x": None}
     except Exception as e:
         if not gemini_pool.is_transient_error(e):  # see confirm_clip_with_vision's twin
             pool.mark_bad(key)
         print(f"⚠️ Scene-context direction failed: {e}")
-        return []
+        return {"directives": [], "primary_subject": "", "primary_subject_x": None}
 
     directives = (parsed or {}).get("directives") or []
     cleaned = []
@@ -2189,8 +2189,14 @@ if __name__ == '__main__':
                         render_clip_end - render_clip_start,
                         transcript_result=clip_transcript,
                         clip_start=render_clip_start, clip_end=render_clip_end)
-                    focus_directives = scene_ctx["directives"]
-                    primary_subject_x = scene_ctx.get("primary_subject_x")
+                    # analyze_scene_context returns [] on failure (fails open)
+                    # and a dict on success — guard both so a transient
+                    # scene-context 503 can never crash the clip (Clip 4 died
+                    # on "list indices must be integers" in the 03:30 run).
+                    focus_directives = (scene_ctx.get("directives") or []
+                                        if isinstance(scene_ctx, dict) else [])
+                    primary_subject_x = (scene_ctx.get("primary_subject_x")
+                                         if isinstance(scene_ctx, dict) else None)
 
                     # PART 6.4 (6-aug-2026): when nothing needs a post-render
                     # pass (no watermark, no audio cleanup), fold the caption
