@@ -2217,12 +2217,18 @@ if __name__ == '__main__':
                     # jump-cut) so its timestamps land on the same clock the
                     # renderer uses: Gemini watches the finished clip and
                     # directs the camera — who to be on, and why. See
-                    # analyze_scene_context.
-                    scene_ctx = analyze_scene_context(
-                        vision_pool, vision_model, clip_temp_path,
-                        render_clip_end - render_clip_start,
-                        transcript_result=clip_transcript,
-                        clip_start=render_clip_start, clip_end=render_clip_end)
+                    # analyze_scene_context. SCENE_DIRECTION=0 skips it —
+                    # faster/cheaper, framing falls back to heuristics.
+                    if os.environ.get("SCENE_DIRECTION", "1").strip().lower() in (
+                            "0", "false", "no", "off"):
+                        scene_ctx = {"directives": [], "primary_subject": "",
+                                     "primary_subject_x": None}
+                    else:
+                        scene_ctx = analyze_scene_context(
+                            vision_pool, vision_model, clip_temp_path,
+                            render_clip_end - render_clip_start,
+                            transcript_result=clip_transcript,
+                            clip_start=render_clip_start, clip_end=render_clip_end)
                     # analyze_scene_context returns [] on failure (fails open)
                     # and a dict on success — guard both so a transient
                     # scene-context 503 can never crash the clip (Clip 4 died
