@@ -57,11 +57,12 @@ def pool_from_env():
 
 def fallback_model_name():
     """Secondary Gemini model used when the primary hits a transient failure
-    (quota/overload). GEMINI_FALLBACK_MODEL, else the primary GEMINI_MODEL
-    (no-op fallback), else the pipeline default."""
+    (quota/overload/high-demand 503). GEMINI_FALLBACK_MODEL wins; the default
+    is gemini-2.5-flash — when gemini-3.1-flash-lite is high-demand, retrying
+    the SAME model just keeps hitting the wall, so a different model is the
+    actual fallback. No-op when it equals the primary."""
     return (os.environ.get("GEMINI_FALLBACK_MODEL")
-            or os.environ.get("GEMINI_MODEL")
-            or "gemini-3.1-flash-lite")
+            or "gemini-2.5-flash")
 
 
 TRANSIENT_TOKENS = (

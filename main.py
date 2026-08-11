@@ -2030,6 +2030,13 @@ if __name__ == '__main__':
                 "Clip detection failed — Gemini did not return usable clips for this video.")
         else:
             print(f"🔥 Found {len(clips_data['shorts'])} clips!")
+            print(f"🎯 Next: sentence-snap boundaries → scene boundaries → "
+                  f"per-clip render on the GPU (clip 1/{len(clips_data['shorts'])}) "
+                  f"→ finalize.")
+            _write_progress(output_dir, "render", 0, len(clips_data['shorts']),
+                            note="preparing clips",
+                            step="preparing clips — per-clip render starts next",
+                            step_pct=0)
 
             # Save metadata. Silent videos have no transcript → no subtitles,
             # which is correct (there's no speech to caption).
