@@ -113,6 +113,75 @@ def detect_scenes(video_path):
     return _detect_pyscenedetect(video_path)
 
 
+def detect_scenes_in_ranges(video_path, ranges, pad_s=5.0):
+    """TransNetV2 shot boundaries over ONLY the given absolute-time ranges.
+
+    Clip-end clamping only needs boundaries inside each picked clip's span
+    (plus a little tail), so scanning the whole source — all ~185k frames of
+    a 103-min episode — just to clamp 6 clip ends was ~10x the work it
+    needed (the minutes-long "stuck after the picker" stage). Each range is
+    decoded + scored independently, then merged into one sorted
+    [(start_s, end_s), ...] list of ABSOLUTE-time boundaries.
+
+    Fails open: returns ([], fps) on any decode/model error (the clamp
+    no-ops), matching the SCENE_GPU_ONLY contract — no CPU decode, no
+    PySceneDetect.
+    """
+    import torch
+
+    if not ranges:
+        return [], 30.0
+    try:
+        cap = cv2.VideoCapture(video_path)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        duration = (total / fps) if fps and total else None
+        cap.release()
+    except Exception:
+        fps = 30.0
+        duration = None
+
+    try:
+        model = _get_tn2_model()
+        threshold = float(os.environ.get("TRANSNETV2_THRESHOLD", "0.5"))
+    except Exception as e:
+        print(f"   ⚠️ Scene detection unavailable ({type(e).__name__}: "
+              f"{str(e)[:150]}) — clamp will no-op.")
+        return [], fps
+
+    raw_bounds = []
+    for rs, re_ in ranges:
+        s = max(0.0, rs - pad_s)
+        e = re_
+        if duration is not None:
+            e = min(e + pad_s, duration)
+        try:
+            frames = _extract_frames_small(video_path, start_s=s, end_s=e)
+        except Exception as exc:
+            print(f"   ⚠️ Scene detection skipped for [{s:.0f}s-{e:.0f}s] "
+                  f"({type(exc).__name__}: {str(exc)[:150]}) — clamp no-ops.")
+            continue
+        if len(frames) == 0:
+            continue
+        with _TN2_LOCK, torch.no_grad(), _model_device_guard(model.device):
+            tensor = torch.from_numpy(np.ascontiguousarray(frames)).to(model.device)
+            pred, _ = model.predict_frames(tensor, quiet=True)
+        for fs, fe in model.predictions_to_scenes(pred.numpy(), threshold=threshold):
+            raw_bounds.append((s + fs / fps, s + (fe + 1) / fps))
+
+    raw_bounds.sort()
+    merged = []
+    for b in raw_bounds:
+        if merged and b[0] <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b[1]))
+        else:
+            merged.append(b)
+    if raw_bounds:
+        print(f"   🎬 Scene engine: TransNetV2 (targeted) — {len(merged)} "
+              f"boundary/boundaries across {len(ranges)} clip range(s)")
+    return merged, fps
+
+
 # --- legacy engine ----------------------------------------------------------
 
 def _detect_pyscenedetect(video_path):
@@ -153,8 +222,12 @@ def _get_tn2_model():
     return _tn2_model
 
 
-def _extract_frames_small(video_path):
-    """Decode the whole clip as 48x27 RGB frames via ffmpeg (~4KB/frame).
+def _extract_frames_small(video_path, start_s=None, end_s=None):
+    """Decode a time range as 48x27 RGB frames via ffmpeg (~4KB/frame).
+
+    ``start_s``/``end_s`` (optional) limit the decode to a window — used by
+    detect_scenes_in_ranges so clip-end clamping only scans the seconds it
+    actually needs instead of the whole source.
 
     Uses CUDA decode when the ffmpeg on PATH supports it (the nvenc build) —
     decoding a 103-min episode frame-by-frame is exactly the stage that
@@ -194,8 +267,13 @@ def _extract_frames_small(video_path):
 
     last_err = None
     for label, args, vf in attempts:
-        cmd = (["ffmpeg", "-nostdin"] + args
-               + ["-i", video_path, "-vf", vf,
+        cmd = ["ffmpeg", "-nostdin"]
+        if start_s is not None:
+            cmd += ["-ss", f"{start_s:.3f}"]
+        if end_s is not None:
+            cmd += ["-to", f"{end_s:.3f}"]
+        cmd += (args
+                + ["-i", video_path, "-vf", vf,
                   "-pix_fmt", "rgb24", "-f", "rawvideo", "-"])
         try:
             proc = subprocess.run(cmd, stdout=subprocess.PIPE,

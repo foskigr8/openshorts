@@ -1724,9 +1724,25 @@ def get_viral_clips(transcript_result, video_duration, source_video_path=None,
     if output_dir:
         _write_progress(output_dir, "analyze",
                         note="detecting scene boundaries",
-                        step="detecting scene boundaries (long videos take a while)",
+                        step="detecting scene boundaries (only the picked spans)",
                         step_pct=85)
-    _scene_bounds = scene_boundaries_for(source_video_path)
+    _scene_bounds = []
+    _scene_disabled = os.environ.get("SCENE_DETECTION", "1").strip().lower() in (
+        "0", "false", "no", "off")
+    if _scene_disabled:
+        print("ℹ️  Scene detection disabled (SCENE_DETECTION=0) — the end-clamp "
+              "polish is skipped, clips still render.")
+    elif source_video_path and shorts:
+        # Targeted scan: only the seconds around each picked clip's span —
+        # ~10x cheaper than scanning the whole source for the same clamp.
+        try:
+            import scene_detection as _sd
+            _scene_bounds, _ = _sd.detect_scenes_in_ranges(
+                source_video_path,
+                [(float(s["start"]), float(s["end"])) for s in shorts])
+        except Exception as e:
+            print(f"⚠️ Scene-boundary clamp unavailable "
+                  f"({type(e).__name__}: {str(e)[:150]})")
     for s in shorts:
         _clamp_candidate_end_to_scene(s, _scene_bounds)
     shorts = _dedup_overlapping_clips(shorts)
