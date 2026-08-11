@@ -685,7 +685,9 @@ def download_youtube_video(url, output_dir=".", require_hd=False):
                     or 'bot' in _msg.lower())
                 if not retryable or retry == 1:
                     break
-                time.sleep(8 if '403' not in _msg else 3)
+                # Bot-wall flags usually need a longer cool-down than a 403.
+                time.sleep(25 if ('Sign in' in _msg or 'bot' in _msg.lower())
+                           else 3)
         if sanitized_title is not None:
             break
 
