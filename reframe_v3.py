@@ -687,7 +687,8 @@ def _regular_filtergraph(composed: Sequence[ComposedShot], frame_w: int, frame_h
         label = f"s{i}"
         parts.append(
             f"[0:v]trim=start={shot.start:.6f}:end={shot.end:.6f},setpts=PTS-STARTPTS,"
-            f"crop={w}:{h}:{x}:{y},scale={out_w}:{out_h}:flags=lanczos[{label}]"
+            f"crop={w}:{h}:{x}:{y},scale={out_w}:{out_h}:flags=lanczos,"
+            f"setsar=1[{label}]"
         )
         labels.append(f"[{label}]")
     if not labels:
