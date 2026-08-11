@@ -241,6 +241,11 @@ def _detect_transnetv2(video_path):
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     cap.release()
 
+    mins = total_frames / (fps * 60)
+    print(f"   ⏳ Scene detection: decoding ~{total_frames:,} frames "
+          f"at 48x27 (GPU decode) for a {mins:.0f}-min source — this is the "
+          f"longest quiet stage, minutes by design. (SCENE_DETECTION=0 skips "
+          f"it if you'd rather have speed.)", flush=True)
     frames = _extract_frames_small(video_path)
     model = _get_tn2_model()
     threshold = float(os.environ.get("TRANSNETV2_THRESHOLD", "0.5"))

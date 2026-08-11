@@ -1568,6 +1568,11 @@ def scene_boundaries_for(video_path):
     """
     if not video_path:
         return []
+    if os.environ.get("SCENE_DETECTION", "1").strip().lower() in (
+            "0", "false", "no", "off"):
+        print("ℹ️  Scene detection disabled (SCENE_DETECTION=0) — the end-clamp "
+              "polish is skipped, clips still render.")
+        return []
     try:
         key = (video_path, os.path.getmtime(video_path),
                os.path.getsize(video_path))

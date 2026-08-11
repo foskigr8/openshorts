@@ -148,6 +148,8 @@ GPU pieces that were silently wrong and are now deterministic:
   `warn` (loud warning, run CPU — emergencies only) | `0`.
 - `SCENE_GPU_ONLY` — `1` (default; skip scene detection if GPU can't decode
   the file) | `0` (allow the cheap 48×27 CPU retry + PySceneDetect).
+- `SCENE_DETECTION` — `1` (default) | `0` (skip scene detection entirely —
+  faster runs, clips lose the end-shot-boundary polish).
 - `SCENE_DETECT_TIMEOUT` — TransNetV2 decode cap in seconds (default 300).
 - `FFMPEG_DIR` — nvenc ffmpeg location (default `/kaggle/working/ffmpeg-nvenc`).
 - `GEMINI_MODEL` / `GEMINI_FALLBACK_MODEL` — picker/context model
