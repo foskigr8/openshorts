@@ -45,9 +45,16 @@ class SaliencyDetector:
                 )
             import onnxruntime as ort
             start = time.time()
+            # Prefer CUDA when onnxruntime-gpu is installed (the Kaggle
+            # bootstrap installs it for face spine) — saliency is a tiny model
+            # so the win is small, but it is free. CPU-only hosts drop the
+            # CUDA provider automatically.
+            available = ort.get_available_providers()
+            providers = [p for p in ("CUDAExecutionProvider", "CPUExecutionProvider")
+                         if p in available] or None
             cls._session = ort.InferenceSession(
                 str(_ONNX_MODEL_PATH),
-                providers=["CPUExecutionProvider"],
+                providers=providers,
             )
             logger.info(f"UNISAL ONNX model loaded in {time.time() - start:.2f}s")
         return cls._session

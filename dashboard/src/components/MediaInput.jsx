@@ -28,8 +28,11 @@ export default function MediaInput({ onProcess, isProcessing }) {
     const [file, setFile] = useState(null);
     const [acknowledged, setAcknowledged] = useState(false);
     const [outputFormat, setOutputFormat] = useState('vertical'); // vertical | square | horizontal | custom
+    // Custom defaults to 9:16 (1080x1920) — the old 1080x1350 default was
+    // 4:5 (Instagram feed), which silently shipped a wider crop than a Short
+    // should be.
     const [customW, setCustomW] = useState(1080);
-    const [customH, setCustomH] = useState(1350);
+    const [customH, setCustomH] = useState(1920);
     // The clip count is ALWAYS explicit — auto mode was removed. The picker
     // fulfills the requested count at all costs, so the UI never offers
     // "auto" as an option.

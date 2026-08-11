@@ -540,14 +540,37 @@ def _track_nearest_x(tracks: Dict[int, dict], x_norm: Optional[float],
 
 
 def _track_boxes_for_shot(shot, spine_tracks: Dict[int, dict]) -> List[Box]:
-    """Return the planner's median subject box for every subject in a shot."""
+    """Per-subject box = the UNION of that subject's face boxes across the
+    WHOLE shot (AutoFlip-style), so the static crop contains the subject for
+    the entire duration.
+
+    The old version used the planner's MEDIAN box — one instant. A subject who
+    moves (leans, turns, steps) within a shot then exits the static crop and
+    gets their head cut (the "only half his head" failure from the 04:06
+    run). Unioning the sampled boxes over [start, end] makes containment a
+    property of the whole shot, not of its midpoint.
+    """
     from shot_planner import crop_rect_for_track
 
     boxes = []
     for track_id in shot.track_ids:
-        box = crop_rect_for_track(spine_tracks, track_id, shot.start, shot.end)
-        if box is not None:
-            boxes.append(tuple(float(v) for v in box))
+        track = spine_tracks.get(track_id)
+        union = None
+        if track:
+            t = float(shot.start)
+            while t <= float(shot.end) + 1e-6:
+                b = _nearest_box(track, t)
+                if b is not None:
+                    union = b if union is None else union_box(union, b)
+                t += 0.5
+        if union is None:
+            # No per-frame boxes sampled (sparse track) — fall back to the
+            # planner's median, the previous behavior.
+            box = crop_rect_for_track(spine_tracks, track_id, shot.start, shot.end)
+            if box is not None:
+                union = tuple(float(v) for v in box)
+        if union is not None:
+            boxes.append(tuple(float(v) for v in union))
     return boxes
 
 
@@ -598,8 +621,14 @@ def _compose_shot(shot, spine_tracks: Dict[int, dict], active_tracks,
 
     midpoint = (shot.start + shot.end) / 2.0
     faces = []
+    # The union boxes from _track_boxes_for_shot (subject's full movement
+    # range) double as the saliency-weighted face regions — consistent with
+    # the crop, so the attention map agrees with what the crop contains.
+    subject_by_track = dict(zip(shot.track_ids, subjects))
     for track_id, track in spine_tracks.items():
-        box = _nearest_box(track, midpoint)
+        box = subject_by_track.get(track_id)
+        if box is None:
+            box = _nearest_box(track, midpoint)
         if box is None:
             continue
         if track_id in shot.track_ids:

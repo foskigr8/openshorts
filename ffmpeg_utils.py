@@ -69,13 +69,13 @@ _X264_ARGS = {
 # reads fine but web players render as a magenta/green mess.
 _NVENC_ARGS = {
     QUALITY: ["-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq",
-              "-rc", "vbr", "-cq", "25", "-b:v", "0",
+              "-rc", "vbr", "-cq", "21", "-b:v", "0",
               "-spatial-aq", "1", "-temporal-aq", "1", "-pix_fmt", "yuv420p"],
     QUALITY_FAST: ["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq",
-                   "-rc", "vbr", "-cq", "25", "-b:v", "0", "-spatial-aq", "1",
+                   "-rc", "vbr", "-cq", "21", "-b:v", "0", "-spatial-aq", "1",
                    "-pix_fmt", "yuv420p"],
     DELIVERY: ["-c:v", "h264_nvenc", "-preset", "p4",
-               "-rc", "vbr", "-cq", "29", "-b:v", "0", "-spatial-aq", "1",
+               "-rc", "vbr", "-cq", "24", "-b:v", "0", "-spatial-aq", "1",
                "-pix_fmt", "yuv420p"],
 }
 
