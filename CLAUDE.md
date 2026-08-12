@@ -163,12 +163,18 @@ GPU pieces that were silently wrong and are now deterministic:
   stable anonymous face identities. `0` reverts to the pre-conversation
   pipeline. `SPLIT=0` keeps the speaker-binding fix but skips the beat
   planner; `SPLIT_MIN_EXCHANGE_S=2.5` / `SPLIT_MIN_SPAN_S=2.0` tune the
-  exchange windows; `VSPLIT_BAND_FRAC=0.05` sets the band thickness — each
-  panel fills the rest of the frame and frames its person head-and-shoulders
-  (no 16:9 letterbox, no distortion). Captions burn in the band (middle)
-  whenever a vertical split is on screen and keep the user's chosen position
-  (usually bottom) everywhere else in the clip; `CAPTION_POSITION` only
-  affects non-split clips.
+  exchange windows; `VSPLIT_BAND_FRAC=0` (default) stacks the two panels
+  edge-to-edge with no separating bar — each panel fills half the frame and
+  frames its person head-and-shoulders (9:8 for 9:16 output, no letterbox,
+  no distortion), and captions overlay the seam (middle) whenever a vertical
+  split is on screen while keeping the user's chosen position (usually
+  bottom) everywhere else in the clip. `VSPLIT_BAND_FRAC>0` re-adds a band.
+  `CAPTION_POSITION` only affects non-split clips.
+- `SPEAKER_SMOOTH_WINDOW` — majority-filter window (default `3`) for the
+  per-second LR-ASD speaker track before it votes for bindings or falls
+  through as the per-second fallback: a one-second crowd flicker (reacting
+  listener vs talker) no longer flips the frame to the wrong person or
+  fabricates a split exchange. `0`/`1` disables the smoothing.
 - `VSPLIT_TRACK` — per-panel smart-crop tracking for vertical splits
   (default `1`): each panel's crop glides (AutoFlip-style) to keep its
   person framed as they move — head-anchored with headroom above the hair,

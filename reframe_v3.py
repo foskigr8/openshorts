@@ -671,7 +671,7 @@ def _compose_shot(shot, spine_tracks: Dict[int, dict], active_tracks,
         # (head and shoulders), sized to fill its half of the output frame —
         # the crop aspect matches the panel box, so there is no letterboxing
         # or distortion.
-        _band = float(os.environ.get("VSPLIT_BAND_FRAC", "0.05"))
+        _band = float(os.environ.get("VSPLIT_BAND_FRAC", "0"))
         _panel_aspect = aspect * 2.0 / (1.0 - _band)
         panel_a = crop_rect_containing(subjects[0], frame_w, frame_h, _panel_aspect)
         panel_b = crop_rect_containing(subjects[1], frame_w, frame_h, _panel_aspect)
@@ -974,7 +974,7 @@ def _render_with_splits(input_video: str, output_video: str, composed: Sequence[
     from vendor.pyautoflip import render_split_screen_from_centers
 
     _panel_aspect = aspect * 2.0 / (
-        1.0 - float(os.environ.get("VSPLIT_BAND_FRAC", "0.05")))
+        1.0 - float(os.environ.get("VSPLIT_BAND_FRAC", "0")))
     _cut_threshold = float(os.environ.get("VSPLIT_CUT_THRESHOLD", "25.0"))
     duration, fps, _, _ = _duration_and_size(input_video)
     cap = cv2.VideoCapture(input_video)
@@ -1012,8 +1012,11 @@ def _render_with_splits(input_video: str, output_video: str, composed: Sequence[
             else:
                 scene_cut = False
             if shot.layout == LAYOUT_VSPLIT and shot.panels:
-                _band = float(os.environ.get("VSPLIT_BAND_FRAC", "0.05"))
-                band_h = max(8, int(round(out_h * _band)))
+                # Panels stack edge-to-edge (no separating bar) by default;
+                # VSPLIT_BAND_FRAC>0 re-adds a band for captions. With no
+                # band the middle captions simply overlay the seam.
+                _band = float(os.environ.get("VSPLIT_BAND_FRAC", "0"))
+                band_h = max(0, int(round(out_h * _band)))
                 panel_h = max(1, int(round((out_h - band_h) / 2)))
                 total_h = 2 * panel_h + band_h
                 top_y = max(0, (out_h - total_h) // 2)
@@ -1033,7 +1036,8 @@ def _render_with_splits(input_video: str, output_video: str, composed: Sequence[
                                             out_w, panel_h, _panel_aspect)
                 canvas = np.zeros((out_h, out_w, 3), dtype=np.uint8)
                 canvas[top_y:top_y + panel_h] = top
-                canvas[top_y + panel_h:top_y + panel_h + band_h] = (22, 22, 22)
+                if band_h > 0:
+                    canvas[top_y + panel_h:top_y + panel_h + band_h] = (22, 22, 22)
                 canvas[top_y + panel_h + band_h:top_y + total_h] = bottom
                 rendered = canvas
             elif shot.layout == LAYOUT_SPLIT:
@@ -1109,7 +1113,8 @@ def render(input_video, final_output_video, aspect_ratio,
         print(f"   ⚠️ LR-ASD unavailable for v3 ({type(exc).__name__}: {exc})")
     segments = (transcript or {}).get("segments", [])
     _, active = speaker_fusion.fuse_speaker_tracks(
-        asd_boxes, tracks, segments, clip_start, effective_end)
+        asd_boxes, tracks, segments, clip_start, effective_end,
+        smooth_window=int(os.environ.get("SPEAKER_SMOOTH_WINDOW", "3")))
     if not any(track is not None for track in active):
         # A transcript/ASD gap must not turn a known person into an untracked
         # full-frame crop. Prefer the scene context's key subject when it
@@ -1175,7 +1180,7 @@ def render(input_video, final_output_video, aspect_ratio,
         if _track not in ("0", "false", "no", "off"):
             from smart_crop import PanelTracker
             _panel_aspect = aspect_ratio * 2.0 / (
-                1.0 - float(os.environ.get("VSPLIT_BAND_FRAC", "0.05")))
+                1.0 - float(os.environ.get("VSPLIT_BAND_FRAC", "0")))
             _track_knobs = dict(
                 headroom=float(os.environ.get("VSPLIT_HEADROOM", "0.18")),
                 side_margin=float(os.environ.get("VSPLIT_SIDE_MARGIN", "0.15")),

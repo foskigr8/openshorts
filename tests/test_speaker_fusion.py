@@ -60,6 +60,50 @@ def test_does_not_bind_below_min_seconds():
     assert "A" not in bindings
 
 
+# ---------------------------------------------------------------------------
+# smooth_track_sequence — crowd-scene stabilization
+# ---------------------------------------------------------------------------
+
+def test_stable_sequence_is_unchanged():
+    assert sf.smooth_track_sequence([1, 1, 1, 1]) == [1, 1, 1, 1]
+
+
+def test_single_second_flicker_is_removed():
+    # One bad ASD second must not create a fake speaker change.
+    assert sf.smooth_track_sequence([1, 1, 2, 1, 1]) == [1, 1, 1, 1, 1]
+
+
+def test_real_change_survives():
+    # A sustained run of the new track outvotes the old one.
+    assert sf.smooth_track_sequence([1, 1, 1, 2, 2, 2]) == [1, 1, 1, 2, 2, 2]
+
+
+def test_none_votes_nothing_but_gap_fills_from_neighbors():
+    assert sf.smooth_track_sequence([1, None, 1]) == [1, 1, 1]
+    assert sf.smooth_track_sequence([None, None]) == [None, None]
+
+
+def test_rapid_alternation_collapses():
+    # Sub-window back-and-forth is flicker, not an exchange worth splitting.
+    assert sf.smooth_track_sequence([1, 2, 1, 2]) == [1, 1, 2, 2]
+
+
+def test_fuse_speaker_tracks_smooths_before_votes_and_fallback():
+    # A flickering ASD signal must neither bind speaker A to track 1 nor
+    # hop the fallback; smoothing concentrates it on the real track 0.
+    per_second_speaker = ["A"] * 6
+    spine = _spine({0: [(t, (0.0, 0.0, 10.0, 10.0)) for t in range(6)],
+                    1: [(t, (100.0, 100.0, 10.0, 10.0)) for t in range(6)]})
+    # ASD points at track 1 (the reacting listener) for one bad second.
+    boxes = [(0.0, 0.0, 10.0, 10.0)] * 6
+    boxes[2] = (100.0, 100.0, 10.0, 10.0)
+    bindings, active = sf.fuse_speaker_tracks(
+        boxes, spine, [{"start": 0, "end": 6, "text": "", "speaker": "A"}],
+        0.0, 6.0)
+    assert bindings == {"A": 0}
+    assert active == [0, 0, 0, 0, 0, 0]
+
+
 def test_none_speaker_or_none_track_contributes_no_vote():
     per_second_speaker = ["A", None, "A", "A"]
     predicted_track = [0, 0, None, 0]

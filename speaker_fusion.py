@@ -110,6 +110,43 @@ def asd_predicted_track_per_second(asd_per_second_boxes: List[Optional[tuple]],
     return result
 
 
+def smooth_track_sequence(seq: List[Optional[int]],
+                          window: int = 3) -> List[Optional[int]]:
+    """Majority-filter a per-second predicted-track sequence.
+
+    A single bad ASD second (box flicker between two faces in a crowd —
+    the "framed the reacting listener instead of the talker" failure) must
+    not create a fake speaker change: each second's value becomes the
+    majority of its `window`-second neighborhood, with ties resolved toward
+    the current value (temporal persistence). None seconds cast no vote; a
+    neighborhood with no votes at all stays None. A real change survives
+    because a sustained run of the new track outvotes the old one after
+    ~window/2 seconds — sub-3s alternations collapse, which is exactly the
+    flicker the split planner should not treat as a genuine exchange.
+    """
+    radius = max(1, window // 2)
+    out = []
+    for i in range(len(seq)):
+        lo = max(0, i - radius)
+        hi = min(len(seq), i + radius + 1)
+        votes = [v for v in seq[lo:hi] if v is not None]
+        if not votes:
+            out.append(None)
+            continue
+        counts = {}
+        for v in votes:
+            counts[v] = counts.get(v, 0) + 1
+        top = max(counts.values())
+        leaders = sorted(v for v, c in counts.items() if c == top)
+        if len(leaders) == 1:
+            out.append(leaders[0])
+        elif seq[i] is not None and seq[i] in leaders:
+            out.append(seq[i])
+        else:
+            out.append(leaders[0])
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Diarized transcript -> per-second speaker label
 # ---------------------------------------------------------------------------
@@ -225,7 +262,8 @@ def fuse_speaker_tracks(asd_per_second_boxes: List[Optional[tuple]],
                         speaker_names: Optional[Dict[str, str]] = None,
                         iou_threshold: float = 0.3,
                         min_agreement: float = 0.6,
-                        min_seconds: float = 1.0
+                        min_seconds: float = 1.0,
+                        smooth_window: int = 3
                         ) -> tuple:
     """Full Phase 3 pipeline for one clip: ASD boxes + the Phase 1 face
     spine + the diarized transcript -> (bindings, per_second_active_track).
@@ -236,6 +274,13 @@ def fuse_speaker_tracks(asd_per_second_boxes: List[Optional[tuple]],
     """
     predicted_track_ps = asd_predicted_track_per_second(
         asd_per_second_boxes, spine_tracks, iou_threshold)
+    if smooth_window and smooth_window > 1:
+        # Stabilize the noisy per-second ASD signal BEFORE it votes for
+        # speaker bindings or falls through as the per-second fallback: a
+        # crowd flicker must neither bind a speaker to the wrong track nor
+        # send the planner hopping between faces.
+        predicted_track_ps = smooth_track_sequence(
+            predicted_track_ps, window=smooth_window)
     speaker_ps = per_second_speaker_label(
         segments, clip_start, clip_end, speaker_names)
     bindings = resolve_speaker_bindings(
