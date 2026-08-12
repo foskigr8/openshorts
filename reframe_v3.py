@@ -1105,8 +1105,14 @@ def render(input_video, final_output_video, aspect_ratio,
     try:
         import asd_worker
         if asd_worker.available():
+            # LR-ASD's per-frame face-candidate pass defaults to ctx_id=0
+            # (GPU 0), which piled every worker's detection onto one card.
+            # Pin it to THIS worker's GPU so both cards carry the load.
+            _ctx = face_spine._resolve_ctx_id(worker_device)
+            _detect = lambda frame, _ctx=_ctx: face_spine.detect_faces_per_frame(
+                frame, ctx_id=_ctx)
             asd_boxes = asd_worker.score_clip(
-                input_video, face_spine.detect_faces_per_frame,
+                input_video, _detect,
                 device=worker_device).get("per_second_box") or []
             print(f"   ↳ LR-ASD: {_time.time() - _t0:.0f}s")
     except Exception as exc:

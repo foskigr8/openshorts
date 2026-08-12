@@ -2190,9 +2190,11 @@ if __name__ == '__main__':
                 # device rather than CUDA_VISIBLE_DEVICES. No-op on CPU and
                 # single-GPU hosts.
                 gpu_affinity.assign_worker(i)
+                _clip_gpu = gpu_affinity.current_device()
                 start = clip['start']
                 end = clip['end']
-                print(f"\n🎬 Processing Clip {i+1}: {start}s - {end}s")
+                print(f"\n🎬 Processing Clip {i+1}: {start}s - {end}s"
+                      + (f" (gpu {_clip_gpu})" if _clip_gpu else ""))
                 print(f"   Title: {clip.get('video_title_for_youtube_short', 'No Title')}")
 
                 clip_filename = f"{video_title}_clip_{i+1}.mp4"
