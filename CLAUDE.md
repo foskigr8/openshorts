@@ -20,7 +20,9 @@ in Cell 2).
    the download runs. Returns the 3-part audiovisual brain (summary /
    highlights / parts people would love) into `gemini_context.json`. Own
    key (`CONTEXT_GEMINI_API_KEY`), rotates across all keys on 429, falls
-   back to `gemini-2.5-flash` on transient errors. Re-runs of a cached
+   back to `gemini-3.5-flash` on transient errors (a comma-separated
+   `GEMINI_FALLBACK_MODEL` is a chain; a retired model that 404s is skipped,
+   not fatal). Re-runs of a cached
    source whose first attempt never landed retry the link call (the pipeline
    waits out a fair budget — `CONTEXT_WAIT_TARGET` — so the blob can land
    and get cached; on fresh runs the download+transcribe runway already
@@ -216,7 +218,9 @@ GPU pieces that were silently wrong and are now deterministic:
 - `SCENE_DETECT_TIMEOUT` — TransNetV2 decode cap in seconds (default 300).
 - `FFMPEG_DIR` — nvenc ffmpeg location (default `/kaggle/working/ffmpeg-nvenc`).
 - `GEMINI_MODEL` / `GEMINI_FALLBACK_MODEL` — picker/context model
-  (default `gemini-3.1-flash-lite`).
+  (default `gemini-3.1-flash-lite`; fallback default `gemini-3.5-flash`,
+  comma-separated = a chain tried in order. `gemini-2.5-flash` was retired
+  by Google (404 "no longer available") and is skipped automatically).
 - `FACE_ID_DB` — folder of `{name}.jpg` headshots for optional named-speaker
   enrichment (fails open; anonymous speakers otherwise).
 - `YOUTUBE_COOKIES` — optional Netscape cookie blob to dodge YouTube's bot

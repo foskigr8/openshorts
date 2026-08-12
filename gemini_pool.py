@@ -55,14 +55,25 @@ def pool_from_env():
     return GeminiKeyPool(keys)
 
 
+def fallback_model_names():
+    """Fallback Gemini models used when the primary hits a transient failure
+    (quota/overload/high-demand 503), tried in order. GEMINI_FALLBACK_MODEL
+    wins (comma-separated = a chain); the default is gemini-3.5-flash —
+    when gemini-3.1-flash-lite is high-demand, retrying the SAME model just
+    keeps hitting the wall. gemini-2.5-flash was the old default until
+    Google retired it (404 'no longer available to new users', 12-aug-2026),
+    which killed every fallback attempt — the chain now skips models that
+    report NOT_FOUND instead of dying on them."""
+    raw = os.environ.get("GEMINI_FALLBACK_MODEL", "").strip()
+    if raw:
+        return [m.strip() for m in raw.split(",") if m.strip()]
+    return ["gemini-3.5-flash"]
+
+
 def fallback_model_name():
-    """Secondary Gemini model used when the primary hits a transient failure
-    (quota/overload/high-demand 503). GEMINI_FALLBACK_MODEL wins; the default
-    is gemini-2.5-flash — when gemini-3.1-flash-lite is high-demand, retrying
-    the SAME model just keeps hitting the wall, so a different model is the
-    actual fallback. No-op when it equals the primary."""
-    return (os.environ.get("GEMINI_FALLBACK_MODEL")
-            or "gemini-2.5-flash")
+    """First fallback model (backward-compatible single-name accessor)."""
+    names = fallback_model_names()
+    return names[0] if names else None
 
 
 TRANSIENT_TOKENS = (
@@ -78,22 +89,33 @@ def is_transient_error(exc) -> bool:
     return any(tok.lower() in msg for tok in TRANSIENT_TOKENS)
 
 
+def _model_unavailable(exc) -> bool:
+    """True when the MODEL itself is gone — 404 NOT_FOUND / "no longer
+    available" / "model not found". A retired fallback will never succeed,
+    so it must be SKIPPED (try the next in the chain), never treated as a
+    fatal error or retried into the sand."""
+    msg = str(exc).lower()
+    return ("not_found" in msg or "404" in msg
+            or "no longer available" in msg or "model not found" in msg)
+
+
 def generate_with_fallback(client, model_name, contents, config=None,
                            max_attempts=1, log=print):
     """One generate_content call that switches models on transient failure.
 
     Tries `model_name` up to max_attempts; if every attempt failed with a
-    transient error and a different fallback model is configured, retries up
-    to max_attempts more on the fallback. Non-transient errors (policy
-    blocks, schema errors, 404s) propagate immediately — retrying those only
-    burns quota. Returns the first successful response, else raises the last
-    exception.
+    transient error, moves down the fallback chain (GEMINI_FALLBACK_MODEL,
+    comma-separated) with max_attempts each. A model that reports itself
+    unavailable (404/retired) is skipped immediately. Non-transient errors
+    (policy blocks, schema errors) propagate immediately — retrying those
+    only burns quota. Returns the first successful response, else raises
+    the last exception.
     """
     import time
     models = [model_name]
-    fb = fallback_model_name()
-    if fb and fb != model_name:
-        models.append(fb)
+    for fb in fallback_model_names():
+        if fb and fb != model_name and fb not in models:
+            models.append(fb)
     last_exc = None
     for mi, model in enumerate(models):
         for attempt in range(1, max_attempts + 1):
@@ -102,6 +124,11 @@ def generate_with_fallback(client, model_name, contents, config=None,
                     model=model, contents=contents, config=config)
             except Exception as exc:
                 last_exc = exc
+                if _model_unavailable(exc):
+                    if log:
+                        log(f"⚠️ Model {model} unavailable "
+                            f"({str(exc)[:120]}) — skipping to the next model")
+                    break  # this model is gone; move down the chain
                 if not is_transient_error(exc):
                     raise
                 more_models = mi < len(models) - 1
