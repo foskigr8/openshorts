@@ -196,16 +196,27 @@ def resolve_speaker_bindings(per_second_speaker: List[Optional[str]],
 
 
 def per_second_active_track(per_second_speaker: List[Optional[str]],
-                            bindings: Dict[str, int]) -> List[Optional[int]]:
+                            bindings: Dict[str, int],
+                            predicted_track_ps: Optional[List[Optional[int]]] = None
+                            ) -> List[Optional[int]]:
     """Expand the binding table across the clip: for each second, whichever
     track is bound to the speaker active that second.
 
-    None where no speaker is active that second, OR where the active
-    speaker never got a confident binding (see resolve_speaker_bindings) —
-    both cases mean "no strong evidence," never a guess.
+    When a second's diarized speaker never got a confident binding (the
+    "framed the host instead of the talker" failure — diarization can lag or
+    miss, but ASD watched the faces), fall back to the LR-ASD predicted track
+    for that second if one exists: the model that directly marks who is
+    speaking beats a silent guess. None only where BOTH signals are absent.
     """
-    return [bindings.get(label) if label is not None else None
-            for label in per_second_speaker]
+    out = []
+    for i, label in enumerate(per_second_speaker):
+        if label is not None and label in bindings:
+            out.append(bindings[label])
+        elif predicted_track_ps is not None and i < len(predicted_track_ps):
+            out.append(predicted_track_ps[i])
+        else:
+            out.append(None)
+    return out
 
 
 def fuse_speaker_tracks(asd_per_second_boxes: List[Optional[tuple]],
@@ -229,5 +240,5 @@ def fuse_speaker_tracks(asd_per_second_boxes: List[Optional[tuple]],
         segments, clip_start, clip_end, speaker_names)
     bindings = resolve_speaker_bindings(
         speaker_ps, predicted_track_ps, min_agreement, min_seconds)
-    active = per_second_active_track(speaker_ps, bindings)
+    active = per_second_active_track(speaker_ps, bindings, predicted_track_ps)
     return bindings, active

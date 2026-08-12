@@ -146,6 +146,18 @@ GPU pieces that were silently wrong and are now deterministic:
   is the explicit escape hatch).
 - `REQUIRE_GPU_DECODE` — `1` (default; fail if GPU decode unavailable) |
   `warn` (loud warning, run CPU — emergencies only) | `0`.
+- `CONVERSATION_FRAMING` — master switch for the local conversation
+  director (default `1`): vertical split-screen during genuine two-person
+  back-and-forth (single → split → single), driven by LR-ASD + diarization +
+  stable anonymous face identities. `0` reverts to the pre-conversation
+  pipeline. `SPLIT=0` keeps the speaker-binding fix but skips the beat
+  planner; `SPLIT_MIN_EXCHANGE_S=2.5` / `SPLIT_MIN_SPAN_S=2.0` tune the
+  exchange windows; `VSPLIT_BAND_FRAC=0.05` / `VSPLIT_PANEL_ASPECT=16:9` set
+  the split geometry (captions land in the band with
+  `CAPTION_POSITION=middle`).
+- `SCENE_DIRECTION` — the per-clip Gemini camera-director call, now **`0` by
+  default** (the local director replaced it; opt-in only if you want Gemini
+  naming who to frame).
 - `SCENE_GPU_ONLY` — `1` (default; skip scene detection if GPU can't decode
   the file) | `0` (allow the cheap 48×27 CPU retry + PySceneDetect).
 - `SCENE_DETECTION` — `1` (default) | `0` (skip scene detection entirely —

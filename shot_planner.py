@@ -53,6 +53,7 @@ SHOT_SINGLE = "single"
 SHOT_TWO_SHOT = "two_shot"
 SHOT_REACTION = "reaction"
 SHOT_WIDE = "wide"
+SHOT_VSPLIT = "vsplit"
 
 # A directive-driven cutaway is punctuation, not the main shot — bounded
 # short on purpose. Bounded so a reaction never outlasts a real shot, the
@@ -525,4 +526,148 @@ def apply_two_shot(shots: List[Shot], addressee_per_second: List[Optional[int]],
         rect = two_shot_crop_rect(spine_tracks, speaker, addressee, shot.start, shot.end)
         result = _splice_window(result, shot.start, shot.end, SHOT_TWO_SHOT,
                                 [speaker, addressee], rect, min_shot_seconds)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# VSPLIT — conversation beats: two people trading lines get a vertical
+# split screen (top/bottom panels) instead of a single-locked crop. Driven
+# entirely by the LOCAL per-second active-speaker feed (LR-ASD + diarization)
+# — no API call. This is the "single on the speaker -> split -> single on
+# the other" edit a human director would make.
+# ---------------------------------------------------------------------------
+
+def find_exchange_windows(active: List[Optional[int]],
+                          min_exchange_s: float = 2.5,
+                          min_span_s: float = 2.0) -> List[Tuple[float, float, int, int]]:
+    """Windows where two tracks alternate as active speaker within a short
+    span (a genuine back-and-forth), as (start, end, track_a, track_b).
+
+    ``active`` is the per-second active-track list (1Hz). A window opens at a
+    second where track A is active and a DIFFERENT track B appears within
+    ``min_exchange_s``; it extends while the active speaker stays one of the
+    two (with short gaps tolerated); it closes when a third track takes the
+    floor or the silence runs long. Returns merged, sorted windows.
+    """
+    n = len(active)
+    windows: List[Tuple[float, float, int, int]] = []
+    i = 0
+    while i < n - 1:
+        a = active[i]
+        if a is None:
+            i += 1
+            continue
+        # Find the next different non-None track within the tolerance.
+        j = i + 1
+        b = None
+        while j < n and j - i <= max(1, int(min_exchange_s)):
+            if active[j] is not None and active[j] != a:
+                b = active[j]
+                break
+            j += 1
+        if b is None:
+            i += 1
+            continue
+        # Extend while the two keep the floor (A/B alternation, short gaps
+        # ok). A third track persisting for 2+ seconds is a real takeover,
+        # not a flicker — close the window at its start. Count actual
+        # alternations: a single A->B transition is NOT an exchange (that is
+        # just the speaker changing once); the split needs them trading.
+        end = j
+        k = j + 1
+        third_streak = 0
+        switches = 1  # the a -> b transition already found
+        prev = b  # active[b_index] is already b; only a NEW change counts
+        while k < n:
+            v = active[k]
+            if v not in (a, b, None):
+                third_streak += 1
+                if third_streak >= 2:
+                    break
+            else:
+                third_streak = 0
+                if v is not None and v != prev:
+                    switches += 1
+                    prev = v
+            end = k
+            k += 1
+        w_start = max(0.0, float(i) - 0.5)
+        w_end = min(float(n), float(end) + 0.5)
+        if switches >= 2 and w_end - w_start >= min_span_s:
+            windows.append((w_start, w_end, a, b))
+        i = end + 1
+
+    # Merge overlapping/adjacent windows.
+    if not windows:
+        return []
+    windows.sort()
+    merged = [list(windows[0])]
+    for w in windows[1:]:
+        if w[0] <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], w[1])
+            merged[-1][3] = w[3]
+        else:
+            merged.append(list(w))
+    return [tuple(m) for m in merged]
+
+
+def _splice_vsplit_window(shots: List[Shot], w_start: float, w_end: float,
+                          track_ids: List[int], crop_rect: Optional[tuple],
+                          min_shot_seconds: float) -> List[Shot]:
+    """Replace the covered span with ONE VSPLIT shot, trimming overlapping
+    base shots at the window edges. Unlike `_splice_window` (bounded
+    directives, conservative), an exchange window legitimately spans several
+    base shots — that is the whole point of cutting to a split during it.
+    Sub-minimum slivers at either edge are absorbed into the window so the
+    timeline's total duration is preserved exactly."""
+    result: List[Shot] = []
+    for shot in shots:
+        s, e = shot.start, shot.end
+        if e <= w_start or s >= w_end:
+            result.append(shot)
+            continue
+        if s < w_start:
+            left = w_start - s
+            if left >= min_shot_seconds:
+                result.append(Shot(s, w_start, shot.shot_type,
+                                   shot.track_ids, shot.crop_rect))
+            else:
+                w_start = s  # absorb the sliver into the window
+        if e > w_end:
+            right = e - w_end
+            if right >= min_shot_seconds:
+                result.append(Shot(w_end, e, shot.shot_type,
+                                   shot.track_ids, shot.crop_rect))
+            else:
+                w_end = e  # absorb the sliver
+        # the covered middle of this shot is replaced by the window
+    if w_end - w_start < min_shot_seconds:
+        return shots  # degenerate after absorption — keep the base list
+    result.append(Shot(w_start, w_end, SHOT_VSPLIT, track_ids, crop_rect))
+    result.sort(key=lambda s: (s.start, s.shot_type != SHOT_VSPLIT))
+    return result
+
+
+def plan_conversation_beats(shots: List[Shot], active: List[Optional[int]],
+                            spine_tracks: Dict[int, dict],
+                            min_exchange_s: float = 2.5,
+                            min_span_s: float = 2.0,
+                            min_shot_seconds: float = 1.2) -> List[Shot]:
+    """Insert SHOT_VSPLIT shots over genuine two-person exchange windows,
+    preserving the base shot list everywhere else.
+
+    Uses the same conservative `_splice_window` as reaction shots, so a
+    window that would leave a sub-minimum sliver is skipped rather than
+    breaking the no-jitter/min-duration guarantees. Returns a NEW list.
+    """
+    windows = find_exchange_windows(active, min_exchange_s, min_span_s)
+    if not windows:
+        return list(shots)
+    result = list(shots)
+    for w_start, w_end, track_a, track_b in windows:
+        rect = two_shot_crop_rect(spine_tracks, track_a, track_b,
+                                  w_start, w_end)
+        result = _splice_vsplit_window(result, w_start, w_end,
+                                       [track_a, track_b], rect,
+                                       min_shot_seconds)
     return result

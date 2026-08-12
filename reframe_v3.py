@@ -296,6 +296,7 @@ def attention_shifted_crop(crop: Rect, subject: Box, attention_x: float,
 LAYOUT_SINGLE = "single"
 LAYOUT_TWO_SHOT = "two_shot"
 LAYOUT_SPLIT = "split"
+LAYOUT_VSPLIT = "vsplit"
 
 # A two-shot is only worth keeping while both people still read at a usable
 # size. Once the union of both subjects needs a crop wider than this fraction
@@ -390,6 +391,9 @@ class ComposedShot:
     layout: str
     crop: Optional[Rect] = None
     subjects: List[Box] = None
+    # VSPLIT only: (top_panel_crop, bottom_panel_crop), each a contained,
+    # aspect-correct crop of its participant for the whole segment.
+    panels: Optional[Tuple[Rect, Rect]] = None
 
     @property
     def duration(self) -> float:
@@ -427,6 +431,22 @@ def validate_composition(shots: Sequence[ComposedShot], frame_w: int, frame_h: i
             )
 
         if shot.layout == LAYOUT_SPLIT:
+            continue
+
+        if shot.layout == LAYOUT_VSPLIT:
+            # Each participant lives in its own contained panel — verify the
+            # panels exist and contain their subjects (the face-never-cut
+            # guarantee for the split), then move on (no single containing
+            # rect applies to a split by construction).
+            if not shot.panels or len(shot.panels) != 2:
+                problems.append(f"{where}: vsplit has no two panels")
+                continue
+            for j, (panel, subject) in enumerate(zip(shot.panels, shot.subjects or [])):
+                if subject is not None and not contains(panel, subject):
+                    problems.append(
+                        f"{where}: vsplit panel {j} does not contain its subject "
+                        f"{tuple(round(v) for v in subject)} in "
+                        f"{tuple(round(v) for v in panel)}")
             continue
 
         if shot.crop is None:
@@ -602,7 +622,7 @@ def _compose_shot(shot, spine_tracks: Dict[int, dict], active_tracks,
     render loop only holds the resulting rect, so saliency can never cause
     mid-shot drift (the jitter this engine exists to remove).
     """
-    from shot_planner import SHOT_REACTION
+    from shot_planner import SHOT_REACTION, SHOT_VSPLIT
 
     subjects = _track_boxes_for_shot(shot, spine_tracks)
     if not subjects:
@@ -638,6 +658,18 @@ def _compose_shot(shot, spine_tracks: Dict[int, dict], active_tracks,
         faces.append(WeightedFace(box, role))
     attention = build_attention_map(saliency_map, faces)
     attention_x = attention_center(attention)[0]
+
+    if shot.shot_type == SHOT_VSPLIT and len(subjects) >= 2:
+        # Vertical split: two contained panels (top = subject A, bottom =
+        # subject B), each crop holding that participant's full movement
+        # range over the segment — face never cut. The middle band is where
+        # captions sit; the renderer draws it. Each panel is a 16:9
+        # head-and-shoulders crop (the "16:9 on top of 16:9" edit), stacked.
+        _panel_aspect = float(os.environ.get("VSPLIT_PANEL_ASPECT", "1.7777777778"))
+        panel_a = crop_rect_containing(subjects[0], frame_w, frame_h, _panel_aspect)
+        panel_b = crop_rect_containing(subjects[1], frame_w, frame_h, _panel_aspect)
+        return ComposedShot(shot.start, shot.end, LAYOUT_VSPLIT, None, subjects,
+                            panels=(panel_a, panel_b))
 
     layout = decide_layout(subjects, _speaker_shares(active_tracks, shot),
                            frame_w, frame_h, aspect)
@@ -695,6 +727,17 @@ def _integer_crop(rect: Rect, frame_w: int, frame_h: int) -> Tuple[int, int, int
     x0 = min(x0, frame_w - width)
     y0 = min(y0, frame_h - height)
     return x0, y0, width, height
+
+
+def _crop_resize(frame, crop: Optional[Rect], frame_w: int, frame_h: int,
+                 out_w: int, out_h: int):
+    """Crop a pixel rect from ``frame`` and resize to ``(out_w, out_h)``."""
+    import cv2
+    if crop is None:
+        crop = (0.0, 0.0, float(frame_w), float(frame_h))
+    x, y, w, h = _integer_crop(crop, frame_w, frame_h)
+    return cv2.resize(frame[y:y + h, x:x + w], (out_w, out_h),
+                      interpolation=cv2.INTER_LANCZOS4)
 
 
 def _aspect_tuple(aspect: float) -> Tuple[int, int]:
@@ -811,6 +854,27 @@ def caption_output_args(ass_filter: str, captioned_output: str,
     ]
 
 
+def _burn_captions_on(source: str, output: str, ass_filter: str, device):
+    """Burn ASS captions onto an already-rendered clip (the vsplit path:
+    captions land per the chosen position; set CAPTION_POSITION=middle to
+    place them in the vsplit band)."""
+    import subprocess
+    from ffmpeg_utils import METADATA_SCRUB, QUALITY_FAST, video_encode_args
+
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", source,
+           "-vf", ass_filter,
+           *video_encode_args(QUALITY_FAST, device=device),
+           "-c:a", "copy", *METADATA_SCRUB,
+           "-movflags", "+faststart", output]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.PIPE, timeout=1800)
+    except subprocess.CalledProcessError as e:
+        _err = (e.stderr or b"").decode("utf-8", "replace").strip()
+        raise RuntimeError(
+            f"vsplit caption burn failed: {_err[-300:]}") from e
+
+
 def _render_with_splits(input_video: str, output_video: str, composed: Sequence[ComposedShot],
                         frame_w: int, frame_h: int, out_w: int, out_h: int,
                         aspect: float) -> None:
@@ -844,15 +908,31 @@ def _render_with_splits(input_video: str, output_video: str, composed: Sequence[
                 break
             timestamp = index / fps
             shot = next((s for s in composed if s.start <= timestamp < s.end), composed[-1])
-            if shot.layout == LAYOUT_SPLIT:
+            if shot.layout == LAYOUT_VSPLIT and shot.panels:
+                top_crop, bottom_crop = shot.panels
+                band_h = max(8, int(round(out_h * float(
+                    os.environ.get("VSPLIT_BAND_FRAC", "0.05")))))
+                panel_h = int(round(out_w / float(
+                    os.environ.get("VSPLIT_PANEL_ASPECT", "1.7777777778"))))
+                total_h = 2 * panel_h + band_h
+                top_y = max(0, (out_h - total_h) // 2)
+                top = _crop_resize(frame, top_crop, frame_w, frame_h,
+                                   out_w, panel_h)
+                bottom = _crop_resize(frame, bottom_crop, frame_w, frame_h,
+                                      out_w, panel_h)
+                canvas = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+                canvas[top_y:top_y + panel_h] = top
+                canvas[top_y + panel_h:top_y + panel_h + band_h] = (22, 22, 22)
+                canvas[top_y + panel_h + band_h:top_y + total_h] = bottom
+                rendered = canvas
+            elif shot.layout == LAYOUT_SPLIT:
                 centers = split_centers(shot.subjects, frame_w, frame_h,
                                         aspect_tuple=aspect_tuple)
                 canvas = render_split_screen_from_centers(frame, centers, aspect_tuple)
                 rendered = cv2.resize(canvas, (out_w, out_h), interpolation=cv2.INTER_LANCZOS4)
             else:
-                x, y, w, h = _integer_crop(shot.crop, frame_w, frame_h)
-                rendered = cv2.resize(frame[y:y + h, x:x + w], (out_w, out_h),
-                                      interpolation=cv2.INTER_LANCZOS4)
+                rendered = _crop_resize(frame, shot.crop, frame_w, frame_h,
+                                        out_w, out_h)
             writer.write(rendered)
             index += 1
     finally:
@@ -932,6 +1012,17 @@ def render(input_video, final_output_video, aspect_ratio,
     planned = shot_planner.plan_shots(active, tracks, total_duration=duration)
     planned = shot_planner.insert_reaction_shots(
         planned, _directive_dicts(focus_directives), tracks, frame_w)
+    # Conversation framing (owner-approved, fully local): vertical split on
+    # genuine two-person exchanges — the "single -> split -> single" edit.
+    # CONVERSATION_FRAMING=0 reverts to the pre-conversation pipeline;
+    # SPLIT=0 keeps the speaker-binding fix but skips the beat planner.
+    _conv = os.environ.get("CONVERSATION_FRAMING", "1").strip().lower()
+    _split = os.environ.get("SPLIT", "1").strip().lower()
+    if _conv not in ("0", "false", "no", "off") and _split not in ("0", "false", "no", "off"):
+        planned = shot_planner.plan_conversation_beats(
+            planned, active, tracks,
+            min_exchange_s=float(os.environ.get("SPLIT_MIN_EXCHANGE_S", "2.5")),
+            min_span_s=float(os.environ.get("SPLIT_MIN_SPAN_S", "2.0")))
     print(f"   ↳ shot planning: {_time.time() - _t0:.0f}s")
     composed = compose_shots(planned, tracks, active, input_video, frame_w, frame_h, aspect_ratio)
     print(f"   ↳ saliency + composition: {_time.time() - _t0:.0f}s")
@@ -961,11 +1052,16 @@ def render(input_video, final_output_video, aspect_ratio,
 
     out_w, out_h = delivery_size(frame_w, frame_h, aspect_ratio)
     print(f"   ↳ encoding to {out_w}x{out_h} (GPU NVENC)...")
-    if any(shot.layout == LAYOUT_SPLIT for shot in composed):
-        if ass_filter or captioned_output:
-            raise RuntimeError("v3 split-screen captions are not implemented; refusing to misplace captions")
+    if any(shot.layout in (LAYOUT_SPLIT, LAYOUT_VSPLIT) for shot in composed):
+        # The Python renderer handles regular + split + vsplit frames. For a
+        # vsplit the middle band is reserved for captions; burn them in a
+        # second pass onto the captioned output (the old hard refusal meant
+        # captioned clips could never contain a split at all).
         _render_with_splits(input_video, final_output_video, composed, frame_w, frame_h,
                             out_w, out_h, aspect_ratio)
+        if ass_filter and captioned_output:
+            _burn_captions_on(final_output_video, captioned_output, ass_filter,
+                              gpu_affinity.current_device())
     else:
         _render_regular(input_video, final_output_video, composed, frame_w, frame_h, out_w, out_h,
                         ass_filter=ass_filter, captioned_output=captioned_output)

@@ -231,6 +231,38 @@ def _print_pipeline_diagnostics():
                   "strict GPU-only mode.", flush=True)
 
 
+def _report_gpu_utilization(output_dir=None):
+    """One nvidia-smi snapshot at job end — every run proves both GPUs were
+    used instead of trusting it. Prints a summary and writes
+    gpu_utilization.json beside the job."""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,name,utilization.gpu,memory.used,memory.total",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=30)
+        rows = []
+        for line in (out.stdout or "").strip().splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) >= 5:
+                rows.append({
+                    "index": parts[0], "name": parts[1],
+                    "utilization_gpu": parts[2], "memory_used_mb": parts[3],
+                    "memory_total_mb": parts[4],
+                })
+        if rows:
+            summary = ", ".join(
+                f"GPU {r['index']}: {r['utilization_gpu']}%" for r in rows)
+            print(f"🎛️  GPU utilization at job end: {summary}", flush=True)
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+                with open(os.path.join(output_dir, "gpu_utilization.json"),
+                          "w") as f:
+                    json.dump(rows, f, indent=2)
+    except Exception as e:
+        print(f"⚠️ GPU utilization snapshot failed "
+              f"({type(e).__name__}: {e})", flush=True)
+
+
 def source_logo_crop_vf_args():
     """ffmpeg -vf args to strip the configured top/bottom watermark bands,
     or [] when neither is configured (the common case)."""
@@ -2219,7 +2251,10 @@ if __name__ == '__main__':
                     # directs the camera — who to be on, and why. See
                     # analyze_scene_context. SCENE_DIRECTION=0 skips it —
                     # faster/cheaper, framing falls back to heuristics.
-                    if os.environ.get("SCENE_DIRECTION", "1").strip().lower() in (
+                    # The local director (speaker fusion + beat planner)
+                    # replaced the per-clip Gemini camera-director call —
+                    # SCENE_DIRECTION is opt-in now.
+                    if os.environ.get("SCENE_DIRECTION", "0").strip().lower() in (
                             "0", "false", "no", "off"):
                         scene_ctx = {"directives": [], "primary_subject": "",
                                      "primary_subject_x": None}
@@ -2371,6 +2406,7 @@ if __name__ == '__main__':
             _stage_durations["render"] = time.time() - _stage_t0
             _stage_t0 = time.time()
             _stage_durations["finalize"] = time.time() - _stage_t0
+            _report_gpu_utilization(output_dir)
 
     # Clean up original if requested
     if args.url and not args.keep_original and os.path.exists(input_video):
