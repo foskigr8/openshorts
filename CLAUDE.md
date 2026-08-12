@@ -19,7 +19,12 @@ in Cell 2).
    (`Part.from_uri`, Google-side processing) in a background thread while
    the download runs. Returns the 3-part audiovisual brain (summary /
    highlights / parts people would love) into `gemini_context.json`. Own
-   key (`CONTEXT_GEMINI_API_KEY`), rotates across all keys on 429.
+   key (`CONTEXT_GEMINI_API_KEY`), rotates across all keys on 429, falls
+   back to `gemini-2.5-flash` on transient errors. Re-runs of a cached
+   source whose first attempt never landed retry the link call (the pipeline
+   waits out a fair budget — `CONTEXT_WAIT_TARGET` — so the blob can land
+   and get cached; on fresh runs the download+transcribe runway already
+   covers it, so the wait stays short).
 3. **Download** — yt-dlp. **1080p is the hard floor, nothing below is ever
    accepted** (no 720p/480p/360p): the format chain has no sub-1080 option
    and the HD gate rejects anything lower. Option B caps at 1440p
@@ -132,6 +137,12 @@ GPU pieces that were silently wrong and are now deterministic:
   across them on transient failures.
 - `CONTEXT_GEMINI_API_KEY` — dedicated key for the pre-download context
   layer (default: reuses `GEMINI_API_KEY`).
+- `CONTEXT_WAIT_TARGET` — total seconds of runway the context thread should
+  have had before the picker runs (default `35`). A cached re-run starts the
+  thread ~now, so this is how long the pipeline waits for the blob there;
+  a fresh run that already gave the thread minutes waits only the 5s floor.
+  `join()` returns the instant the thread finishes, so a stuck 504 never
+  blocks the job beyond this budget.
 - `ASSEMBLYAI_API_KEY` — transcription backend (diarization + sentiment +
   highlights). Missing → CPU whisper.
 - `SOURCE_CACHE_DIR` — source store location (default `sources/` next to the

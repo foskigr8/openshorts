@@ -1955,6 +1955,7 @@ if __name__ == '__main__':
     # link goes to Gemini (own key) IN PARALLEL with the download below, so
     # by the time the transcript exists the picker already has the brain.
     context_thread = None
+    _context_started_at = None
     cached_source = None
     if args.url:
         # For multi-clip runs, treat --output as an OUTPUT DIRECTORY (create it if needed).
@@ -1982,9 +1983,18 @@ if __name__ == '__main__':
             video_title = cached_source["title"]
             if not video_title:
                 video_title = os.path.splitext(cached_source["filename"])[0]
-        elif not args.skip_analysis:
+
+        # Start the pre-download context layer whenever we do not already
+        # have a cached blob: the link goes to Gemini (own key) IN PARALLEL
+        # with the download below. A cached re-run whose first attempt never
+        # landed (504 etc.) must retry here too — otherwise the context stays
+        # transcript-only forever for that source.
+        if (not args.skip_analysis
+                and (cached_source is None
+                     or not cached_source.get("context_blob"))):
             context_thread = context_layer.analyze_url_async(
                 args.url, os.path.join(output_dir, context_layer.CONTEXT_BLOB_FILENAME))
+            _context_started_at = time.time()
 
         if cached_source is None:
             input_video, video_title = download_youtube_video(
@@ -2057,13 +2067,23 @@ if __name__ == '__main__':
             context_blob = cached_source["context_blob"]
             print("♻️  Context blob loaded from cache.")
         elif context_thread is not None:
-            context_thread.join(timeout=5.0)
+            # The thread had the whole download+transcribe runway on a fresh
+            # run; a cached re-run (cached transcript, no download) starts it
+            # ~now, so wait out the remainder of a fair budget so the blob
+            # can actually land and get cached. join() returns the instant
+            # the thread finishes, so a stuck 504 never blocks the job long.
+            _ctx_wait = (context_layer.wait_budget(
+                time.time() - _context_started_at,
+                target=float(os.environ.get("CONTEXT_WAIT_TARGET", "35")))
+                if _context_started_at is not None else 5.0)
+            context_thread.join(timeout=_ctx_wait)
             context_blob = context_layer.load_context(
                 os.path.join(output_dir, context_layer.CONTEXT_BLOB_FILENAME))
             if context_blob and args.url:
                 source_store.save_context(args.url, context_blob)
             if not context_blob:
-                print("ℹ️  Context blob not ready in time — the picker runs "
+                print(f"ℹ️  Context blob not ready in time "
+                      f"(waited {_ctx_wait:.0f}s) — the picker runs "
                       "transcript-only; the count is still fulfilled.")
 
         # 4. Gemini Analysis (transcript-driven, or vision for silent videos)

@@ -268,3 +268,18 @@ def load_context(output_path):
             return json.load(f)
     except (OSError, ValueError):
         return None
+
+
+def wait_budget(elapsed: float, target: float = 35.0, floor: float = 5.0) -> float:
+    """How much longer to wait for the async context blob before proceeding
+    transcript-only.
+
+    On a fresh run the thread gets the whole download+transcribe runway, so
+    by picker time it has usually landed and a short join is enough. A cached
+    re-run (cached transcript, no download) gives the thread ~zero head
+    start, which is why the old fixed 5s cap made the context effectively
+    unusable there. This waits out the remainder of `target` seconds of total
+    runway (bounded below by `floor`). join() returns the instant the thread
+    finishes, so a stuck 504 thread never blocks the job beyond `target`.
+    """
+    return max(floor, min(target, target - elapsed))

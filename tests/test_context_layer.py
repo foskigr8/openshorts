@@ -100,3 +100,21 @@ class TestLoadContext:
         p = tmp_path / "ok.json"
         p.write_text(json.dumps({"summary": "x"}))
         assert context_layer.load_context(str(p)) == {"summary": "x"}
+
+
+class TestWaitBudget:
+    def test_full_budget_when_thread_just_started(self):
+        # Cached re-run: the thread starts ~now, so it gets the full target.
+        assert context_layer.wait_budget(0.0) == 35.0
+
+    def test_remainder_scales_with_head_start(self):
+        assert context_layer.wait_budget(10.0) == 25.0
+
+    def test_never_below_floor(self):
+        # Fresh run: the download+transcribe runway already exceeded the
+        # target, so only the short floor remains (old 5s behaviour).
+        assert context_layer.wait_budget(60.0) == 5.0
+
+    def test_respects_custom_target_and_floor(self):
+        assert context_layer.wait_budget(0.0, target=20.0, floor=3.0) == 20.0
+        assert context_layer.wait_budget(50.0, target=20.0, floor=3.0) == 3.0
