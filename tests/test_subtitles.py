@@ -263,6 +263,38 @@ class TestGenerateAss:
         assert 40 <= margin <= 55, \
             f"'bottom' must sit just inside the content box, got {margin}"
 
+    def test_middle_ranges_override_alignment_per_window(self, tmp_path):
+        # A clip that contains a vertical split burns words inside the split
+        # window MIDDLE (in the band) and keeps the caller's position
+        # (usually bottom) everywhere else — one ASS, two placements.
+        from subtitles import SAFE_MARGIN_V, generate_ass
+        out = tmp_path / "subs.ass"
+        words = [_w(" split", 1.0, 1.5), _w(" single", 5.0, 5.5)]
+        assert generate_ass(self._transcript(words), 0, 10, str(out),
+                            alignment="bottom",
+                            middle_ranges=[(0.5, 2.0)]) is True
+        content = out.read_text(encoding="utf-8-sig")
+        lines = [l for l in content.splitlines()
+                 if l.startswith("Dialogue:")]
+        assert len(lines) == 2
+        split_line, single_line = lines
+        assert split_line.split(",")[7] == "0"  # centered in the band
+        assert "{\\an5}" in split_line.split(",", 9)[9]
+        assert single_line.split(",")[7] == str(SAFE_MARGIN_V)
+        assert "{\\an5}" not in single_line.split(",", 9)[9]
+
+    def test_middle_ranges_noop_when_empty(self, tmp_path):
+        from subtitles import SAFE_MARGIN_V, generate_ass
+        out = tmp_path / "subs.ass"
+        words = [_w(" hello", 1.0, 1.5)]
+        assert generate_ass(self._transcript(words), 0, 10, str(out),
+                            middle_ranges=[]) is True
+        content = out.read_text(encoding="utf-8-sig")
+        line = next(l for l in content.splitlines()
+                    if l.startswith("Dialogue:"))
+        assert line.split(",")[7] == str(SAFE_MARGIN_V)
+        assert "{\\an5}" not in line
+
     def test_karaoke_merges_fragments_too(self, tmp_path):
         from subtitles import generate_ass
         out = tmp_path / "subs.ass"

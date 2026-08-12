@@ -93,6 +93,36 @@ def test_render_regular_without_assignment_keeps_cpu_defaults(monkeypatch):
     assert "-gpu" not in cmd
 
 
+def test_vsplit_caption_ass_mixes_middle_and_bottom(tmp_path):
+    # A clip that contains a vertical split burns captions in the band
+    # (middle) while the split is on screen and keeps the user's position
+    # (bottom by default) everywhere else — one ASS, two placements.
+    import os
+    from reframe_v3 import _vsplit_caption_ass
+    transcript = {"segments": [{
+        "start": 0, "end": 10, "text": "",
+        "words": [
+            {"word": " split", "start": 1.0, "end": 1.5},
+            {"word": " single", "start": 5.0, "end": 5.5},
+        ]}]}
+    out_path = tmp_path / "clip.mp4"
+    got = _vsplit_caption_ass(transcript, 0.0, 10.0, [(0.5, 2.0)], str(out_path))
+    assert got is not None
+    ass_path, ass_filter = got
+    assert ass_path.startswith(str(tmp_path))
+    assert os.path.exists(ass_path)
+    assert ass_path in ass_filter
+    content = open(ass_path, encoding="utf-8-sig").read()
+    lines = [l for l in content.splitlines() if l.startswith("Dialogue:")]
+    assert len(lines) == 2
+    split_line, single_line = lines
+    # In the split window: centered in the band (MarginV 0 + \\an5).
+    assert split_line.split(",")[7] == "0"
+    assert "{\\an5}" in split_line.split(",", 9)[9]
+    # Outside the split window: unchanged bottom placement.
+    assert "{\\an5}" not in single_line.split(",", 9)[9]
+
+
 def test_caption_output_args_threads_worker_device(monkeypatch):
     import ffmpeg_utils
     monkeypatch.setenv("FFMPEG_ENCODER", "nvenc")

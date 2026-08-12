@@ -453,7 +453,8 @@ def generate_ass(transcript, clip_start, clip_end, output_path,
                  highlight_color="#FFD700", bg_color="#000000", bg_opacity=0.0,
                  effect="none", base_opacity=1.0, uppercase=False,
                  margin_v=SAFE_MARGIN_V, general_ranges=None,
-                 speaker_colors=False, letter_spacing_ratio=0.0):
+                 middle_ranges=None, speaker_colors=False,
+                 letter_spacing_ratio=0.0):
     """
     Generates a karaoke-style ASS file: each block is shown like the SRT path,
     but the currently spoken word is rendered in highlight_color (modern
@@ -476,6 +477,13 @@ def generate_ass(transcript, clip_start, clip_end, output_path,
     reframe engine's content box is smaller than the full frame. The v3
     engine renders every shot at the target aspect (no letterbox), so
     callers pass [] and captions use the full-frame margin below.
+    middle_ranges: list of (clip-relative start, end) seconds where the
+    caption must render MIDDLE-aligned regardless of `alignment` — the
+    vertical-split band sits at the frame's vertical center, so a word in
+    one of these windows gets an inline \\an5 override with zero center
+    margin while every other word keeps the caller's position (usually
+    bottom). Lets one clip mix "bottom in the single shots, middle in the
+    split" with a single ASS.
     """
     blocks = _collect_word_blocks(transcript, clip_start, clip_end, max_chars, max_duration)
     if not blocks:
@@ -502,6 +510,11 @@ def generate_ass(transcript, clip_start, clip_end, output_path,
 
     def _in_general_range(t):
         return any(gstart <= t < gend for gstart, gend in general_ranges)
+
+    middle_ranges = middle_ranges or []
+
+    def _in_middle_range(t):
+        return any(ms <= t < me for ms, me in middle_ranges)
 
     # Match the SRT burn path: PlayResY 288 keeps font sizes consistent.
     final_fontsize = int(_clamp_number(fontsize, 10, 200, 16) * 0.85)
@@ -652,8 +665,15 @@ def generate_ass(transcript, clip_start, clip_end, output_path,
                     else:
                         parts.append(text)
 
-            # Per-line MarginV override for top/bottom alignment within the content box
-            if ass_alignment in (2, 8):
+            # Per-line MarginV override for top/bottom alignment within the
+            # content box. Middle windows (vsplit band) override BOTH the
+            # alignment and the margin: the band is centered on the frame's
+            # vertical center, so \\an5 with MarginV 0 lands the caption
+            # exactly in it no matter what the clip's base position is.
+            if _in_middle_range(ev_start):
+                parts.insert(0, r"{\an5}")
+                line_margin_v = 0
+            elif ass_alignment in (2, 8):
                 line_margin_v = general_margin_v if (_in_general_range(ev_start) or not general_ranges) else int(_clamp_number(margin_v, 0, 200, SAFE_MARGIN_V))
             else:
                 line_margin_v = int(_clamp_number(margin_v, 0, 200, 0))

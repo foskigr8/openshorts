@@ -152,9 +152,12 @@ GPU pieces that were silently wrong and are now deterministic:
   stable anonymous face identities. `0` reverts to the pre-conversation
   pipeline. `SPLIT=0` keeps the speaker-binding fix but skips the beat
   planner; `SPLIT_MIN_EXCHANGE_S=2.5` / `SPLIT_MIN_SPAN_S=2.0` tune the
-  exchange windows; `VSPLIT_BAND_FRAC=0.05` / `VSPLIT_PANEL_ASPECT=16:9` set
-  the split geometry (captions land in the band with
-  `CAPTION_POSITION=middle`).
+  exchange windows; `VSPLIT_BAND_FRAC=0.05` sets the band thickness — each
+  panel fills the rest of the frame and frames its person head-and-shoulders
+  (no 16:9 letterbox, no distortion). Captions burn in the band (middle)
+  whenever a vertical split is on screen and keep the user's chosen position
+  (usually bottom) everywhere else in the clip; `CAPTION_POSITION` only
+  affects non-split clips.
 - `SCENE_DIRECTION` — the per-clip Gemini camera-director call, now **`0` by
   default** (the local director replaced it; opt-in only if you want Gemini
   naming who to frame).

@@ -663,9 +663,12 @@ def _compose_shot(shot, spine_tracks: Dict[int, dict], active_tracks,
         # Vertical split: two contained panels (top = subject A, bottom =
         # subject B), each crop holding that participant's full movement
         # range over the segment — face never cut. The middle band is where
-        # captions sit; the renderer draws it. Each panel is a 16:9
-        # head-and-shoulders crop (the "16:9 on top of 16:9" edit), stacked.
-        _panel_aspect = float(os.environ.get("VSPLIT_PANEL_ASPECT", "1.7777777778"))
+        # captions sit; the renderer draws it. Each panel FRAMES the person
+        # (head and shoulders), sized to fill its half of the output frame —
+        # the crop aspect matches the panel box, so there is no letterboxing
+        # or distortion.
+        _band = float(os.environ.get("VSPLIT_BAND_FRAC", "0.05"))
+        _panel_aspect = aspect * 2.0 / (1.0 - _band)
         panel_a = crop_rect_containing(subjects[0], frame_w, frame_h, _panel_aspect)
         panel_b = crop_rect_containing(subjects[1], frame_w, frame_h, _panel_aspect)
         return ComposedShot(shot.start, shot.end, LAYOUT_VSPLIT, None, subjects,
@@ -766,6 +769,47 @@ def _regular_filtergraph(composed: Sequence[ComposedShot], frame_w: int, frame_h
     if not labels:
         raise CompositionError("v3 generated an empty shot plan")
     return ";".join(parts + ["".join(labels) + f"concat=n={len(labels)}:v=1:a=0[v]"])
+
+
+
+def _vsplit_caption_ass(transcript, clip_start, clip_end, vsplit_ranges,
+                        output_path):
+    """Generate ONE ASS for a clip that contains vertical splits: words that
+    fall inside a split window render MIDDLE (in the split's band) while
+    every other word keeps the user's chosen caption position (usually
+    bottom) — "middle when it moves to split, bottom otherwise".
+    Returns (ass_path, ass_filter) or None when there is nothing to caption."""
+    try:
+        import subtitles as _subs
+        import time
+        import uuid
+        style = dict(_subs.AUTO_CAPTION_STYLE)
+        output_dir = os.path.dirname(os.path.abspath(output_path))
+        ass_path = os.path.join(
+            output_dir,
+            f"autosubs_vsplit_{int(time.time())}_{uuid.uuid4().hex[:8]}.ass")
+        ok = _subs.generate_ass(
+            transcript, clip_start, clip_end, ass_path,
+            max_chars=style["max_chars"], max_duration=style["max_duration"],
+            alignment=style["alignment"], fontsize=style["font_size"],
+            font_name=style["font_name"], font_color=style["font_color"],
+            border_color=style["border_color"],
+            border_width=_subs.auto_stroke_width(style["font_size"]),
+            highlight_color=style["highlight_color"],
+            effect=style["effect"], base_opacity=style["base_opacity"],
+            uppercase=style["uppercase"],
+            margin_v=style.get("margin_v", _subs.SAFE_MARGIN_V),
+            general_ranges=None,
+            middle_ranges=vsplit_ranges,
+            speaker_colors=style.get("speaker_colors", False),
+            letter_spacing_ratio=_subs.CAPTION_LETTER_SPACING_RATIO)
+        if not ok:
+            return None
+        return ass_path, _subs.ass_filter_string(ass_path)
+    except Exception as e:
+        print(f"   ⚠️ vsplit middle-caption generation failed "
+              f"({type(e).__name__}: {e})")
+        return None
 
 
 def _render_regular(input_video: str, output_video: str, composed: Sequence[ComposedShot],
@@ -910,10 +954,9 @@ def _render_with_splits(input_video: str, output_video: str, composed: Sequence[
             shot = next((s for s in composed if s.start <= timestamp < s.end), composed[-1])
             if shot.layout == LAYOUT_VSPLIT and shot.panels:
                 top_crop, bottom_crop = shot.panels
-                band_h = max(8, int(round(out_h * float(
-                    os.environ.get("VSPLIT_BAND_FRAC", "0.05")))))
-                panel_h = int(round(out_w / float(
-                    os.environ.get("VSPLIT_PANEL_ASPECT", "1.7777777778"))))
+                _band = float(os.environ.get("VSPLIT_BAND_FRAC", "0.05"))
+                band_h = max(8, int(round(out_h * _band)))
+                panel_h = max(1, int(round((out_h - band_h) / 2)))
                 total_h = 2 * panel_h + band_h
                 top_y = max(0, (out_h - total_h) // 2)
                 top = _crop_resize(frame, top_crop, frame_w, frame_h,
@@ -1060,7 +1103,19 @@ def render(input_video, final_output_video, aspect_ratio,
         _render_with_splits(input_video, final_output_video, composed, frame_w, frame_h,
                             out_w, out_h, aspect_ratio)
         if ass_filter and captioned_output:
-            _burn_captions_on(final_output_video, captioned_output, ass_filter,
+            # Vertical splits ALWAYS burn captions in the middle band, no
+            # matter which caption position the user picked for normal clips;
+            # the rest of this clip keeps their chosen position. One ASS
+            # mixes both via middle_ranges (see _vsplit_caption_ass).
+            _split_captions = None
+            if any(shot.layout == LAYOUT_VSPLIT for shot in composed):
+                _split_captions = _vsplit_caption_ass(
+                    transcript, clip_start, effective_end,
+                    [(s.start, s.end) for s in composed
+                     if s.layout == LAYOUT_VSPLIT],
+                    final_output_video)
+            _burn_captions_on(final_output_video, captioned_output,
+                              _split_captions[1] if _split_captions else ass_filter,
                               gpu_affinity.current_device())
     else:
         _render_regular(input_video, final_output_video, composed, frame_w, frame_h, out_w, out_h,
