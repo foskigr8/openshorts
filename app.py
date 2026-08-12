@@ -2283,6 +2283,12 @@ def _job_created_at(job_path):
     directory — the first thing the pipeline wrote, i.e. roughly when
     generation began — because the directory's own mtime tracks the LAST
     change to its contents, not the first.
+
+    Self-healing: when the marker is missing (legacy job, or the marker was
+    never written), the computed oldest-file time is persisted back to the
+    marker so ordering stays STABLE — later file restores/touches (HF
+    re-downloads, thumbnail regen) must not keep shifting the job's place
+    in newest-first history.
     """
     marker = os.path.join(job_path, _CREATED_MARKER)
     try:
@@ -2303,11 +2309,28 @@ def _job_created_at(job_path):
     except OSError:
         pass
     if oldest is not None:
+        try:
+            with open(marker, "w") as f:
+                f.write(str(oldest))
+        except OSError:
+            pass
         return oldest
     try:
         return os.path.getmtime(job_path)
     except OSError:
         return time.time()
+
+
+def _clip_created_at(job_path, filename, fallback_iso):
+    """When this clip was ACTUALLY generated — its own file mtime — so
+    newest-to-oldest ordering is per-clip, not per-job (a clip finished a
+    minute ago sorts above one from yesterday's run, even in the same job).
+    Falls back to the job's created_at when the file isn't local."""
+    try:
+        ts = os.path.getmtime(os.path.join(job_path, filename))
+        return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+    except OSError:
+        return fallback_iso
 
 
 @app.get("/api/thumbnails/{job_id}/{clip_index}")
@@ -2617,6 +2640,13 @@ async def list_history(request: Request):
             biggest = None
             for root, _dirs, files in os.walk(job_path):
                 for name in files:
+                    # Only real media can title a video card — data files
+                    # (metadata/progress/logs/ass/ready-markers) must never
+                    # show up as a "video" in the library.
+                    if name.endswith((".json", ".ass", ".txt", ".log",
+                                      ".ready", ".owner", ".created",
+                                      ".npy")) or name.startswith("temp_"):
+                        continue
                     try:
                         size = os.path.getsize(os.path.join(root, name))
                     except OSError:
@@ -2708,7 +2738,12 @@ async def list_history(request: Request):
                     "title": (clip.get("title")
                               or clip.get("video_title_for_youtube_short")
                               or (base_name if base_name != "metadata.json" else "Short")),
-                    "created_at": created_at,
+                    # The clip's OWN file mtime = when it was actually
+                    # generated, so newest-first is per-clip everywhere
+                    # (a clip finished a minute ago sorts above one from
+                    # yesterday, even inside the same job).
+                    "created_at": _clip_created_at(
+                        job_path, filename, created_at),
                     "status": job_status,
                     "duration": max(0.0, float(clip.get("end") or 0) - float(clip.get("start") or 0)),
                     "size_bytes": os.path.getsize(os.path.join(job_path, filename))
@@ -2804,6 +2839,91 @@ async def list_history(request: Request):
             print(f"⚠️ HF history fallback failed ({type(e).__name__}: {e})")
     videos.sort(key=lambda v: v["created_at"], reverse=True)
     return {"videos": videos}
+
+
+@app.get("/api/history/meta")
+async def list_history_meta(request: Request):
+    """Every job's metadata JSON on disk — the opt-in "data files" view.
+
+    Hidden from the video tabs by default (the owner's rule: JSON is only
+    visible when explicitly requested). This powers the collapsible data
+    subsection where metadata files can be inspected or bulk-deleted.
+    """
+    owner = await _request_owner_id(request)
+    files = []
+    try:
+        job_ids = os.listdir(OUTPUT_DIR)
+    except FileNotFoundError:
+        job_ids = []
+    for job_id in job_ids:
+        job_path = os.path.join(OUTPUT_DIR, job_id)
+        if not os.path.isdir(job_path):
+            continue
+        owner_path = os.path.join(job_path, ".owner")
+        if os.path.exists(owner_path):
+            try:
+                raw = open(owner_path).read().strip()
+                job_owner = int(raw) if raw.isdigit() else (raw or None)
+            except Exception:
+                job_owner = None
+            if job_owner is not None and job_owner != owner:
+                continue
+        for path in _sorted_metadata(
+                glob.glob(os.path.join(job_path, "*_metadata.json"))):
+            try:
+                files.append({
+                    "job_id": job_id,
+                    "filename": os.path.basename(path),
+                    "path": os.path.relpath(path, OUTPUT_DIR),
+                    "size_bytes": os.path.getsize(path),
+                    "modified": datetime.fromtimestamp(
+                        os.path.getmtime(path), tz=timezone.utc).isoformat(),
+                })
+            except OSError:
+                continue
+    files.sort(key=lambda f: f["modified"], reverse=True)
+    return {"files": files,
+            "total_bytes": sum(f["size_bytes"] for f in files)}
+
+
+@app.delete("/api/history/meta")
+async def delete_history_meta(request: Request, job_id: Optional[str] = None):
+    """Delete metadata JSON files — one job's, or ALL jobs' when no job_id
+    is given. Explicit, irreversible, bulk: the "delete for all" action the
+    owner asked for. Only the *_.metadata.json files are touched; clips stay
+    on disk (note: deleting a job's metadata is what removes it from the
+    library list, so this is a housekeeping tool, not a clip deleter)."""
+    owner = await _request_owner_id(request)
+    target = {job_id} if job_id else None
+    deleted = 0
+    freed = 0
+    try:
+        job_ids = os.listdir(OUTPUT_DIR)
+    except FileNotFoundError:
+        job_ids = []
+    for jid in job_ids:
+        if target and jid not in target:
+            continue
+        job_path = os.path.join(OUTPUT_DIR, jid)
+        if not os.path.isdir(job_path):
+            continue
+        owner_path = os.path.join(job_path, ".owner")
+        if os.path.exists(owner_path):
+            try:
+                raw = open(owner_path).read().strip()
+                job_owner = int(raw) if raw.isdigit() else (raw or None)
+            except Exception:
+                job_owner = None
+            if job_owner is not None and job_owner != owner:
+                continue
+        for path in glob.glob(os.path.join(job_path, "*_metadata.json")):
+            try:
+                freed += os.path.getsize(path)
+                os.remove(path)
+                deleted += 1
+            except OSError:
+                continue
+    return {"deleted": deleted, "freed_bytes": freed}
 
 
 @app.delete("/api/history/{job_id}")

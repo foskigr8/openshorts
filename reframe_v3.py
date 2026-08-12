@@ -1138,7 +1138,8 @@ def render(input_video, final_output_video, aspect_ratio,
         planned = shot_planner.plan_conversation_beats(
             planned, active, tracks,
             min_exchange_s=float(os.environ.get("SPLIT_MIN_EXCHANGE_S", "2.5")),
-            min_span_s=float(os.environ.get("SPLIT_MIN_SPAN_S", "2.0")))
+            min_span_s=float(os.environ.get("SPLIT_MIN_SPAN_S", "2.0")),
+            frame_w=frame_w, frame_h=frame_h, aspect=aspect_ratio)
     print(f"   ↳ shot planning: {_time.time() - _t0:.0f}s")
     composed = compose_shots(planned, tracks, active, input_video, frame_w, frame_h, aspect_ratio)
     print(f"   ↳ saliency + composition: {_time.time() - _t0:.0f}s")

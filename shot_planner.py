@@ -77,6 +77,11 @@ DIRECTIVE_PAYOFF_REASONS = ("causing_reaction", "referenced")
 MIN_CORROBORATION_DETECTIONS = 1
 MIN_CORROBORATION_MOTION_FRAC = 0.03
 
+# Two people this close on screen fit one crop at usable size → TWO_SHOT
+# instead of a split (mirrors reframe_v3.decide_layout; kept local so the
+# planner never needs to import the renderer).
+MAX_TWO_SHOT_WIDTH_FRAC = 0.72
+
 
 @dataclass
 class Shot:
@@ -611,15 +616,17 @@ def find_exchange_windows(active: List[Optional[int]],
     return [tuple(m) for m in merged]
 
 
-def _splice_vsplit_window(shots: List[Shot], w_start: float, w_end: float,
-                          track_ids: List[int], crop_rect: Optional[tuple],
-                          min_shot_seconds: float) -> List[Shot]:
-    """Replace the covered span with ONE VSPLIT shot, trimming overlapping
-    base shots at the window edges. Unlike `_splice_window` (bounded
-    directives, conservative), an exchange window legitimately spans several
-    base shots — that is the whole point of cutting to a split during it.
-    Sub-minimum slivers at either edge are absorbed into the window so the
-    timeline's total duration is preserved exactly."""
+def _splice_two_track_window(shots: List[Shot], w_start: float, w_end: float,
+                             track_ids: List[int], crop_rect: Optional[tuple],
+                             shot_type: str,
+                             min_shot_seconds: float) -> List[Shot]:
+    """Replace the covered span with ONE two-track shot (VSPLIT or TWO_SHOT),
+    trimming overlapping base shots at the window edges. Unlike
+    `_splice_window` (bounded directives, conservative), an exchange window
+    legitimately spans several base shots — that is the whole point of
+    cutting to a split during it. Sub-minimum slivers at either edge are
+    absorbed into the window so the timeline's total duration is preserved
+    exactly."""
     result: List[Shot] = []
     for shot in shots:
         s, e = shot.start, shot.end
@@ -643,31 +650,88 @@ def _splice_vsplit_window(shots: List[Shot], w_start: float, w_end: float,
         # the covered middle of this shot is replaced by the window
     if w_end - w_start < min_shot_seconds:
         return shots  # degenerate after absorption — keep the base list
-    result.append(Shot(w_start, w_end, SHOT_VSPLIT, track_ids, crop_rect))
+    result.append(Shot(w_start, w_end, shot_type, track_ids, crop_rect))
     result.sort(key=lambda s: (s.start, s.shot_type != SHOT_VSPLIT))
     return result
+
+
+def _track_present_in_span(spine_tracks: Dict[int, dict], track_id: int,
+                           start: float, end: float) -> bool:
+    """Did `track_id` actually have face detections inside [start, end)?
+    An exchange between a track and a face that was never on screen is not
+    an exchange — the normal single/wide shots hold instead (the "showing
+    feet / nothing to split" rule: show what's actually there)."""
+    track = spine_tracks.get(track_id)
+    if not track:
+        return False
+    frames = track.get("frames") or []
+    return any(start <= float(t) < end for t in frames)
+
+
+def _tracks_close_enough(spine_tracks: Dict[int, dict], track_a: int,
+                         track_b: int, start: float, end: float,
+                         frame_w: int, frame_h: int,
+                         aspect: float) -> bool:
+    """Can ONE crop hold both tracks' median positions at usable size?
+    Two people working together (host + guest, both in frame) get a
+    two-shot instead of a forced split; only far-apart people split."""
+    rect_a = crop_rect_for_track(spine_tracks, track_a, start, end)
+    rect_b = crop_rect_for_track(spine_tracks, track_b, start, end)
+    if rect_a is None or rect_b is None:
+        return False
+    ax, ay, aw, ah = rect_a
+    bx, by, bw, bh = rect_b
+    x0, y0 = min(ax, bx), min(ay, by)
+    x1, y1 = max(ax + aw, bx + bw), max(ay + ah, by + bh)
+    union_w, union_h = x1 - x0, y1 - y0
+    if union_w <= 0 or union_h <= 0:
+        return False
+    if union_w > frame_w * MAX_TWO_SHOT_WIDTH_FRAC:
+        return False
+    # The aspect-fit test decide_layout applies: the vertical crop needed to
+    # hold the union must fit inside the source frame.
+    return max(union_h, union_w / aspect) <= frame_h
 
 
 def plan_conversation_beats(shots: List[Shot], active: List[Optional[int]],
                             spine_tracks: Dict[int, dict],
                             min_exchange_s: float = 2.5,
                             min_span_s: float = 2.0,
-                            min_shot_seconds: float = 1.2) -> List[Shot]:
-    """Insert SHOT_VSPLIT shots over genuine two-person exchange windows,
+                            min_shot_seconds: float = 1.2,
+                            frame_w: Optional[int] = None,
+                            frame_h: Optional[int] = None,
+                            aspect: Optional[float] = None) -> List[Shot]:
+    """Cut to a two-track edit over genuine two-person exchange windows,
     preserving the base shot list everywhere else.
 
-    Uses the same conservative `_splice_window` as reaction shots, so a
-    window that would leave a sub-minimum sliver is skipped rather than
-    breaking the no-jitter/min-duration guarantees. Returns a NEW list.
+    A window becomes a VERTICAL SPLIT only when both people are on screen
+    AND too far apart for one crop; when they are working together in one
+    frame it becomes a TWO_SHOT instead (composition re-decides the exact
+    layout). Windows where either "participant" has no face on screen are
+    skipped entirely — the normal single/wide logic holds. Returns a NEW
+    list, and uses the same conservative splice as reaction shots (a window
+    that would leave a sub-minimum sliver is skipped rather than breaking
+    the no-jitter/min-duration guarantees).
     """
     windows = find_exchange_windows(active, min_exchange_s, min_span_s)
     if not windows:
         return list(shots)
     result = list(shots)
     for w_start, w_end, track_a, track_b in windows:
+        if not (_track_present_in_span(spine_tracks, track_a, w_start, w_end)
+                and _track_present_in_span(spine_tracks, track_b, w_start, w_end)):
+            continue
         rect = two_shot_crop_rect(spine_tracks, track_a, track_b,
                                   w_start, w_end)
-        result = _splice_vsplit_window(result, w_start, w_end,
-                                       [track_a, track_b], rect,
-                                       min_shot_seconds)
+        if rect is None:
+            continue
+        close = (frame_w is not None and frame_h is not None
+                 and aspect is not None
+                 and _tracks_close_enough(spine_tracks, track_a, track_b,
+                                          w_start, w_end, frame_w, frame_h,
+                                          aspect))
+        result = _splice_two_track_window(
+            result, w_start, w_end, [track_a, track_b], rect,
+            SHOT_TWO_SHOT if close else SHOT_VSPLIT,
+            min_shot_seconds)
     return result

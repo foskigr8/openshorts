@@ -163,18 +163,36 @@ GPU pieces that were silently wrong and are now deterministic:
   stable anonymous face identities. `0` reverts to the pre-conversation
   pipeline. `SPLIT=0` keeps the speaker-binding fix but skips the beat
   planner; `SPLIT_MIN_EXCHANGE_S=2.5` / `SPLIT_MIN_SPAN_S=2.0` tune the
-  exchange windows; `VSPLIT_BAND_FRAC=0` (default) stacks the two panels
-  edge-to-edge with no separating bar — each panel fills half the frame and
-  frames its person head-and-shoulders (9:8 for 9:16 output, no letterbox,
-  no distortion), and captions overlay the seam (middle) whenever a vertical
-  split is on screen while keeping the user's chosen position (usually
-  bottom) everywhere else in the clip. `VSPLIT_BAND_FRAC>0` re-adds a band.
-  `CAPTION_POSITION` only affects non-split clips.
+  exchange windows. An exchange only cuts to a two-track edit when BOTH
+  participants actually have faces on screen during the window (no face →
+  the normal single/wide shot holds — the "show what's actually there"
+  rule), and then as a VERTICAL SPLIT only when they are too far apart for
+  one crop; people working together in one frame become a TWO_SHOT instead.
+  `VSPLIT_BAND_FRAC=0` (default) stacks the two panels edge-to-edge with no
+  separating bar — each panel fills half the frame and frames its person
+  head-and-shoulders (9:8 for 9:16 output, no letterbox, no distortion), and
+  captions overlay the seam (middle) whenever a vertical split is on screen
+  while keeping the user's chosen position (usually bottom) everywhere else
+  in the clip. `VSPLIT_BAND_FRAC>0` re-adds a band. `CAPTION_POSITION` only
+  affects non-split clips.
 - `SPEAKER_SMOOTH_WINDOW` — majority-filter window (default `3`) for the
   per-second LR-ASD speaker track before it votes for bindings or falls
   through as the per-second fallback: a one-second crowd flicker (reacting
   listener vs talker) no longer flips the frame to the wrong person or
   fabricates a split exchange. `0`/`1` disables the smoothing.
+
+## Dashboard ordering & data files
+
+- History and the Generated Shorts side rail sort **newest-to-oldest at all
+  times**: each clip's `created_at` is its own file mtime (when it was
+  actually generated), jobs are ordered by their newest clip, and the job
+  dir's `.created` marker self-heals on first read so restored/touched files
+  can't keep reshuffling history.
+- Metadata JSON never appears as a video: the dead-job label skips non-media
+  files, and the raw `*_metadata.json` files live in a collapsible
+  **storage · data files** subsection of the History tab (hidden by default)
+  backed by `GET /api/history/meta` and `DELETE /api/history/meta`
+  (`?job_id=` for one job, no arg = delete for all).
 - `VSPLIT_TRACK` — per-panel smart-crop tracking for vertical splits
   (default `1`): each panel's crop glides (AutoFlip-style) to keep its
   person framed as they move — head-anchored with headroom above the hair,

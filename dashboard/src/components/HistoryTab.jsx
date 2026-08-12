@@ -15,6 +15,9 @@ export default function HistoryTab({ onReopenProject, search = '' }) {
   const [reopenError, setReopenError] = useState('');
   const [error, setError] = useState('');
   const [deleting, setDeleting] = useState(null);
+  const [showDataFiles, setShowDataFiles] = useState(false);
+  const [dataFiles, setDataFiles] = useState(null);
+  const [deletingData, setDeletingData] = useState(false);
 
   useEffect(() => {
     apiJson('/api/history')
@@ -33,7 +36,9 @@ export default function HistoryTab({ onReopenProject, search = '' }) {
       .catch(() => {});
   }, []);
 
-  // Group videos by job, preserving the newest-first order of /api/history.
+  // Group videos by job. Newest-to-oldest AT ALL TIMES: each job's clips
+  // are sorted by their own recency (a clip finished a minute ago leads its
+  // job), then jobs by their newest clip — never relies on server order.
   const groups = useMemo(() => {
     const byJob = new Map();
     for (const v of videos || []) {
@@ -42,6 +47,12 @@ export default function HistoryTab({ onReopenProject, search = '' }) {
       byJob.get(key).push(v);
     }
     let entries = [...byJob.entries()];
+    for (const [, vids] of entries) {
+      vids.sort((a, b) =>
+        new Date(b.created_at || 0) - new Date(a.created_at || 0));
+    }
+    entries.sort(([, a], [, b]) =>
+      new Date(b[0]?.created_at || 0) - new Date(a[0]?.created_at || 0));
     if (filter !== 'all') {
       entries = entries.filter(([, vids]) => (vids[0]?.status || 'completed') === filter);
     }
@@ -109,6 +120,41 @@ export default function HistoryTab({ onReopenProject, search = '' }) {
         hour: '2-digit', minute: '2-digit',
       })
     : '');
+
+  const fmtSize = (bytes) => {
+    const b = Number(bytes);
+    if (!Number.isFinite(b) || b <= 0) return '0B';
+    if (b < 1024 * 1024) return `${Math.round(b / 1024)}KB`;
+    if (b < 1024 * 1024 * 1024) return `${(b / (1024 * 1024)).toFixed(1)}MB`;
+    return `${(b / (1024 * 1024 * 1024)).toFixed(2)}GB`;
+  };
+
+  const toggleDataFiles = () => {
+    const next = !showDataFiles;
+    setShowDataFiles(next);
+    if (next && dataFiles === null) {
+      apiJson('/api/history/meta')
+        .then((d) => setDataFiles(d || { files: [], total_bytes: 0 }))
+        .catch(() => setDataFiles({ files: [], total_bytes: 0 }));
+    }
+  };
+
+  const handleDeleteAllData = async () => {
+    if (deletingData) return;
+    const count = dataFiles?.files?.length || 0;
+    if (!window.confirm(
+      `Delete ALL metadata JSON files (${count} file${count === 1 ? '' : 's'}, ~${fmtSize(dataFiles?.total_bytes)})?\n\nClips stay on disk, but deleting a job's metadata removes it from this library. This can't be undone.`)) return;
+    setDeletingData(true);
+    try {
+      await apiFetch('/api/history/meta', { method: 'DELETE' });
+      setDataFiles({ files: [], total_bytes: 0 });
+      setVideos([]); // metadata is gone → the library list is empty now
+    } catch (e) {
+      setError('Could not delete the data files.');
+    } finally {
+      setDeletingData(false);
+    }
+  };
 
   const handleDelete = async (jobId, title) => {
     if (deleting) return;
@@ -286,6 +332,65 @@ export default function HistoryTab({ onReopenProject, search = '' }) {
           </div>
         </div>
         ))}
+      </div>
+
+      {/* Data files — hidden by default (owner rule: JSON only when asked).
+          A collapsible subsection to inspect or bulk-delete the job
+          metadata files, never surfaced as videos. */}
+      <div className="mt-12 border-t border-rule pt-6">
+        <button
+          onClick={toggleDataFiles}
+          className="flex items-center justify-between w-full text-left"
+        >
+          <span className="readout uppercase tracking-wider text-muted">
+            storage · data files
+          </span>
+          <span className="readout text-[10px] text-muted">
+            {showDataFiles ? 'hide' : 'show'}
+          </span>
+        </button>
+        {showDataFiles && (
+          <div className="mt-4">
+            {dataFiles === null ? (
+              <div className="flex justify-center py-6 text-muted">
+                <Loader2 size={16} className="animate-spin text-brass" />
+              </div>
+            ) : (
+              <>
+                <div className="flex items-center justify-between mb-3">
+                  <p className="readout text-[10px] text-muted">
+                    {dataFiles.files?.length || 0} metadata file(s) · {fmtSize(dataFiles.total_bytes)}
+                  </p>
+                  <button
+                    onClick={handleDeleteAllData}
+                    disabled={deletingData || !(dataFiles.files?.length)}
+                    className="btn-ghost px-3 py-1.5 text-xs text-danger hover:text-danger disabled:opacity-40"
+                  >
+                    {deletingData
+                      ? <><Loader2 size={12} className="animate-spin inline mr-1" />deleting…</>
+                      : <><Trash2 size={12} className="inline mr-1" />delete all</>}
+                  </button>
+                </div>
+                {dataFiles.files?.length === 0 ? (
+                  <p className="text-xs text-muted">no metadata files on disk</p>
+                ) : (
+                  <ul className="max-h-64 overflow-y-auto custom-scrollbar space-y-1">
+                    {dataFiles.files.map((f) => (
+                      <li key={f.path} className="flex items-center justify-between gap-3 px-3 py-2 rounded-input border border-rule bg-paper">
+                        <div className="min-w-0">
+                          <p className="text-xs text-ink truncate" title={f.filename}>{f.filename}</p>
+                          <p className="readout text-[10px] text-muted truncate">
+                            {f.job_id} · {fmtSize(f.size_bytes)} · {fmtDate(f.modified)}
+                          </p>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

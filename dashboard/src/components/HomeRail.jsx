@@ -129,7 +129,10 @@ export default function HomeRail({ onViewAll, search = '', activeJob = null, onO
   // would show nothing and the user would think the project failed to create.
   // Merge the locally-known running job in at the top until the backend
   // catches up and reports it itself.
-  const fetched = videos || [];
+  // Newest-to-oldest at all times in the side panel — never rely on the
+  // server's array order (a freshly finished clip must lead its job).
+  const fetched = (videos || []).slice().sort(
+    (a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
   const activeStatus = activeJob
     ? (activeJob.status === 'complete' ? 'completed'
       : activeJob.status === 'error' || activeJob.status === 'cancelled' ? 'failed'
