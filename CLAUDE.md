@@ -158,6 +158,19 @@ GPU pieces that were silently wrong and are now deterministic:
   whenever a vertical split is on screen and keep the user's chosen position
   (usually bottom) everywhere else in the clip; `CAPTION_POSITION` only
   affects non-split clips.
+- `VSPLIT_TRACK` — per-panel smart-crop tracking for vertical splits
+  (default `1`): each panel's crop glides (AutoFlip-style) to keep its
+  person framed as they move — head-anchored with headroom above the hair,
+  dead-zone hysteresis (micro head-bobs don't pan), lerp smoothing (cinematic
+  glide), hard-cut snap (pixel-diff scene cut), boundary clamping, a
+  containment projection that never lets the face leave the crop, and a
+  full-width fallback when the face is lost. `0` keeps the static
+  union-box panels (the pre-tracking behavior). Tuning knobs:
+  `VSPLIT_HEADROOM=0.18`, `VSPLIT_SIDE_MARGIN=0.15`, `VSPLIT_VERT_MARGIN=0.10`,
+  `VSPLIT_DEADZONE=0.02` (fraction of crop), `VSPLIT_SMOOTH=0.12` (pan lerp),
+  `VSPLIT_SMOOTH_ZOOM=0.06` (zoom lerp), `VSPLIT_FULLWIDTH_FRAC=0.60` (box
+  area fraction that triggers the wide-shot fallback), `VSPLIT_LOST_HOLD_FRAMES=30`,
+  `VSPLIT_CUT_THRESHOLD=25.0` (64x36 gray mean-abs-diff that counts as a cut).
 - `SCENE_DIRECTION` — the per-clip Gemini camera-director call, now **`0` by
   default** (the local director replaced it; opt-in only if you want Gemini
   naming who to frame).

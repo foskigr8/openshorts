@@ -391,6 +391,10 @@ class ComposedShot:
     layout: str
     crop: Optional[Rect] = None
     subjects: List[Box] = None
+    # Which spine track each entry of `subjects` belongs to (planner order).
+    # The vsplit tracker uses this to fetch per-frame face boxes at render
+    # time; single/two shots leave it None (their crops are static).
+    track_ids: List[int] = None
     # VSPLIT only: (top_panel_crop, bottom_panel_crop), each a contained,
     # aspect-correct crop of its participant for the whole segment.
     panels: Optional[Tuple[Rect, Rect]] = None
@@ -672,6 +676,7 @@ def _compose_shot(shot, spine_tracks: Dict[int, dict], active_tracks,
         panel_a = crop_rect_containing(subjects[0], frame_w, frame_h, _panel_aspect)
         panel_b = crop_rect_containing(subjects[1], frame_w, frame_h, _panel_aspect)
         return ComposedShot(shot.start, shot.end, LAYOUT_VSPLIT, None, subjects,
+                            track_ids=list(shot.track_ids),
                             panels=(panel_a, panel_b))
 
     layout = decide_layout(subjects, _speaker_shares(active_tracks, shot),
@@ -739,6 +744,35 @@ def _crop_resize(frame, crop: Optional[Rect], frame_w: int, frame_h: int,
     if crop is None:
         crop = (0.0, 0.0, float(frame_w), float(frame_h))
     x, y, w, h = _integer_crop(crop, frame_w, frame_h)
+    return cv2.resize(frame[y:y + h, x:x + w], (out_w, out_h),
+                      interpolation=cv2.INTER_LANCZOS4)
+
+
+def _crop_resize_panel(frame, crop: Optional[Rect], frame_w: int, frame_h: int,
+                       out_w: int, out_h: int, aspect: float):
+    """Crop + resize one vsplit panel. Aspect-correct crops fill the panel;
+    a degenerate crop (tracking fallback, or a source smaller than the panel
+    aspect) is letterboxed instead of stretched, so faces never distort."""
+    import cv2
+    if crop is None:
+        crop = (0.0, 0.0, float(frame_w), float(frame_h))
+    x, y, w, h = _integer_crop(crop, frame_w, frame_h)
+    if w <= 0 or h <= 0:
+        return np.zeros((out_h, out_w, 3), dtype=np.uint8)
+    actual = w / h
+    if abs(actual - aspect) > 0.03:
+        # Letterbox: scale to fit inside the panel box, black bars for the
+        # rest. Preserves the whole-frame view without distortion.
+        scale = min(out_w / w, out_h / h)
+        resized = cv2.resize(
+            frame[y:y + h, x:x + w],
+            (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+            interpolation=cv2.INTER_LANCZOS4)
+        canvas = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+        ox = max(0, (out_w - resized.shape[1]) // 2)
+        oy = max(0, (out_h - resized.shape[0]) // 2)
+        canvas[oy:oy + resized.shape[0], ox:ox + resized.shape[1]] = resized
+        return canvas
     return cv2.resize(frame[y:y + h, x:x + w], (out_w, out_h),
                       interpolation=cv2.INTER_LANCZOS4)
 
@@ -921,12 +955,16 @@ def _burn_captions_on(source: str, output: str, ass_filter: str, device):
 
 def _render_with_splits(input_video: str, output_video: str, composed: Sequence[ComposedShot],
                         frame_w: int, frame_h: int, out_w: int, out_h: int,
-                        aspect: float) -> None:
+                        aspect: float, tracking: Optional[Dict[int, dict]] = None,
+                        spine_tracks: Optional[Dict[int, dict]] = None) -> None:
     """Render split shots frame-by-frame; regular shots remain static crops.
 
     This intentionally handles only the split case in Python. The normal path
     stays an ffmpeg filtergraph, while the vendored split renderer receives the
-    BGR arrays it was designed for.
+    BGR arrays it was designed for. When `tracking` maps a shot index to
+    ``{"track_ids": [...], "trackers": [...]}``, that shot's vsplit panels
+    are per-frame tracked crops (smart_crop.PanelTracker) instead of the
+    static union-box panels; spine_tracks supplies the per-frame face boxes.
     """
     import cv2
     import subprocess
@@ -935,6 +973,9 @@ def _render_with_splits(input_video: str, output_video: str, composed: Sequence[
     from ffmpeg_utils import METADATA_SCRUB, QUALITY_FAST, video_encode_args
     from vendor.pyautoflip import render_split_screen_from_centers
 
+    _panel_aspect = aspect * 2.0 / (
+        1.0 - float(os.environ.get("VSPLIT_BAND_FRAC", "0.05")))
+    _cut_threshold = float(os.environ.get("VSPLIT_CUT_THRESHOLD", "25.0"))
     duration, fps, _, _ = _duration_and_size(input_video)
     cap = cv2.VideoCapture(input_video)
     fd, silent = tempfile.mkstemp(prefix="openshorts_v3_", suffix=".mp4")
@@ -946,23 +987,50 @@ def _render_with_splits(input_video: str, output_video: str, composed: Sequence[
     try:
         index = 0
         aspect_tuple = _aspect_tuple(aspect)
+        shot_index = 0
+        prev_small = None
         while True:
             ok, frame = cap.read()
             if not ok:
                 break
             timestamp = index / fps
-            shot = next((s for s in composed if s.start <= timestamp < s.end), composed[-1])
+            while (shot_index < len(composed) - 1
+                   and timestamp >= composed[shot_index + 1].start):
+                shot_index += 1
+            shot = composed[shot_index]
+            # Cheap scene-cut signal for the tracked panels: mean abs diff of
+            # a 64x36 gray thumbnail. A hard cut lights this up far above
+            # talking-head motion, so a cut snaps the crop instead of
+            # gliding over it. Computed for every frame so the comparison is
+            # always against the true previous frame.
+            if tracking:
+                small = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY),
+                                   (64, 36))
+                scene_cut = (prev_small is not None and float(np.mean(
+                    cv2.absdiff(prev_small, small))) > _cut_threshold)
+                prev_small = small
+            else:
+                scene_cut = False
             if shot.layout == LAYOUT_VSPLIT and shot.panels:
-                top_crop, bottom_crop = shot.panels
                 _band = float(os.environ.get("VSPLIT_BAND_FRAC", "0.05"))
                 band_h = max(8, int(round(out_h * _band)))
                 panel_h = max(1, int(round((out_h - band_h) / 2)))
                 total_h = 2 * panel_h + band_h
                 top_y = max(0, (out_h - total_h) // 2)
-                top = _crop_resize(frame, top_crop, frame_w, frame_h,
-                                   out_w, panel_h)
-                bottom = _crop_resize(frame, bottom_crop, frame_w, frame_h,
-                                      out_w, panel_h)
+                entry = (tracking or {}).get(shot_index)
+                if entry:
+                    boxes = []
+                    for tid in entry["track_ids"]:
+                        track = (spine_tracks or {}).get(tid)
+                        boxes.append(_nearest_box(track, timestamp) if track else None)
+                    top_crop = entry["trackers"][0].step(boxes[0], scene_cut)
+                    bottom_crop = entry["trackers"][1].step(boxes[1], scene_cut)
+                else:
+                    top_crop, bottom_crop = shot.panels
+                top = _crop_resize_panel(frame, top_crop, frame_w, frame_h,
+                                         out_w, panel_h, _panel_aspect)
+                bottom = _crop_resize_panel(frame, bottom_crop, frame_w, frame_h,
+                                            out_w, panel_h, _panel_aspect)
                 canvas = np.zeros((out_h, out_w, 3), dtype=np.uint8)
                 canvas[top_y:top_y + panel_h] = top
                 canvas[top_y + panel_h:top_y + panel_h + band_h] = (22, 22, 22)
@@ -1100,8 +1168,40 @@ def render(input_video, final_output_video, aspect_ratio,
         # vsplit the middle band is reserved for captions; burn them in a
         # second pass onto the captioned output (the old hard refusal meant
         # captioned clips could never contain a split at all).
+        # Per-panel smart-crop tracking (AutoFlip-style glide) is on by
+        # default; VSPLIT_TRACK=0 keeps the static union-box panels.
+        _tracking: Dict[int, dict] = {}
+        _track = os.environ.get("VSPLIT_TRACK", "1").strip().lower()
+        if _track not in ("0", "false", "no", "off"):
+            from smart_crop import PanelTracker
+            _panel_aspect = aspect_ratio * 2.0 / (
+                1.0 - float(os.environ.get("VSPLIT_BAND_FRAC", "0.05")))
+            _track_knobs = dict(
+                headroom=float(os.environ.get("VSPLIT_HEADROOM", "0.18")),
+                side_margin=float(os.environ.get("VSPLIT_SIDE_MARGIN", "0.15")),
+                vert_margin=float(os.environ.get("VSPLIT_VERT_MARGIN", "0.10")),
+                dead_zone=float(os.environ.get("VSPLIT_DEADZONE", "0.02")),
+                smooth=float(os.environ.get("VSPLIT_SMOOTH", "0.12")),
+                smooth_zoom=float(os.environ.get("VSPLIT_SMOOTH_ZOOM", "0.06")),
+                full_width_area_frac=float(
+                    os.environ.get("VSPLIT_FULLWIDTH_FRAC", "0.60")),
+                lost_hold_frames=int(
+                    os.environ.get("VSPLIT_LOST_HOLD_FRAMES", "30")),
+            )
+            for _idx, _s in enumerate(composed):
+                if _s.layout == LAYOUT_VSPLIT and _s.panels and _s.track_ids:
+                    _tracking[_idx] = {
+                        "track_ids": list(_s.track_ids),
+                        "trackers": [
+                            PanelTracker(frame_w, frame_h, _panel_aspect,
+                                         **_track_knobs).reset(_s.panels[0]),
+                            PanelTracker(frame_w, frame_h, _panel_aspect,
+                                         **_track_knobs).reset(_s.panels[1]),
+                        ],
+                    }
         _render_with_splits(input_video, final_output_video, composed, frame_w, frame_h,
-                            out_w, out_h, aspect_ratio)
+                            out_w, out_h, aspect_ratio,
+                            tracking=_tracking or None, spine_tracks=tracks)
         if ass_filter and captioned_output:
             # Vertical splits ALWAYS burn captions in the middle band, no
             # matter which caption position the user picked for normal clips;
