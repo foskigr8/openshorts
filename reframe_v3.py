@@ -708,6 +708,24 @@ def _frame_at(cap, timestamp: float):
     return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
 
+def _wide_fallback_composed(shot, subjects, frame_w, frame_h,
+                            track_ids=None) -> ComposedShot:
+    """A LAYOUT_WIDE composition that CONTAINS the subjects: 4:3 centred on
+    them when they fit, else the whole frame (fit-rendered, letterboxed).
+    Used when a tight single or a split's panels cannot contain the
+    subjects' movement ranges (e.g. a full-frame-wide union in a fast show)
+    — never fails containment."""
+    _union = union_box(*[s for s in subjects if s is not None])
+    if _union is not None:
+        _wide = _wide43_rect(frame_w, frame_h, subjects)
+        if contains(_wide, _union):
+            return ComposedShot(shot.start, shot.end, LAYOUT_WIDE, _wide,
+                                subjects, track_ids=track_ids)
+    return ComposedShot(shot.start, shot.end, LAYOUT_WIDE,
+                        (0.0, 0.0, float(frame_w), float(frame_h)),
+                        subjects, track_ids=track_ids)
+
+
 def _compose_shot(shot, spine_tracks: Dict[int, dict], active_tracks,
                   saliency_map: np.ndarray, frame_w: int, frame_h: int,
                   aspect: float) -> ComposedShot:
@@ -767,6 +785,14 @@ def _compose_shot(shot, spine_tracks: Dict[int, dict], active_tracks,
         _panel_aspect = aspect * 2.0 / (1.0 - _band)
         panel_a = crop_rect_containing(subjects[0], frame_w, frame_h, _panel_aspect)
         panel_b = crop_rect_containing(subjects[1], frame_w, frame_h, _panel_aspect)
+        if not (contains(panel_a, subjects[0])
+                and contains(panel_b, subjects[1])):
+            # The subjects' movement ranges span more than the panels can
+            # hold (the full-frame-wide union that failed clip 3) — show
+            # the wide instead of failing composition.
+            return _wide_fallback_composed(
+                shot, subjects, frame_w, frame_h,
+                track_ids=list(shot.track_ids))
         return ComposedShot(shot.start, shot.end, LAYOUT_VSPLIT, None, subjects,
                             track_ids=list(shot.track_ids),
                             panels=(panel_a, panel_b))
@@ -797,6 +823,11 @@ def _compose_shot(shot, spine_tracks: Dict[int, dict], active_tracks,
                                        _panel_aspect)
         panel_b = crop_rect_containing(subjects[1], frame_w, frame_h,
                                        _panel_aspect)
+        if not (contains(panel_a, subjects[0])
+                and contains(panel_b, subjects[1])):
+            return _wide_fallback_composed(
+                shot, subjects, frame_w, frame_h,
+                track_ids=list(shot.track_ids or []))
         return ComposedShot(shot.start, shot.end, LAYOUT_VSPLIT, None,
                             subjects, track_ids=list(shot.track_ids or []),
                             panels=(panel_a, panel_b))
@@ -1349,7 +1380,9 @@ def render(input_video, final_output_video, aspect_ratio,
         active = [fallback] * max(1, int(np.ceil(duration)))
         print("   ⚠️ No confident active-speaker binding; holding a single fallback track")
 
-    planned = shot_planner.plan_shots(active, tracks, total_duration=duration)
+    planned = shot_planner.plan_shots(
+        active, tracks, total_duration=duration,
+        max_shot_seconds=float(os.environ.get("MAX_SHOT_SECONDS", "8")))
     planned = shot_planner.insert_reaction_shots(
         planned, _directive_dicts(focus_directives), tracks, frame_w)
     # Conversation framing (owner-approved, fully local): vertical split on
@@ -1363,6 +1396,7 @@ def render(input_video, final_output_video, aspect_ratio,
             planned, active, tracks,
             min_exchange_s=float(os.environ.get("SPLIT_MIN_EXCHANGE_S", "2.5")),
             min_span_s=float(os.environ.get("SPLIT_MIN_SPAN_S", "2.0")),
+            max_split_span=float(os.environ.get("SPLIT_MAX_SPAN_S", "12")),
             frame_w=frame_w, frame_h=frame_h, aspect=aspect_ratio)
     print(f"   ↳ shot planning: {_time.time() - _t0:.0f}s")
     composed = compose_shots(planned, tracks, active, input_video, frame_w, frame_h, aspect_ratio)

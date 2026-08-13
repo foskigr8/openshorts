@@ -132,6 +132,27 @@ def test_cascading_reabsorption_across_three_short_runs():
     assert result == [(0.0, 10.0, 0)]
 
 
+def test_cap_run_durations_splits_long_runs():
+    # A 29s static shot cannot follow a moving subject (the cutout + "not
+    # framed" failure from the first rendered run) — cap it into chunks so
+    # each chunk re-anchors on the subject's current position.
+    runs = [(0.0, 29.0, 0)]
+    out = sp._cap_run_durations(runs, max_shot_seconds=8.0,
+                                forced_boundaries=None)
+    assert len(out) == 4  # ceil(29/8) = 4 chunks
+    assert abs(sum(e - s for s, e, _ in out) - 29.0) < 1e-6
+    assert all(e - s <= 8.0 + 1e-6 for s, e, _ in out)
+
+
+def test_cap_run_durations_keeps_short_runs_and_forced_boundaries():
+    runs = [(0.0, 5.0, 0), (5.0, 20.0, 1)]
+    out = sp._cap_run_durations(runs, max_shot_seconds=8.0,
+                                forced_boundaries=[10.0])
+    starts = [s for s, _, _ in out]
+    assert 10.0 in starts  # a forced boundary is never crossed by a chunk
+    assert (0.0, 5.0, 0) in out  # short run untouched
+
+
 # ---------------------------------------------------------------------------
 # crop_rect_for_track — the static-box computation
 # ---------------------------------------------------------------------------
@@ -207,9 +228,13 @@ def test_plan_shots_end_to_end_with_realistic_flicker():
     })
     active = [0, 0, 0, 0, 0, 1, 0, 0, 0, 0]
     shots = sp.plan_shots(active, spine, min_shot_seconds=1.2)
-    assert len(shots) == 1
-    assert shots[0].track_ids == [0]
-    assert shots[0].start == 0.0 and shots[0].end == 10.0
+    # The 10s single-speaker run is capped into <=8s chunks (each chunk
+    # re-anchors on the current position) — but the ASD flicker still has
+    # zero visible effect: every shot is track 0, covering 0-10.
+    assert len(shots) == 2
+    assert all(s.track_ids == [0] for s in shots)
+    assert shots[0].start == 0.0 and shots[-1].end == 10.0
+    assert all(s.duration <= 8.0 + 1e-6 for s in shots)
 
 
 # ---------------------------------------------------------------------------

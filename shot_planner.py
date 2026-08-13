@@ -44,6 +44,7 @@ fabricated here.
 """
 from __future__ import annotations
 
+import math
 import statistics
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -271,6 +272,7 @@ def plan_shots_from_samples(samples: List[Tuple[float, Optional[int]]],
                             total_duration: float,
                             forced_boundaries: Optional[List[float]] = None,
                             min_shot_seconds: float = 1.2,
+                            max_shot_seconds: float = 8.0,
                             default_wide_rect: Optional[tuple] = None) -> List[Shot]:
     """The general entry point: arbitrary-timestamp samples -> a stable shot
     list. See `plan_shots` for the 1Hz-feed convenience wrapper.
@@ -279,6 +281,12 @@ def plan_shots_from_samples(samples: List[Tuple[float, Optional[int]]],
     runs = raw_runs(filled, total_duration)
     runs = split_at_forced_boundaries(runs, forced_boundaries)
     runs = merge_short_runs(runs, min_shot_seconds, forced_boundaries)
+    # Cap the length of a single static shot: a 29s static crop cannot follow
+    # a moving subject (the cutout + "not framed" failure from the first
+    # rendered run). Splitting a long run into ≤ max_shot_seconds chunks
+    # re-anchors each chunk on the subject's CURRENT position — every chunk
+    # is still one static crop, so the no-jitter property holds.
+    runs = _cap_run_durations(runs, max_shot_seconds, forced_boundaries)
 
     shots = []
     for start, end, target in runs:
@@ -288,6 +296,35 @@ def plan_shots_from_samples(samples: List[Tuple[float, Optional[int]]],
             rect = crop_rect_for_track(spine_tracks, target, start, end)
             shots.append(Shot(start, end, SHOT_SINGLE, [target], rect))
     return shots
+
+
+def _cap_run_durations(runs, max_shot_seconds: float,
+                       forced_boundaries: Optional[List[float]]
+                       ) -> List[Tuple[float, float, Optional[int]]]:
+    """Split runs longer than `max_shot_seconds` into even chunks (a cut
+    every few seconds lets the composition re-anchor on the current
+    position). Never splits across a forced boundary."""
+    if max_shot_seconds <= 0:
+        return list(runs)
+    forced = set(forced_boundaries or [])
+    out = []
+    for start, end, value in runs:
+        if end - start <= max_shot_seconds:
+            out.append((start, end, value))
+            continue
+        t = start
+        cuts = sorted(b for b in forced if start < b < end)
+        boundaries = [start] + cuts + [end]
+        for i in range(len(boundaries) - 1):
+            a, b = boundaries[i], boundaries[i + 1]
+            if b - a <= max_shot_seconds:
+                out.append((a, b, value))
+                continue
+            n = int(math.ceil((b - a) / max_shot_seconds))
+            step = (b - a) / n
+            for k in range(n):
+                out.append((a + k * step, a + (k + 1) * step, value))
+    return out
 
 
 def plan_shots(per_second_active_track: List[Optional[int]],
@@ -709,6 +746,7 @@ def plan_conversation_beats(shots: List[Shot], active: List[Optional[int]],
                             min_exchange_s: float = 2.5,
                             min_span_s: float = 2.0,
                             min_shot_seconds: float = 1.2,
+                            max_split_span: float = 12.0,
                             frame_w: Optional[int] = None,
                             frame_h: Optional[int] = None,
                             aspect: Optional[float] = None) -> List[Shot]:
@@ -729,6 +767,11 @@ def plan_conversation_beats(shots: List[Shot], active: List[Optional[int]],
         return list(shots)
     result = list(shots)
     for w_start, w_end, track_a, track_b in windows:
+        if max_split_span and w_end - w_start > max_split_span:
+            # A split held for 100s is never a genuine exchange (clip 3 of
+            # the first rendered run: 27.5-129.5s). Clamp to a real
+            # conversation window; the surrounding singles resume after.
+            w_end = w_start + max_split_span
         if not (_track_present_in_span(spine_tracks, track_a, w_start, w_end)
                 and _track_present_in_span(spine_tracks, track_b, w_start, w_end)):
             continue

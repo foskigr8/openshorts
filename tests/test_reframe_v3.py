@@ -556,7 +556,7 @@ from reframe_v3 import (  # noqa: E402
     _track_nearest_x,
     attention_shifted_crop,
 )
-from shot_planner import SHOT_REACTION, SHOT_SINGLE, SHOT_WIDE, Shot  # noqa: E402
+from shot_planner import SHOT_REACTION, SHOT_SINGLE, SHOT_VSPLIT, SHOT_WIDE, Shot  # noqa: E402
 
 
 def _spine_two_tracks():
@@ -678,6 +678,28 @@ def test_compose_wide_fallback_when_subject_moves_too_much():
                              1920, 1080, VERTICAL_9_16)
     assert composed.layout == LAYOUT_WIDE
     assert composed.crop is not None
+    validate_composition([composed], 1920, 1080, VERTICAL_9_16)
+
+
+def test_vsplit_with_full_frame_subjects_falls_back_to_wide():
+    # Clip 3's failure: a vsplit whose subjects' movement ranges span the
+    # whole frame (0, 21, 1920, 770) can't be contained by any panel — it
+    # must fall back to the wide instead of failing composition.
+    spine = {
+        1: {"frames": [0.0, 1.0, 2.0],
+            "boxes": [(50.0, 21.0, 800.0, 700.0),
+                      (1100.0, 21.0, 800.0, 700.0),
+                      (50.0, 21.0, 800.0, 700.0)]},
+        2: {"frames": [0.0, 1.0, 2.0],
+            "boxes": [(60.0, 30.0, 800.0, 700.0),
+                      (1060.0, 30.0, 800.0, 700.0),
+                      (60.0, 30.0, 800.0, 700.0)]},
+    }
+    shot = Shot(0.0, 3.0, SHOT_VSPLIT, [1, 2], None)
+    composed = _compose_shot(shot, spine, [1, 2, 1],
+                             np.zeros((1080, 1920), dtype=np.float32),
+                             1920, 1080, VERTICAL_9_16)
+    assert composed.layout == LAYOUT_WIDE
     validate_composition([composed], 1920, 1080, VERTICAL_9_16)
 
 
