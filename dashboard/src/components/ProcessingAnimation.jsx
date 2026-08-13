@@ -290,7 +290,7 @@ const ProcessingAnimation = ({
   // The 9:16 companion: whichever clip is being compared right now.
   const compareOwner = compare ? `compare:${compare.id || compare.url}` : null;
   const comparePane = compare && (
-    <div className="shrink-0 w-full max-w-[230px] min-w-[130px]">
+    <div className="shrink-0 w-full max-w-[300px] min-w-[150px]">
       <div className="flex items-center justify-between mb-1.5 gap-2">
         <p className="readout text-[9px] uppercase tracking-wider text-brass truncate" title={compare.title}>
           {compare.title || 'clip'}
@@ -339,9 +339,9 @@ const ProcessingAnimation = ({
   );
 
   const statCell = (label, value, tone) => (
-    <div className="rounded-input border border-rule bg-paper2 px-3.5 py-3 min-w-0">
+    <div className="rounded-input border border-rule bg-paper2 px-3 py-2 min-w-0">
       <p className="readout text-[9px] text-muted uppercase tracking-wider">{label}</p>
-      <p className="text-base font-semibold mt-1 truncate leading-none tabular-nums"
+      <p className="text-sm font-semibold mt-1 truncate leading-none tabular-nums"
         style={{ color: tone || 'var(--color-ink)' }}>
         {value}
       </p>
@@ -395,8 +395,8 @@ const ProcessingAnimation = ({
 
   // ------------------------------------------------------------ in flight
   return (
-    <div className="card-lit rounded-card bg-paper animate-fade shrink-0 p-4 sm:p-5">
-      <div className="flex flex-col lg:flex-row gap-5">
+    <div className="card-lit rounded-card bg-paper animate-fade shrink-0 p-3 sm:p-4">
+      <div className="flex flex-col lg:flex-row gap-4">
         <div className="lg:w-[42%] lg:max-w-[440px] shrink-0 space-y-3">
           <div className="relative aspect-video w-full rounded-input overflow-hidden bg-black border border-rule">
             {sourceFrame}
@@ -438,8 +438,8 @@ const ProcessingAnimation = ({
             </div>
             <ProgressRing
               pct={pct}
-              size={124}
-              stroke={9}
+              size={92}
+              stroke={7}
               state={ringState}
               label={failed ? 'failed' : 'processing'}
               className="mx-auto lg:mx-0"

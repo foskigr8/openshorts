@@ -23,7 +23,11 @@ export default function HistoryTab({ onReopenProject, search = '' }) {
   // more than a couple of runs. Full-screen drops the page's max width so the
   // library can actually use the monitor.
   const [wide, toggleWide] = usePanelState('history-wide', false);
-  const [expanded, setExpanded] = useState({});   // jobId → show its clips
+  // jobId → show its clips. The most recent projects start open: a page of
+  // collapsed headings with no video on it reads as "history is broken",
+  // which is exactly what happened.
+  const [expanded, setExpanded] = useState({});
+  const [autoOpened, setAutoOpened] = useState(false);
 
   // Loaded on mount AND on demand. A single failed fetch used to leave this
   // tab stuck on its spinner with no way back except switching tabs — under
@@ -36,9 +40,10 @@ export default function HistoryTab({ onReopenProject, search = '' }) {
         if (cancelled) return;
         if (Array.isArray(d.videos)) { setVideos(d.videos); setError(''); }
       })
-      .catch(() => {
+      .catch((e) => {
         if (!cancelled) {
-          setError('Could not load your library — the server may be busy.');
+          setError(e?.detail || e?.message
+            || 'Could not load your library — the server may be busy.');
           // Never leave it null: null renders as a permanent spinner.
           setVideos((prev) => (prev === null ? [] : prev));
         }
@@ -117,6 +122,14 @@ export default function HistoryTab({ onReopenProject, search = '' }) {
     }
     return buckets;
   }, [groups]);
+
+  useEffect(() => {
+    if (autoOpened || !groups.length) return;
+    const open = {};
+    for (const [jobId] of groups.slice(0, 3)) open[jobId] = true;
+    setExpanded(open);
+    setAutoOpened(true);
+  }, [groups, autoOpened]);
 
   const FILTERS = ['all', 'completed', 'processing', 'failed'];
   const storage = system?.storage;
@@ -295,7 +308,7 @@ export default function HistoryTab({ onReopenProject, search = '' }) {
                     {project?.title || vids[0]?.title || 'Project'}
                   </p>
                   <p className="readout mt-0.5">
-                    {fmtDate(vids[0]?.created_at)} · {vids.length} clip{vids.length === 1 ? '' : 's'}
+                    {fmtDate(vids[0]?.created_at) || 'undated'} · {vids.length} clip{vids.length === 1 ? '' : 's'}
                     {vids[0]?.status && vids[0].status !== 'completed' && (
                       <span className={`ml-2 px-2 py-0.5 rounded-full text-[10px] ${
                         vids[0].status === 'failed' ? 'bg-danger/10 text-danger' : 'bg-brass/15 text-brass'

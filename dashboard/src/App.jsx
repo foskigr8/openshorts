@@ -1162,29 +1162,22 @@ function App() {
           {activeTab === 'dashboard' && hasProject && (
             <div className="flex h-full min-h-0">
               <div className="flex-1 min-w-0 flex flex-col">
-                {/* Processing hero — same gradient-emphasis headline as Home */}
-                <div className="px-5 pt-4 pb-1 shrink-0">
-                  <p className="eyebrow">live pipeline</p>
-                  <h1 className="font-display lowercase text-2xl text-ink tracking-tight">
-                    making{' '}
-                    <span
-                      style={{
-                        background: 'linear-gradient(180deg, #f87171 0%, #ef4444 60%, #991b1b 100%)',
-                        WebkitBackgroundClip: 'text',
-                        WebkitTextFillColor: 'transparent',
-                        backgroundClip: 'text',
-                      }}
-                    >
-                      viral shorts
-                    </span>
+                {/* One line: which project, and where it is. The decorative
+                    "making viral shorts" headline was costing 70px of a
+                    940px-tall content column on a 1080p laptop, which is why
+                    the clips always sat below the fold. */}
+                <div className="px-4 pt-3 pb-1 shrink-0 flex items-baseline gap-3">
+                  <h1 className="font-display lowercase text-lg text-ink truncate" title={active?.title}>
+                    {active?.title || 'project'}
                   </h1>
+                  <span className="readout text-[10px] text-muted truncate">
+                    {status === 'complete' ? 'done'
+                      : status === 'error' ? 'stopped'
+                        : status === 'cancelled' ? 'cancelled'
+                          : progress?.stage || 'queued'}
+                  </span>
                 </div>
-                {/* Full-width pipeline header (reference layout) — this is the
-                    real curved-path/icon-node tracker; it needs the full
-                    content width to read properly, not the narrow left
-                    column, which only ever showed the cramped `compact` dots
-                    variant even after the wide one was built. */}
-                <div className="px-5 pt-2 pb-1 shrink-0">
+                <div className="px-4 pb-1 shrink-0">
                   <StageTracker
                     stage={progress?.stage}
                     failed={status === 'error' || status === 'cancelled'}
@@ -1199,7 +1192,7 @@ function App() {
                     below the grid and fell outside the visible panel — the
                     "where is my video right now" answer was the thing pushed off
                     screen. Full width fits grid and ring side by side. */}
-                <div className="flex-1 min-h-0 flex flex-col gap-4 p-4 overflow-y-auto custom-scrollbar animate-fade">
+                <div className="flex-1 min-h-0 flex flex-col gap-3 px-4 pb-4 pt-1 overflow-y-auto custom-scrollbar animate-fade">
                 {processingMedia && (
                   <ProcessingAnimation
                     media={processingMedia}
@@ -1313,8 +1306,12 @@ function App() {
                     // their slot to a real ResultCard the moment the backend
                     // surfaces them; the rest stay "rendering…" placeholders.
                     const readyCount = results?.clips?.length || 0;
+                    // Never fewer slots than you asked for. clips_total is
+                    // what the picker has found SO FAR — its keep-looking loop
+                    // can report 2 and then 4 — so trusting it alone made a
+                    // 4-clip job look like a 2-clip job for the first minutes.
                     const slotCount = viewStatus === 'processing'
-                      ? (progress?.clips_total || requestedClipCount || 0)
+                      ? Math.max(progress?.clips_total || 0, requestedClipCount || 0)
                       : 0;
                     const total = Math.max(readyCount, slotCount);
                     if (total > 0) {
@@ -1327,64 +1324,42 @@ function App() {
                       // each card's action-button grid down to ~20px wide
                       // and overlapping every label. auto-fit sizes off the
                       // real container width instead.
-                      // Row view lays the clips out along one line you slide
-                      // sideways — eight clips stop meaning eight screens of
-                      // scrolling. Column view keeps the stack, sized to this
-                      // container's real width (a viewport breakpoint fires on
-                      // a wide monitor even when this pane is ~670px, which is
-                      // what used to squeeze each card's buttons to ~20px).
+                      // ONE card shape in both layouts. The strip used to
+                      // render a full editor card squeezed to 320px, which
+                      // collapsed its action grid into overlapping labels and
+                      // clipped it at the panel edge — the mangled screenshot.
+                      // Now the strip and the stack both show the compact
+                      // card; the editor opens full width underneath, and
+                      // playing a clip puts it beside the source instead.
                       const layoutClass = clipView === 'row'
-                        ? 'flex gap-4 pb-2 w-max'
-                        : status === 'complete'
-                          ? 'grid gap-4 pb-4 grid-cols-[repeat(auto-fit,minmax(440px,1fr))]'
-                          : 'grid gap-3 pb-4 grid-cols-1';
-                      const itemClass = clipView === 'row'
-                        ? (status === 'complete' ? 'w-[440px] shrink-0' : 'w-[320px] shrink-0')
-                        : '';
+                        ? 'flex gap-3 pb-1 w-max'
+                        : 'grid gap-3 pb-2 grid-cols-[repeat(auto-fill,minmax(300px,1fr))]';
+                      const itemClass = clipView === 'row' ? 'w-[300px] shrink-0' : '';
                       return (
+                        <>
                         <div className={layoutClass}>
                           {Array.from({ length: total }).map((_, i) => (
-                            // While the job runs, a finished clip is a ROW —
-                            // four 420px editor cards buried the pipeline the
-                            // user was trying to watch. Clicking one unfolds
-                            // the full editor in place; nothing is removed.
                             <div key={`slot-${jobId}-${i}`} className={itemClass}>
-                            {results?.clips?.[i] && viewStatus === 'processing' && expandedClip !== i ? (
+                            {results?.clips?.[i] ? (
                               <ClipRow
-                                key={`row-${jobId}-${i}`}
                                 clip={results.clips[i]}
                                 index={i}
                                 jobId={jobId}
-                                onExpand={setExpandedClip}
-                                onPlay={setExpandedClip}
-                              />
-                            ) : results?.clips?.[i] ? (
-                              <ResultCard
-                                key={`${jobId}-${i}`}
-                                clip={results.clips[i]}
-                                index={i}
-                                jobId={jobId}
-                                initialState={projectState?.clips?.find((c) => c.index === i) || null}
-                                onStateChange={handleClipStateChange}
-                                durableUrl={durableClips[i]}
-                                uploadPostKey={uploadPostKey}
-                                uploadUserId={uploadUserId}
-                                geminiApiKey={apiKey}
-                                elevenLabsKey={elevenLabsKey}
-                                isManaged={isManaged}
-                                connectedPlatforms={(userProfiles.find((p) => p.username === uploadUserId) || userProfiles[0])?.connected ?? null}
-                                onConnectSocials={isManaged ? handleConnectSocials : null}
-                                onBulkSubtitle={handleBulkSubtitles}
-                                clipCount={readyCount}
-                                bulkProgress={bulkSub}
+                                active={expandedClip === i}
+                                onCompare={() => handleCompareClip({
+                                  id: `${jobId}_${i}`,
+                                  job_id: jobId,
+                                  title: results.clips[i].video_title_for_youtube_short || `Clip ${i + 1}`,
+                                  view_url: results.clips[i].video_url,
+                                })}
+                                onExpand={() => setExpandedClip(expandedClip === i ? null : i)}
                               />
                             ) : (
-                              // Exactly one slot renders at a time (the pipeline
-                              // is sequential), so the first unfinished slot is
-                              // the one actually rendering and the rest are
-                              // honestly shown as still queued.
+                              // Exactly one slot renders at a time (the
+                              // pipeline is sequential), so the first
+                              // unfinished slot is the one actually rendering
+                              // and the rest are honestly shown as queued.
                               <ClipSlotPlaceholder
-                                key={`ph-${i}`}
                                 index={i}
                                 total={total}
                                 state={viewStatus === 'processing' && i === readyCount ? 'rendering' : 'queued'}
@@ -1393,6 +1368,33 @@ function App() {
                             </div>
                           ))}
                         </div>
+
+                        {/* The editor, at full width under the strip — never
+                            inside it, where it has no room to exist. */}
+                        {expandedClip != null && results?.clips?.[expandedClip] && (
+                          <div className="mt-4 animate-fade">
+                            <ResultCard
+                              key={`${jobId}-${expandedClip}`}
+                              clip={results.clips[expandedClip]}
+                              index={expandedClip}
+                              jobId={jobId}
+                              initialState={projectState?.clips?.find((c) => c.index === expandedClip) || null}
+                              onStateChange={handleClipStateChange}
+                              durableUrl={durableClips[expandedClip]}
+                              uploadPostKey={uploadPostKey}
+                              uploadUserId={uploadUserId}
+                              geminiApiKey={apiKey}
+                              elevenLabsKey={elevenLabsKey}
+                              isManaged={isManaged}
+                              connectedPlatforms={(userProfiles.find((p) => p.username === uploadUserId) || userProfiles[0])?.connected ?? null}
+                              onConnectSocials={isManaged ? handleConnectSocials : null}
+                              onBulkSubtitle={handleBulkSubtitles}
+                              clipCount={readyCount}
+                              bulkProgress={bulkSub}
+                            />
+                          </div>
+                        )}
+                        </>
                       );
                     }
                     if (viewStatus === 'processing') {

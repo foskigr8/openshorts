@@ -65,6 +65,7 @@ export default function HomeRail({ onViewAll, search = '', projects = [], active
   const [deleting, setDeleting] = useState(null);
   const [deleteError, setDeleteError] = useState('');
   const [stale, setStale] = useState(false);
+  const [loadError, setLoadError] = useState('');
   const itemRefs = useRef({});
 
   // Any project running anywhere keeps the rail live — not just the one on
@@ -92,7 +93,9 @@ export default function HomeRail({ onViewAll, search = '', projects = [], active
           setVideos(d.videos);
           setStale(false);
         })
-        .catch(() => { if (!cancelled) setStale(true); });
+        .catch((e) => {
+          if (!cancelled) { setStale(true); setLoadError(e?.message || ''); }
+        });
       apiFetch('/api/system')
         .then((r) => (r.ok ? r.json() : null))
         .then((d) => { if (!cancelled && d?.storage) setStorage(d.storage); })
@@ -453,8 +456,10 @@ export default function HomeRail({ onViewAll, search = '', projects = [], active
         <p className="px-4 py-2 text-[11px] text-danger shrink-0">{deleteError}</p>
       )}
       {stale && videos !== null && (
-        <p className="px-4 py-1.5 text-[10px] text-muted shrink-0 lowercase">
-          couldn't refresh — showing the last known list
+        <p className="px-4 py-1.5 text-[10px] text-muted shrink-0 lowercase truncate"
+          title={loadError}
+        >
+          couldn't refresh{loadError ? ` — ${loadError}` : ''}
         </p>
       )}
 

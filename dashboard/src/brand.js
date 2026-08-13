@@ -13,48 +13,58 @@ export const BRAND = {
   tagline: 'turn long video into shorts',
 };
 
+// The wide lockup, trimmed tight — for anywhere with horizontal room.
 export const LOGO_SOURCES = [
-  '/logo-ai4ts.png',      // the real mark, trimmed and squared
+  '/logo-ai4ts.png',
   '/logo-openshorts.png', // last resort, so something always renders
 ];
 
-// Resolved once per page load rather than per component.
-let resolved = null;
-const waiting = [];
+// The same lockup on a square canvas, nothing cropped — for the tab and for
+// the collapsed nav, where a 1.6:1 image squeezed into a square badge wastes
+// 40% of it on empty space and reads as a speck.
+export const ICON_SOURCES = [
+  '/favicon-ai4ts.png',
+  '/logo-openshorts.png',
+];
 
-export function resolveLogo(cb) {
-  if (resolved) { cb(resolved); return; }
-  waiting.push(cb);
-  if (waiting.length > 1) return;   // a probe is already in flight
+// Resolved once per page load per list, not once per component.
+const cache = {};
+const waiting = {};
+
+function resolveFrom(list, key, cb) {
+  if (cache[key]) { cb(cache[key]); return; }
+  waiting[key] = waiting[key] || [];
+  waiting[key].push(cb);
+  if (waiting[key].length > 1) return;   // a probe is already in flight
 
   const settle = (href) => {
-    resolved = href;
-    waiting.splice(0).forEach((fn) => fn(href));
+    cache[key] = href;
+    waiting[key].splice(0).forEach((fn) => fn(href));
   };
 
   const tryAt = (i) => {
-    if (i >= LOGO_SOURCES.length) {
-      settle(LOGO_SOURCES[LOGO_SOURCES.length - 1]);
-      return;
-    }
+    if (i >= list.length) { settle(list[list.length - 1]); return; }
     const probe = new Image();
-    probe.onload = () => settle(LOGO_SOURCES[i]);
+    probe.onload = () => settle(list[i]);
     probe.onerror = () => tryAt(i + 1);
-    probe.src = LOGO_SOURCES[i];
+    probe.src = list[i];
   };
 
   try {
     tryAt(0);
   } catch (_) {
-    settle(LOGO_SOURCES[LOGO_SOURCES.length - 1]);
+    settle(list[list.length - 1]);
   }
 }
+
+export const resolveLogo = (cb) => resolveFrom(LOGO_SOURCES, 'logo', cb);
+export const resolveIcon = (cb) => resolveFrom(ICON_SOURCES, 'icon', cb);
 
 /** Apply the brand to the document (title + favicon), at boot. */
 export function applyBrand() {
   try {
     document.title = BRAND.name;
-    resolveLogo((href) => {
+    resolveIcon((href) => {
       let link = document.querySelector("link[rel='icon']");
       if (!link) {
         link = document.createElement('link');

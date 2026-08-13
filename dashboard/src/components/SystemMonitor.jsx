@@ -68,7 +68,6 @@ function Meter({ Icon, label, value, sub, pct, tone = 'var(--color-accent)', tra
 
 export default function SystemMonitor({ status }) {
   const [open, setOpen] = useState(false);
-  const rootRef = useRef(null);
   const [m, setM] = useState(null);
   const [failed, setFailed] = useState(false);
   const trails = useRef({ cpu: [], mem: [], gpu: [] });
@@ -106,18 +105,14 @@ export default function SystemMonitor({ status }) {
   // that with the meters open you could not scroll the page or touch a clip —
   // it swallowed everything. Listening on the document instead leaves the
   // workspace completely usable while you watch the load.
+  // It STAYS OPEN. Watching the GPU while you scroll the clips is the entire
+  // use for it, so it does not close on an outside click and never covers the
+  // page with a catcher — you close it with the chip, the X, or Escape.
   useEffect(() => {
     if (!open) return undefined;
-    const onDown = (e) => {
-      if (!rootRef.current?.contains(e.target)) setOpen(false);
-    };
     const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
-    document.addEventListener('mousedown', onDown);
     document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('mousedown', onDown);
-      document.removeEventListener('keydown', onKey);
-    };
+    return () => document.removeEventListener('keydown', onKey);
   }, [open]);
 
   const gpu = m?.gpus?.[0] || null;
@@ -138,7 +133,7 @@ export default function SystemMonitor({ status }) {
   if (m?.disk && m.disk.pct >= 90) warnings.push('disk almost full');
 
   return (
-    <div className="relative" ref={rootRef}>
+    <div className="relative">
       <button
         onClick={() => setOpen((v) => !v)}
         title="machine load"

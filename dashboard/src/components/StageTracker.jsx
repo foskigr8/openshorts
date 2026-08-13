@@ -37,8 +37,8 @@ const STAGE_INDEX = {
 // Backend stage key per node, so a completed node can show its real duration.
 const STAGE_KEYS = ['download', 'transcribe', 'analyze', 'render', 'finalize'];
 
-const VB_H = 46;
-const NODE_Y = 21; // matches the node circles' vertical centre in the row
+const VB_H = 34;
+const NODE_Y = 15; // matches the node circles' vertical centre in the row
 
 // Node centres for 5 equal-width columns across the given width.
 const nodeX = (i, w) => ((i + 0.5) / STEPS.length) * w;
@@ -52,7 +52,7 @@ function buildPath(w) {
     const x0 = nodeX(i - 1, w);
     const x1 = nodeX(i, w);
     const dx = (x1 - x0) / 3;
-    const bow = i % 2 === 1 ? 17 : -17;
+    const bow = i % 2 === 1 ? 12 : -12;
     d += ` C ${x0 + dx} ${NODE_Y + bow}, ${x1 - dx} ${NODE_Y + bow}, ${x1} ${NODE_Y}`;
   }
   return d;
@@ -166,7 +166,7 @@ function PipelinePath({ doneFrac, animate, complete, failed }) {
 
 function Node({ step, state, index, duration }) {
   const { Icon } = step;
-  const size = state === 'active' || state === 'failed' ? 40 : 32;
+  const size = state === 'active' || state === 'failed' ? 30 : 24;
   const base = { width: size, height: size };
   let cls = 'border-rule2 text-muted'; // pending
   base.background = 'var(--color-paper)'; // opaque: the rail must not cross the node
@@ -213,11 +213,8 @@ function Node({ step, state, index, duration }) {
       >
         {inner}
       </div>
-      <span className={`text-[11px] leading-none truncate max-w-full px-1 ${state === 'failed' ? 'text-danger font-semibold' : state === 'active' ? 'text-ink font-semibold' : state === 'done' ? 'text-ink2' : 'text-muted'}`}>
+      <span className={`text-[10px] leading-none truncate max-w-full px-1 ${state === 'failed' ? 'text-danger font-semibold' : state === 'active' ? 'text-ink font-semibold' : state === 'done' ? 'text-ink2' : 'text-muted'}`}>
         {step.label}
-      </span>
-      <span className="hidden sm:block text-[9px] leading-none text-muted truncate max-w-full px-1">
-        {step.sub}
       </span>
       {/* Real detail on hover, per node — duration for finished steps. */}
       {state === 'done' && duration != null && (
@@ -323,7 +320,7 @@ export default function StageTracker({
   }
 
   return (
-    <div className="relative pt-4">
+    <div className="relative pt-2">
       <div className="relative">
         <PipelinePath
           doneFrac={doneFrac}
@@ -343,7 +340,7 @@ export default function StageTracker({
       {/* Slim overall bar + label under the whole row, so progress is readable
           before the eye ever reaches the metrics panel below. Same number as
           the ring and the OVERALL cell — one piece of state, three views. */}
-      <div className="mt-3 flex items-center gap-3">
+      <div className="mt-2 flex items-center gap-3">
         <div className="flex-1 h-1 rounded-full bg-paper3 overflow-hidden">
           <div
             className="h-full rounded-full transition-[width] duration-[600ms] ease-out"

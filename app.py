@@ -2726,6 +2726,19 @@ async def source_video(key: str):
 # Bounded by the number of jobs ever seen in one process lifetime.
 _META_PULL_TRIED = set()
 
+# /api/history walks every job directory and lists the backup repo. The
+# dashboard polls it every few seconds from more than one panel, so without
+# this the same expensive scan ran several times a second while a job was
+# running — slow enough to time out, which the UI then showed as an empty
+# library. Deletes and wipes clear it explicitly, so it can never serve a
+# project the user just removed.
+_HISTORY_CACHE = {"at": 0.0, "owner": None, "data": None}
+_HISTORY_TTL = 4.0
+
+
+def _invalidate_history_cache():
+    _HISTORY_CACHE.update(at=0.0, owner=None, data=None)
+
 
 def _live_job_status(job_id):
     """"processing" while this job is queued/running in memory, else None.
@@ -2774,6 +2787,12 @@ async def list_history(request: Request):
     view_url, download_url}]}.
     """
     owner = await _request_owner_id(request)
+    now = time.time()
+    if (_HISTORY_CACHE["data"] is not None
+            and _HISTORY_CACHE["owner"] == owner
+            and now - _HISTORY_CACHE["at"] < _HISTORY_TTL):
+        return _HISTORY_CACHE["data"]
+
     videos = []
     known_job_ids = set()
     # Fetched once and reused below for two purposes: recovering a job whose
@@ -3137,7 +3156,9 @@ async def list_history(request: Request):
         except Exception as e:
             print(f"⚠️ HF history fallback failed ({type(e).__name__}: {e})")
     videos.sort(key=lambda v: v["created_at"], reverse=True)
-    return {"videos": videos}
+    payload = {"videos": videos}
+    _HISTORY_CACHE.update(at=time.time(), owner=owner, data=payload)
+    return payload
 
 
 @app.get("/api/history/meta")
@@ -3276,6 +3297,7 @@ async def delete_history_job(job_id: str, request: Request):
             print(f"⚠️ HF purge of {job_id} failed ({type(e).__name__}: {e})")
 
     jobs.pop(job_id, None)
+    _invalidate_history_cache()
     return {"deleted": job_id, "freed_bytes": freed}
 
 
@@ -3373,6 +3395,7 @@ async def wipe_storage(request: Request):
             except Exception as e:
                 print(f"⚠️ HF purge of {job_id} failed ({type(e).__name__}: {e})")
 
+    _invalidate_history_cache()
     return {
         "jobs_deleted": len(removed_jobs),
         "freed_bytes": freed,

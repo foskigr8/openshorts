@@ -3,7 +3,7 @@ import {
   Loader2, TrendingUp, Sparkles, ChevronLeft, ChevronRight,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { BRAND, resolveLogo, LOGO_SOURCES } from '../brand';
+import { BRAND, resolveLogo, resolveIcon, LOGO_SOURCES, ICON_SOURCES } from '../brand';
 
 /**
  * The navigation rail.
@@ -22,7 +22,8 @@ export default function Sidebar({
   // Whichever mark is actually present — the real PNG once it has been copied
   // into public/, the committed stand-in until then.
   const [logo, setLogo] = useState(LOGO_SOURCES[LOGO_SOURCES.length - 1]);
-  useEffect(() => resolveLogo(setLogo), []);
+  const [icon, setIcon] = useState(ICON_SOURCES[ICON_SOURCES.length - 1]);
+  useEffect(() => { resolveLogo(setLogo); resolveIcon(setIcon); }, []);
 
   const navItems = [
     { id: 'dashboard', icon: Home, label: 'Home' },
@@ -53,17 +54,20 @@ export default function Sidebar({
         <button
           onClick={onToggle}
           title={wide ? 'collapse the menu' : 'expand the menu'}
-          className="w-9 h-9 bg-paper3 rounded-input flex items-center justify-center shrink-0
-                     overflow-hidden border border-rule hover:border-rule2 transition-colors relative group"
+          className={`flex items-center justify-center shrink-0 rounded-input relative group
+                      transition-colors ${wide ? 'h-11 w-full px-2' : 'h-10 w-10'}`}
         >
-          <img src={logo} alt="" className="w-full h-full object-contain p-0.5 group-hover:opacity-25 transition-opacity" />
+          {/* Wide: the full lockup at legible size. Collapsed: the square
+              version, which fills the space instead of sitting as a sliver. */}
+          <img
+            src={wide ? logo : icon}
+            alt={BRAND.name}
+            className="max-h-full max-w-full object-contain group-hover:opacity-30 transition-opacity"
+          />
           <span className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-            {wide ? <ChevronLeft size={15} className="text-ink" /> : <ChevronRight size={15} className="text-ink" />}
+            {wide ? <ChevronLeft size={16} className="text-ink" /> : <ChevronRight size={16} className="text-ink" />}
           </span>
         </button>
-        {wide && (
-          <span className="font-display lowercase text-lg text-ink truncate">{BRAND.name}</span>
-        )}
       </div>
 
       <nav className={`flex-1 py-4 space-y-1 ${wide ? 'px-4' : 'px-3'}`}>
