@@ -682,7 +682,21 @@ def _compose_shot(shot, spine_tracks: Dict[int, dict], active_tracks,
     layout = decide_layout(subjects, _speaker_shares(active_tracks, shot),
                            frame_w, frame_h, aspect)
     if layout == LAYOUT_SPLIT:
-        crop = None
+        # The owner's split is the VERTICAL stack — the legacy side-by-side
+        # (vendored pyautoflip) rendered as a bordered two-up, and captions
+        # on it followed the user's normal position instead of the middle
+        # split rule. A far-apart exchange therefore becomes the SAME
+        # edge-to-edge VSPLIT the beat planner produces: two stacked panels
+        # (9:8 each for 9:16), middle captions over the seam.
+        _band = float(os.environ.get("VSPLIT_BAND_FRAC", "0"))
+        _panel_aspect = aspect * 2.0 / (1.0 - _band)
+        panel_a = crop_rect_containing(subjects[0], frame_w, frame_h,
+                                       _panel_aspect)
+        panel_b = crop_rect_containing(subjects[1], frame_w, frame_h,
+                                       _panel_aspect)
+        return ComposedShot(shot.start, shot.end, LAYOUT_VSPLIT, None,
+                            subjects, track_ids=list(shot.track_ids or []),
+                            panels=(panel_a, panel_b))
     else:
         subject = union_box(*subjects)
         crop = crop_rect_containing(subject, frame_w, frame_h, aspect)
@@ -1239,11 +1253,12 @@ def render(input_video, final_output_video, aspect_ratio,
             # the rest of this clip keeps their chosen position. One ASS
             # mixes both via middle_ranges (see _vsplit_caption_ass).
             _split_captions = None
-            if any(shot.layout == LAYOUT_VSPLIT for shot in composed):
+            if any(shot.layout in (LAYOUT_SPLIT, LAYOUT_VSPLIT)
+                   for shot in composed):
                 _split_captions = _vsplit_caption_ass(
                     transcript, clip_start, effective_end,
                     [(s.start, s.end) for s in composed
-                     if s.layout == LAYOUT_VSPLIT],
+                     if s.layout in (LAYOUT_SPLIT, LAYOUT_VSPLIT)],
                     final_output_video)
             _burn_captions_on(final_output_video, captioned_output,
                               _split_captions[1] if _split_captions else ass_filter,

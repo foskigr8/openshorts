@@ -2622,8 +2622,21 @@ async def list_history(request: Request):
             # video (hundreds of MB), and skipping it here meant it appeared
             # nowhere in the UI — so there was no way to see it, and no way
             # to delete it. The disk just filled up invisibly. Surface it as
-            # a failed project carrying its real on-disk size so it can be
-            # reviewed and removed.
+            # a project carrying its real on-disk size so it can be reviewed
+            # and removed. NOT "failed" when it is still mid-flight: for the
+            # first minutes of a job the metadata.json doesn't exist yet
+            # (it's written at render start), and flagging that as failed
+            # made the right panel scream FAILED while a job was actively
+            # generating.
+            _status = "failed"
+            _progress_path = os.path.join(job_path, "progress.json")
+            if os.path.exists(_progress_path):
+                try:
+                    _stage = (json.load(open(_progress_path)) or {}).get("stage")
+                except Exception:
+                    _stage = None
+                if _stage not in ("finalize", "complete", "done"):
+                    _status = "processing"
             total = 0
             biggest = None
             for root, _dirs, files in os.walk(job_path):
@@ -2649,7 +2662,7 @@ async def list_history(request: Request):
                 "title": label or "Unfinished project",
                 "created_at": datetime.fromtimestamp(
                     _job_created_at(job_path), tz=timezone.utc).isoformat(),
-                "status": "failed",
+                "status": _status,
                 "size_bytes": total,
                 "view_url": "",
                 "download_url": "",
@@ -2955,6 +2968,16 @@ async def delete_history_job(job_id: str, request: Request):
             os.remove(f)
         except OSError:
             pass
+
+    # The HF backup would resurrect the deleted job on the next /api/history
+    # read (it rebuilds entries for jobs it sees in storage) — deleting from
+    # the UI must mean gone for good. Best-effort: an unreachable HF keeps
+    # the local delete (the job simply may reappear until storage is purged).
+    if hf_storage.configured():
+        try:
+            hf_storage.delete_prefix(f"jobs/{job_id}")
+        except Exception as e:
+            print(f"⚠️ HF purge of {job_id} failed ({type(e).__name__}: {e})")
 
     jobs.pop(job_id, None)
     return {"deleted": job_id, "freed_bytes": freed}
