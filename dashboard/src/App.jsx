@@ -3,10 +3,11 @@ import { Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, LayoutDashboa
 import KeyInput from './components/KeyInput';
 import KeyListInput from './components/KeyListInput';
 import ProjectLauncher from './components/project/ProjectLauncher';
+import StoragePanel from './components/StoragePanel';
 import ResultCard from './components/ResultCard';
 import ProcessingAnimation from './components/ProcessingAnimation';
 import ClipSlotPlaceholder from './components/ClipSlotPlaceholder';
-import SystemStatusStrip from './components/SystemStatusStrip';
+import SystemMonitor from './components/SystemMonitor';
 import StageTracker from './components/StageTracker';
 import HomeRail from './components/HomeRail';
 import TelemetryGrid from './components/TelemetryGrid';
@@ -216,13 +217,6 @@ function App() {
     return '';
   });
 
-  // fal.ai API State - Load encrypted
-  const [falKey, setFalKey] = useState(() => {
-    const stored = localStorage.getItem('falKey_v1');
-    if (stored) return decrypt(stored);
-    return '';
-  });
-
   // AssemblyAI API State (transcription backend) - Load encrypted
   const [assemblyaiKey, setAssemblyaiKey] = useState(() => {
     const stored = localStorage.getItem('assemblyaiKey_v1');
@@ -306,7 +300,6 @@ function App() {
 
   // Silent-success "saved" states for the settings key inputs (design.md: no alert popups)
   const [elevenLabsSaved, setElevenLabsSaved] = useState(false);
-  const [falSaved, setFalSaved] = useState(false);
   const [assemblyaiSaved, setAssemblyaiSaved] = useState(false);
 
   // Clip → source playback sync lives in lib/sourceSync.js, not in App
@@ -496,12 +489,6 @@ function App() {
       localStorage.setItem('elevenLabsKey_v1', encrypt(elevenLabsKey));
     }
   }, [elevenLabsKey]);
-
-  useEffect(() => {
-    if (falKey) {
-      localStorage.setItem('falKey_v1', encrypt(falKey));
-    }
-  }, [falKey]);
 
   useEffect(() => {
     if ((uploadPostKey || isManaged) && userProfiles.length === 0) {
@@ -904,9 +891,9 @@ function App() {
 
           <div className="flex-1" />
 
-          {/* Live system pills (reference top bar) */}
-          <div className="hidden lg:block shrink-0">
-            <SystemStatusStrip status={systemStatus} />
+          {/* One chip that opens into the machine's live load. */}
+          <div className="shrink-0">
+            <SystemMonitor status={systemStatus} />
           </div>
 
           <div className="flex items-center gap-4">
@@ -1231,63 +1218,10 @@ function App() {
                 </div>
               </div>
 
-              <div className="card p-4 sm:p-6 mt-8">
-                <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
-                  <div className="flex items-center gap-3">
-                    <div className="w-9 h-9 rounded-input bg-paper3 flex items-center justify-center shrink-0">
-                      <Sparkles size={16} className="text-brass" />
-                    </div>
-                    <h2 className="text-base font-medium text-ink lowercase">AI Shorts (UGC Videos)</h2>
-                  </div>
-                  <span className="readout">BYOK</span>
-                </div>
-                <p className="text-xs text-muted mb-6 leading-relaxed">
-                  Generate UGC-style videos with AI actors for any product or business using <strong>fal.ai</strong>.
-                  <strong> Not covered by your plan</strong> — bring your own fal.ai + ElevenLabs keys (billed by those
-                  providers, ~$0.65-2 per video). Your plan still covers the AI script &amp; orchestration.
-                </p>
-                <div className="space-y-4">
-                  <label className="block text-sm text-muted">fal.ai API Key</label>
-                  <div className="flex flex-col sm:flex-row gap-2">
-                    <input
-                      type="password"
-                      value={falKey}
-                      onChange={(e) => setFalKey(e.target.value)}
-                      className="input-field"
-                      placeholder="fal_..."
-                    />
-                    <button
-                      onClick={() => {
-                        if (falKey) {
-                          localStorage.setItem('falKey_v1', encrypt(falKey));
-                          setFalSaved(true);
-                          setTimeout(() => setFalSaved(false), 2000);
-                        }
-                      }}
-                      className={falSaved ? 'badge-ok px-4' : 'btn-quiet py-2 px-4 text-sm'}
-                    >
-                      {falSaved ? <><Check size={12} /> saved</> : 'Save'}
-                    </button>
-                  </div>
-                  <div className="text-xs text-muted leading-relaxed">
-                    Get your API key from fal.ai to enable AI actor video generation.
-                    <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      <a href="https://fal.ai/dashboard/keys" target="_blank" rel="noopener noreferrer" className="p-2 border border-rule rounded-input hover:bg-paper3 transition-colors flex flex-col gap-1">
-                        <span className="text-ink2 font-medium">1. Sign Up</span>
-                        <span className="text-xs text-muted">Create fal.ai account</span>
-                      </a>
-                      <a href="https://fal.ai/dashboard/keys" target="_blank" rel="noopener noreferrer" className="p-2 border border-rule rounded-input hover:bg-paper3 transition-colors flex flex-col gap-1">
-                        <span className="text-ink2 font-medium">2. API Key</span>
-                        <span className="text-xs text-muted">Generate key</span>
-                      </a>
-                    </div>
-                    <br />
-                    <span className="text-muted">
-                      Keys are only stored in your browser. Sent to backend only to process requests.
-                    </span>
-                  </div>
-                </div>
-              </div>
+              {/* fal.ai lived here for AI Shorts, which no longer exists in
+                  this build. Storage takes its place — the panel that decides
+                  what is kept and the only thing that deletes it. */}
+              <StoragePanel onWiped={handleReset} />
             </div>
           )}
 
