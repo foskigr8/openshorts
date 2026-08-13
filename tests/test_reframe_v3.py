@@ -13,6 +13,8 @@ from reframe_v3 import (
     LAYOUT_SINGLE,
     LAYOUT_SPLIT,
     LAYOUT_TWO_SHOT,
+    LAYOUT_VSPLIT,
+    LAYOUT_WIDE,
     ROLE_BYSTANDER,
     ROLE_REACTOR,
     ROLE_SPEAKER,
@@ -596,20 +598,48 @@ def test_attention_shifted_crop_full_frame_has_no_slack():
 
 
 def test_compose_wide_shot_without_subjects_is_a_neutral_hold():
-    """The planner emits WIDE shots on purpose (leading unbound seconds); v3
-    must render them as a full-height centre crop, not fail the clip."""
+    """The planner emits WIDE shots on purpose (no confident subject); v3
+    renders them as the owner-approved 4:3 'show everyone' crop, letterboxed
+    into the 9:16 frame — never a wrong tight shot, never a failed clip."""
     shot = Shot(0.0, 3.0, SHOT_WIDE, [], None)
     composed = _compose_shot(shot, {}, [None, None, None],
                              np.zeros((1080, 1920), dtype=np.float32),
                              1920, 1080, VERTICAL_9_16)
 
-    assert composed.layout == LAYOUT_SINGLE
+    assert composed.layout == LAYOUT_WIDE
     assert composed.subjects == []
     assert composed.crop is not None
     x, y, w, h = composed.crop
-    assert w / h == pytest.approx(VERTICAL_9_16)
+    assert w / h == pytest.approx(4.0 / 3.0)
     assert x >= 0 and y >= 0 and x + w <= 1920 and y + h <= 1080
     validate_composition([composed], 1920, 1080, VERTICAL_9_16)
+
+
+def test_compose_far_pair_capturable_in_43_becomes_wide():
+    # The host standing next to the guest: the camera can capture BOTH in a
+    # 4:3 crop, so show them together (wide) instead of splitting.
+    shot = Shot(0.0, 3.0, SHOT_SINGLE, [1, 2], None)
+    spine = _spine_two_tracks()
+    saliency = _saliency_at((800.0, 400.0, 120.0, 120.0))
+    composed = _compose_shot(shot, spine, [1, 2, 1], saliency,
+                             1920, 1080, VERTICAL_9_16)
+    assert composed.layout == LAYOUT_WIDE
+    assert composed.crop[2] / composed.crop[3] == pytest.approx(4.0 / 3.0)
+    validate_composition([composed], 1920, 1080, VERTICAL_9_16)
+
+
+def test_compose_very_far_pair_stays_vsplit():
+    # Two people too far apart for even a 4:3 crop -> the vertical split.
+    spine = {
+        1: {"frames": [0.0, 1.0], "boxes": [(50.0, 400.0, 120.0, 120.0)] * 2},
+        2: {"frames": [0.0, 1.0], "boxes": [(1800.0, 400.0, 120.0, 120.0)] * 2},
+    }
+    shot = Shot(0.0, 3.0, SHOT_SINGLE, [1, 2], None)
+    saliency = _saliency_at((900.0, 400.0, 120.0, 120.0))
+    composed = _compose_shot(shot, spine, [1, 2, 1], saliency,
+                             1920, 1080, VERTICAL_9_16)
+    assert composed.layout == LAYOUT_VSPLIT
+    assert composed.panels is not None
 
 
 def test_compose_wide_shot_uses_provided_rect():

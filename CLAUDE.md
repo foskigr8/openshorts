@@ -250,6 +250,13 @@ GPU pieces that were silently wrong and are now deterministic:
   `VSPLIT_SMOOTH_ZOOM=0.06` (zoom lerp), `VSPLIT_FULLWIDTH_FRAC=0.60` (box
   area fraction that triggers the wide-shot fallback), `VSPLIT_LOST_HOLD_FRAMES=30`,
   `VSPLIT_CUT_THRESHOLD=25.0` (64x36 gray mean-abs-diff that counts as a cut).
+- **4:3 WIDE shots** — the owner-approved "show everyone" framing: moments
+  with no confident subject (reaction / unbound speaker / "both people are
+  relevant") render as a 4:3 crop of the source, letterboxed into the 9:16
+  frame (fit-width, black bars top/bottom). Far-apart pairs the camera can
+  still capture in one 4:3 crop get the wide instead of a split; only
+  people too far apart for even that become the vertical split. It only
+  ever appears in those moments — never as the default framing.
 - `SCENE_DIRECTION` — the per-clip Gemini camera-director call, now **`0` by
   default** (the local director replaced it; opt-in only if you want Gemini
   naming who to frame).

@@ -260,6 +260,24 @@ def crop_rect_containing(subject: Box, frame_w: int, frame_h: int,
     return crop_x, crop_y, crop_w, crop_h
 
 
+def _wide43_rect(frame_w: int, frame_h: int,
+                 faces: Optional[Sequence[Box]] = None) -> Rect:
+    """The 4:3 'show everyone' crop, centered on the on-screen faces when
+    any are known (reactions / both people relevant), else the frame."""
+    crop_h = min(float(frame_h), float(frame_w) / WIDE_ASPECT)
+    crop_w = crop_h * WIDE_ASPECT
+    if faces:
+        real = [f for f in faces if f is not None]
+        if real:
+            ux, uy, uw, uh = union_box(*real)
+            cx, cy = ux + uw / 2.0, uy + uh / 2.0
+            x = max(0.0, min(cx - crop_w / 2.0, frame_w - crop_w))
+            y = max(0.0, min(cy - crop_h / 2.0, frame_h - crop_h))
+            return (x, y, crop_w, crop_h)
+    return ((frame_w - crop_w) / 2.0, (frame_h - crop_h) / 2.0,
+            crop_w, crop_h)
+
+
 def contains(crop: Rect, subject: Box, tolerance: float = 0.5) -> bool:
     """Is `subject` fully inside `crop`? The containment check, used as an
     assertion by the validation stage rather than as a soft score."""
@@ -320,6 +338,13 @@ LAYOUT_SINGLE = "single"
 LAYOUT_TWO_SHOT = "two_shot"
 LAYOUT_SPLIT = "split"
 LAYOUT_VSPLIT = "vsplit"
+LAYOUT_WIDE = "wide"
+
+# The owner-approved "show everyone" wide: a 4:3 crop of the source,
+# letterboxed into the 9:16 frame (fit-width, black bars top/bottom). Used
+# for no-subject / reaction / "both people are relevant" moments — never as
+# the default framing.
+WIDE_ASPECT = 4.0 / 3.0
 
 # A two-shot is only worth keeping while both people still read at a usable
 # size. Once the union of both subjects needs a crop wider than this fraction
@@ -458,6 +483,7 @@ def validate_composition(shots: Sequence[ComposedShot], frame_w: int, frame_h: i
             )
 
         if shot.layout == LAYOUT_SPLIT:
+            # Exempt by construction: subjects live in separate panels.
             continue
 
         if shot.layout == LAYOUT_VSPLIT:
@@ -490,6 +516,18 @@ def validate_composition(shots: Sequence[ComposedShot], frame_w: int, frame_h: i
                 f"{where}: crop {tuple(round(v) for v in shot.crop)} "
                 f"escapes frame {frame_w}x{frame_h}"
             )
+
+        if shot.layout == LAYOUT_WIDE:
+            # WIDE's 4:3 crop is deliberately a different aspect than the
+            # 9:16 output (it letterboxes), so the aspect check does not
+            # apply — but every subject must still fit inside it.
+            _union = union_box(*(shot.subjects or []))
+            if _union is not None and not contains(shot.crop, _union):
+                problems.append(
+                    f"{where}: wide crop "
+                    f"{tuple(round(v) for v in shot.crop)} does not contain "
+                    f"the subjects {tuple(round(v) for v in _union)}")
+            continue
 
         actual = w / h
         if abs(actual - aspect) > aspect_tolerance:
@@ -653,18 +691,18 @@ def _compose_shot(shot, spine_tracks: Dict[int, dict], active_tracks,
 
     subjects = _track_boxes_for_shot(shot, spine_tracks)
     if not subjects:
-        # WIDE shot: the planner emits these on purpose for leading seconds
-        # with no speaker binding (hold_fill's "nothing to hold onto yet"
-        # case) or when a default wide rect is supplied. Hold the full frame
-        # as a neutral composition rather than failing the whole clip on a
-        # shot type the planner is designed to produce.
+        # WIDE shot (4:3, letterboxed into the 9:16 frame): the planner emits
+        # these on purpose for moments with no confident subject (no
+        # speaker binding, a reaction, "show everyone"). The owner-approved
+        # wide shows the whole scene instead of a wrong tight shot — and
+        # only in those moments, never as the default framing.
         if shot.crop_rect is not None:
+            # An explicitly-provided wide rect (legacy) keeps the old
+            # aspect-correct fill behaviour.
             crop = tuple(float(v) for v in shot.crop_rect)
-        else:
-            crop = crop_rect_containing(
-                (0.0, 0.0, float(frame_w), float(frame_h)),
-                frame_w, frame_h, aspect)
-        return ComposedShot(shot.start, shot.end, LAYOUT_SINGLE, crop, [])
+            return ComposedShot(shot.start, shot.end, LAYOUT_SINGLE, crop, [])
+        return ComposedShot(shot.start, shot.end, LAYOUT_WIDE,
+                            _wide43_rect(frame_w, frame_h), [])
 
     midpoint = (shot.start + shot.end) / 2.0
     faces = []
@@ -705,6 +743,17 @@ def _compose_shot(shot, spine_tracks: Dict[int, dict], active_tracks,
     layout = decide_layout(subjects, _speaker_shares(active_tracks, shot),
                            frame_w, frame_h, aspect)
     if layout == LAYOUT_SPLIT:
+        # When the camera can actually capture BOTH people in one 4:3 crop
+        # (the host standing next to the guest), show the wide instead of
+        # splitting — the owner's "show them together" rule. Only far-apart
+        # people who can't share a crop become the vertical split.
+        _union = union_box(*subjects)
+        _wide = _wide43_rect(frame_w, frame_h, subjects)
+        if (_union is not None
+                and _wide[2] >= _union[2] - 0.5
+                and _wide[3] >= _union[3] - 0.5):
+            return ComposedShot(shot.start, shot.end, LAYOUT_WIDE, _wide,
+                                subjects, track_ids=list(shot.track_ids))
         # The owner's split is the VERTICAL stack — the legacy side-by-side
         # (vendored pyautoflip) rendered as a bordered two-up, and captions
         # on it followed the user's normal position instead of the middle
@@ -820,6 +869,29 @@ def _crop_resize_panel(frame, crop: Optional[Rect], frame_w: int, frame_h: int,
                       interpolation=cv2.INTER_LANCZOS4)
 
 
+def _crop_resize_fit(frame, crop: Optional[Rect], frame_w: int, frame_h: int,
+                     out_w: int, out_h: int):
+    """Crop + FIT (letterboxed) into the output frame — the 4:3 wide shot:
+    content keeps its 4:3 shape, centered, black bars top/bottom. Never
+    stretches, so faces stay undistorted."""
+    import cv2
+    if crop is None:
+        crop = (0.0, 0.0, float(frame_w), float(frame_h))
+    x, y, w, h = _integer_crop(crop, frame_w, frame_h)
+    if w <= 0 or h <= 0:
+        return np.zeros((out_h, out_w, 3), dtype=np.uint8)
+    scale = min(out_w / w, out_h / h)
+    cw = max(1, int(round(w * scale)))
+    ch = max(1, int(round(h * scale)))
+    resized = cv2.resize(frame[y:y + h, x:x + w], (cw, ch),
+                         interpolation=cv2.INTER_LANCZOS4)
+    canvas = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+    ox = max(0, (out_w - cw) // 2)
+    oy = max(0, (out_h - ch) // 2)
+    canvas[oy:oy + ch, ox:ox + cw] = resized
+    return canvas
+
+
 def _aspect_tuple(aspect: float) -> Tuple[int, int]:
     """Integer (w, h) ratio for the vendored split renderer."""
     if abs(aspect - 1.0) < 1e-9:
@@ -837,11 +909,24 @@ def _regular_filtergraph(composed: Sequence[ComposedShot], frame_w: int, frame_h
             raise ValueError("split shots require the Python split renderer")
         x, y, w, h = _integer_crop(shot.crop, frame_w, frame_h)
         label = f"s{i}"
-        parts.append(
-            f"[0:v]trim=start={shot.start:.6f}:end={shot.end:.6f},setpts=PTS-STARTPTS,"
-            f"crop={w}:{h}:{x}:{y},scale={out_w}:{out_h}:flags=lanczos,"
-            f"setsar=1[{label}]"
-        )
+        if shot.layout == LAYOUT_WIDE:
+            # 4:3 wide: scale to fit the width, pad the rest black (the
+            # letterboxed "show everyone" look).
+            _content_h = max(2, int(round(out_w * 3.0 / 4.0)))
+            _pad_y = max(0, (out_h - _content_h) // 2)
+            parts.append(
+                f"[0:v]trim=start={shot.start:.6f}:end={shot.end:.6f},"
+                f"setpts=PTS-STARTPTS,crop={w}:{h}:{x}:{y},"
+                f"scale={out_w}:{_content_h}:flags=lanczos,"
+                f"pad={out_w}:{out_h}:0:{_pad_y}:black,setsar=1[{label}]"
+            )
+        else:
+            parts.append(
+                f"[0:v]trim=start={shot.start:.6f}:end={shot.end:.6f},"
+                f"setpts=PTS-STARTPTS,crop={w}:{h}:{x}:{y},"
+                f"scale={out_w}:{out_h}:flags=lanczos,"
+                f"setsar=1[{label}]"
+            )
         labels.append(f"[{label}]")
     if not labels:
         raise CompositionError("v3 generated an empty shot plan")
@@ -1088,6 +1173,9 @@ def _render_with_splits(input_video: str, output_video: str, composed: Sequence[
                                         aspect_tuple=aspect_tuple)
                 canvas = render_split_screen_from_centers(frame, centers, aspect_tuple)
                 rendered = cv2.resize(canvas, (out_w, out_h), interpolation=cv2.INTER_LANCZOS4)
+            elif shot.layout == LAYOUT_WIDE:
+                rendered = _crop_resize_fit(frame, shot.crop, frame_w, frame_h,
+                                            out_w, out_h)
             else:
                 rendered = _crop_resize(frame, shot.crop, frame_w, frame_h,
                                         out_w, out_h)
