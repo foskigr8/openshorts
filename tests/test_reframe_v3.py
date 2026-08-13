@@ -343,6 +343,25 @@ def test_enforce_min_crop_leaves_big_crops_untouched():
     assert _enforce_min_crop(crop, 1920, 1080, 0.5625) == crop
 
 
+def test_clip_and_filter_box_clips_off_frame_and_drops_garbage():
+    # The ASR-first identity path hands shots tracks whose boxes can be half
+    # off-frame or body-sized false detections — those used to fail
+    # composition ('subject (-48, 81, 2030, 741) not contained in crop').
+    from reframe_v3 import _clip_and_filter_box
+    # Mostly off-frame -> dropped.
+    assert _clip_and_filter_box((-600.0, 100.0, 100.0, 100.0),
+                                1920, 1080) is None
+    # Partially off-frame -> clipped to the visible part (containable).
+    assert _clip_and_filter_box((-60.0, 171.0, 136.0, 194.0),
+                                1920, 1080) == (0.0, 171.0, 76.0, 194.0)
+    # Body-sized false detection -> dropped.
+    assert _clip_and_filter_box((-48.0, 81.0, 2030.0, 741.0),
+                                1920, 1080) is None
+    # A normal in-frame face passes through untouched.
+    assert _clip_and_filter_box((300.0, 200.0, 120.0, 120.0),
+                                1920, 1080) == (300.0, 200.0, 120.0, 120.0)
+
+
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
 

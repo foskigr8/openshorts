@@ -624,7 +624,35 @@ def _track_nearest_x(tracks: Dict[int, dict], x_norm: Optional[float],
     return best_id
 
 
-def _track_boxes_for_shot(shot, spine_tracks: Dict[int, dict]) -> List[Box]:
+def _clip_and_filter_box(box: Optional[Box], frame_w: int,
+                         frame_h: int) -> Optional[Box]:
+    """Clip a face box to the frame and drop detections that aren't a usable
+    face. The ASR-first identity path can hand a shot a track whose box at
+    that moment is half off-frame, a crowd false positive, or a body-sized
+    detection — a union of those is uncontainable and fails composition
+    ('subject (-48, 81, 2030, 741) not contained in crop'). Only the
+    visible, plausible part is kept, so the crop can always contain it."""
+    if box is None:
+        return None
+    x, y, w, h = (float(v) for v in box)
+    if w <= 0 or h <= 0:
+        return None
+    vx0, vy0 = max(0.0, x), max(0.0, y)
+    vx1, vy1 = min(float(frame_w), x + w), min(float(frame_h), y + h)
+    vis_w, vis_h = vx1 - vx0, vy1 - vy0
+    if vis_w <= 0 or vis_h <= 0:
+        return None
+    # Mostly off-frame (a face 70%+ outside the shot) is noise, not a face.
+    if vis_w * vis_h < 0.3 * w * h:
+        return None
+    # Implausibly large "faces" (body/false detections in crowd shots).
+    if w > 0.8 * frame_w or h > 0.95 * frame_h:
+        return None
+    return (vx0, vy0, vis_w, vis_h)
+
+
+def _track_boxes_for_shot(shot, spine_tracks: Dict[int, dict],
+                          frame_w: int, frame_h: int) -> List[Box]:
     """Per-subject box = the UNION of that subject's face boxes across the
     WHOLE shot (AutoFlip-style), so the static crop contains the subject for
     the entire duration.
@@ -646,14 +674,17 @@ def _track_boxes_for_shot(shot, spine_tracks: Dict[int, dict]) -> List[Box]:
             while t <= float(shot.end) + 1e-6:
                 b = _nearest_box(track, t)
                 if b is not None:
-                    union = b if union is None else union_box(union, b)
+                    b = _clip_and_filter_box(b, frame_w, frame_h)
+                    if b is not None:
+                        union = b if union is None else union_box(union, b)
                 t += 0.5
         if union is None:
             # No per-frame boxes sampled (sparse track) — fall back to the
             # planner's median, the previous behavior.
             box = crop_rect_for_track(spine_tracks, track_id, shot.start, shot.end)
             if box is not None:
-                union = tuple(float(v) for v in box)
+                box = _clip_and_filter_box(box, frame_w, frame_h)
+                union = tuple(float(v) for v in box) if box is not None else None
         if union is not None:
             boxes.append(tuple(float(v) for v in union))
     return boxes
@@ -689,7 +720,7 @@ def _compose_shot(shot, spine_tracks: Dict[int, dict], active_tracks,
     """
     from shot_planner import SHOT_REACTION, SHOT_VSPLIT
 
-    subjects = _track_boxes_for_shot(shot, spine_tracks)
+    subjects = _track_boxes_for_shot(shot, spine_tracks, frame_w, frame_h)
     if not subjects:
         # WIDE shot (4:3, letterboxed into the 9:16 frame): the planner emits
         # these on purpose for moments with no confident subject (no
