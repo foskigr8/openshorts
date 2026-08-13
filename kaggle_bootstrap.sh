@@ -549,6 +549,18 @@ fi
 # outbound tunnel. The quick tunnel needs no account; its hostname changes
 # every session, which is the main ergonomic cost of this setup.
 say "Public URL"
+
+# Diagnostics first: the same notebook behaves differently in the Kaggle
+# editor ("Interactive") vs a headless/Batch run. Knowing which mode we are
+# in — and whether a platform HTTP proxy is set (which cloudflared ignores
+# or chokes on) — turns a silent "tunnel error" page into a readable log.
+echo "    run type: ${KAGGLE_KERNEL_RUN_TYPE:-unknown}"
+if [ -n "${HTTP_PROXY:-}${HTTPS_PROXY:-}${ALL_PROXY:-}" ]; then
+    echo "    proxy env set (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY) — cloudflared "
+    echo "    does not honour these; clearing them for the tunnel"
+    unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+fi
+
 if ! command -v cloudflared >/dev/null 2>&1; then
     curl -sL -o /tmp/cloudflared \
         https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
@@ -557,19 +569,45 @@ if ! command -v cloudflared >/dev/null 2>&1; then
 else
     CF=cloudflared
 fi
-pkill -f "cloudflared tunnel" 2>/dev/null || true
-nohup "$CF" tunnel --url "http://localhost:$PORT" --no-autoupdate \
-    > "$LOG_DIR/tunnel.log" 2>&1 &
-URL=""
-for _ in $(seq 1 45); do
-    URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$LOG_DIR/tunnel.log" 2>/dev/null | head -1) || true
-    [ -n "$URL" ] && break
-    sleep 2
+
+# Outbound reachability probe — separates "no internet at all" (Batch runs
+# can be network-restricted) from "tunnel registration failed". QUIC (UDP)
+# is cloudflared's default and is exactly what restricted/headless networks
+# block, so every retry round also tries the TCP/HTTP2 protocol.
+for host in https://cloudflare.com https://region1.v2.argotunnel.com; do
+    if curl -sf -o /dev/null --max-time 8 "$host" 2>/dev/null; then
+        echo "    outbound OK: $host"
+    else
+        echo "    outbound FAILED: $host"
+    fi
 done
+
+URL=""
+for round in 1 2 3; do
+    for proto in "" "--protocol http2"; do
+        pkill -f "cloudflared tunnel" 2>/dev/null || true
+        : > "$LOG_DIR/tunnel.log"
+        nohup "$CF" tunnel --url "http://localhost:$PORT" $proto \
+            --no-autoupdate > "$LOG_DIR/tunnel.log" 2>&1 &
+        for _ in $(seq 1 30); do
+            URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' \
+                      "$LOG_DIR/tunnel.log" 2>/dev/null | head -1) || true
+            [ -n "$URL" ] && break
+            sleep 2
+        done
+        [ -n "$URL" ] && break
+        echo "    tunnel round $round${proto:+ ($proto)} did not register — retrying"
+    done
+    [ -n "$URL" ] && break
+    sleep 5
+done
+
 if [ -n "$URL" ]; then
     printf '\n    \033[1;32m%s\033[0m\n\n' "$URL"
     echo "    Open that in a browser. Logs: $LOG_DIR/{backend,tunnel}.log"
+    echo "$URL" > "$OUTPUT_DIR/public_url.txt" 2>/dev/null || true
+    echo "    URL also saved to \$OUTPUT_DIR/public_url.txt"
 else
-    echo "    tunnel did not report a URL — check $LOG_DIR/tunnel.log"
+    echo "    tunnel did not report a URL — last $LOG_DIR/tunnel.log:"
     tail -20 "$LOG_DIR/tunnel.log"
 fi
