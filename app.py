@@ -2722,6 +2722,11 @@ async def source_video(key: str):
     return FileResponse(path, media_type="video/mp4")
 
 
+# Job ids whose metadata we have already tried to pull back from storage.
+# Bounded by the number of jobs ever seen in one process lifetime.
+_META_PULL_TRIED = set()
+
+
 def _live_job_status(job_id):
     """"processing" while this job is queued/running in memory, else None.
 
@@ -2828,7 +2833,14 @@ async def list_history(request: Request):
         # thumbnail) with no metadata — but the backup repo still has it, and
         # it carries the job's REAL generation time and titles. Pull it back
         # so the entry is dated when it was made, not when it was restored.
-        if not json_files and "metadata.json" in hf_listing.get(job_id, []):
+        if (not json_files
+                and job_id not in _META_PULL_TRIED
+                and "metadata.json" in hf_listing.get(job_id, [])):
+            # Once per job per process: this is a network round trip inside a
+            # request the dashboard polls every few seconds while a job runs,
+            # and retrying a job that has no metadata to fetch turned History
+            # into a slow endpoint that timed out under load.
+            _META_PULL_TRIED.add(job_id)
             try:
                 if hf_storage.download_file(
                         hf_storage.job_key(job_id, "metadata.json"),

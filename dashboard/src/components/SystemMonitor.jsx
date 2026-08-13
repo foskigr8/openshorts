@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  Activity, Cpu, HardDrive, MemoryStick, Zap, AlertTriangle, Cookie, Server, X,
+  Activity, Cpu, HardDrive, MemoryStick, Zap, AlertTriangle, Cookie, Server, X, Film,
 } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 
@@ -36,15 +36,17 @@ function Spark({ points, tone = 'var(--color-accent)' }) {
   );
 }
 
-function Meter({ Icon, label, value, sub, pct, tone = 'var(--color-accent)', trail }) {
+function Meter({ Icon, label, value, sub, pct, tone = 'var(--color-accent)', trail, wide = false }) {
   const shown = Math.max(0, Math.min(100, pct ?? 0));
   return (
-    <div className="rounded-input border border-rule bg-paper2 px-3 py-2.5">
-      <div className="flex items-center gap-2">
-        <Icon size={13} className="text-muted shrink-0" />
-        <span className="readout text-[9px] uppercase tracking-wider text-muted flex-1 truncate">{label}</span>
-        <span className="text-xs font-semibold text-ink tabular-nums">{value}</span>
+    <div className={`rounded-input border border-rule bg-paper2 px-3 py-2.5 min-w-0 ${wide ? 'col-span-2' : ''}`}>
+      <div className="flex items-baseline gap-2">
+        <Icon size={12} className="text-muted shrink-0 self-center" />
+        <span className="readout text-[8px] uppercase tracking-wider text-muted truncate flex-1">{label}</span>
       </div>
+      <p className="text-lg font-semibold text-ink tabular-nums leading-none mt-1.5 truncate" title={String(value)}>
+        {value}
+      </p>
       <div className="mt-1.5 h-1 rounded-full bg-paper3 overflow-hidden">
         <div
           className="h-full rounded-full transition-[width] duration-500"
@@ -57,7 +59,7 @@ function Meter({ Icon, label, value, sub, pct, tone = 'var(--color-accent)', tra
       <div className="flex items-end justify-between gap-2 mt-1">
         <span className="readout text-[9px] text-muted/80 truncate">{sub}</span>
         {trail && trail.length > 3 && (
-          <span className="w-16 shrink-0 opacity-70"><Spark points={trail} tone={tone} /></span>
+          <span className="w-14 shrink-0 opacity-70"><Spark points={trail} tone={tone} /></span>
         )}
       </div>
     </div>
@@ -153,59 +155,80 @@ export default function SystemMonitor({ status }) {
         <>
           {/* Click-away, without trapping focus or dimming the workspace. */}
           <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-11 z-40 w-[320px] card p-3 space-y-2 animate-fade">
+          <div className="absolute right-0 top-11 z-40 w-[min(92vw,460px)] card p-3 space-y-2.5 animate-fade">
             <div className="flex items-center justify-between px-1">
               <p className="readout text-[9px] uppercase tracking-wider text-muted">machine</p>
-              <button
-                onClick={() => setOpen(false)}
-                className="text-muted hover:text-ink transition-colors"
-                aria-label="close"
-              >
-                <X size={13} />
-              </button>
+              <div className="flex items-center gap-2">
+                {m?.job_slots != null && (
+                  <span className="readout text-[9px] text-muted tabular-nums">
+                    {m.jobs_active || 0}/{m.job_slots} slots
+                  </span>
+                )}
+                <button
+                  onClick={() => setOpen(false)}
+                  className="text-muted hover:text-ink transition-colors"
+                  aria-label="close"
+                >
+                  <X size={13} />
+                </button>
+              </div>
             </div>
 
             {failed && (
               <p className="text-[11px] text-danger px-1">Can't read the machine right now.</p>
             )}
 
-            <Meter
-              Icon={Cpu}
-              label={`cpu${m?.cpu_count ? ` · ${m.cpu_count} cores` : ''}`}
-              value={cpu != null ? `${Math.round(cpu)}%` : '—'}
-              sub={m?.jobs_active ? `${m.jobs_active} running · ${m.jobs_queued || 0} queued` : 'idle'}
-              pct={cpu}
-              trail={trails.current.cpu}
-            />
-
-            <Meter
-              Icon={MemoryStick}
-              label="ram"
-              value={mem ? `${mem.used_gb} / ${mem.total_gb} GB` : '—'}
-              sub={mem ? `${mem.pct}% in use` : 'unavailable'}
-              pct={mem?.pct}
-              tone="var(--color-warn)"
-              trail={trails.current.mem}
-            />
+            {/* Two across. A column of full-width bars made four numbers take
+                the height of a paragraph and read like a list of nothing. */}
+            <div className="grid grid-cols-2 gap-2">
+              <Meter
+                Icon={Cpu}
+                label={`cpu${m?.cpu_count ? ` · ${m.cpu_count} cores` : ''}`}
+                value={cpu != null ? `${Math.round(cpu)}%` : '—'}
+                sub={m?.jobs_active ? `${m.jobs_active} running` : 'idle'}
+                pct={cpu}
+                trail={trails.current.cpu}
+              />
+              <Meter
+                Icon={MemoryStick}
+                label="ram"
+                value={mem ? `${mem.used_gb}` : '—'}
+                sub={mem ? `of ${mem.total_gb} GB · ${mem.pct}%` : 'unavailable'}
+                pct={mem?.pct}
+                tone="var(--color-warn)"
+                trail={trails.current.mem}
+              />
+            </div>
 
             {m?.gpus?.length ? m.gpus.map((g, i) => (
-              <div key={i} className="space-y-2">
-                <Meter
-                  Icon={Zap}
-                  label={g.name || `gpu ${i}`}
-                  value={g.util_pct != null ? `${Math.round(g.util_pct)}%` : '—'}
-                  sub={g.temp_c != null ? `${Math.round(g.temp_c)}°c` : 'utilisation'}
-                  pct={g.util_pct}
-                  trail={i === 0 ? trails.current.gpu : null}
-                />
-                <Meter
-                  Icon={MemoryStick}
-                  label="vram"
-                  value={g.vram_total_gb ? `${g.vram_used_gb} / ${g.vram_total_gb} GB` : '—'}
-                  sub={`${g.vram_pct || 0}% in use`}
-                  pct={g.vram_pct}
-                  tone="var(--color-ok)"
-                />
+              <div key={i} className="rounded-input border border-rule bg-paper2 p-2.5">
+                <div className="flex items-center gap-2 mb-2">
+                  <Zap size={12} className="text-brass shrink-0" />
+                  <span className="text-[11px] text-ink2 truncate flex-1" title={g.name}>
+                    {g.name || `gpu ${i}`}
+                  </span>
+                  {g.temp_c != null && (
+                    <span className="readout text-[9px] text-muted tabular-nums">
+                      {Math.round(g.temp_c)}°c
+                    </span>
+                  )}
+                </div>
+                {/* utilisation and vram as one row of two gauges */}
+                <div className="grid grid-cols-2 gap-2">
+                  <Gauge
+                    label="load"
+                    value={g.util_pct != null ? `${Math.round(g.util_pct)}%` : '—'}
+                    pct={g.util_pct}
+                    tone="var(--color-accent)"
+                    trail={i === 0 ? trails.current.gpu : null}
+                  />
+                  <Gauge
+                    label="vram"
+                    value={g.vram_total_gb ? `${g.vram_used_gb} / ${g.vram_total_gb} GB` : '—'}
+                    pct={g.vram_pct}
+                    tone="var(--color-ok)"
+                  />
+                </div>
               </div>
             )) : (
               <div className="rounded-input border border-rule bg-paper2 px-3 py-2.5 flex items-center gap-2">
@@ -214,17 +237,27 @@ export default function SystemMonitor({ status }) {
               </div>
             )}
 
-            <Meter
-              Icon={HardDrive}
-              label="disk"
-              value={m?.disk ? `${m.disk.used_gb} / ${m.disk.total_gb} GB` : '—'}
-              sub={status?.storage ? `clips: ${status.storage.used_gb} / ${status.storage.cap_gb} GB` : ''}
-              pct={m?.disk?.pct}
-              tone="var(--color-muted)"
-            />
+            <div className="grid grid-cols-2 gap-2">
+              <Meter
+                Icon={HardDrive}
+                label="disk"
+                value={m?.disk ? `${m.disk.used_gb} GB` : '—'}
+                sub={m?.disk ? `of ${m.disk.total_gb} GB` : ''}
+                pct={m?.disk?.pct}
+                tone="var(--color-muted)"
+              />
+              <Meter
+                Icon={Film}
+                label="clips on disk"
+                value={status?.storage ? `${status.storage.used_gb} GB` : '—'}
+                sub={status?.storage ? `cap ${status.storage.cap_gb} GB` : ''}
+                pct={status?.storage?.pct}
+                tone="var(--color-muted)"
+              />
+            </div>
 
             {/* The old header pills, now where they cost nothing. */}
-            <div className="flex flex-wrap items-center gap-2 pt-1 px-1">
+            <div className="flex flex-wrap items-center gap-2 pt-0.5 px-1">
               <Chip Icon={Server} ok={status?.backend !== false} label="backend" />
               <Chip
                 Icon={Cookie}
@@ -238,6 +271,32 @@ export default function SystemMonitor({ status }) {
             </div>
           </div>
         </>
+      )}
+    </div>
+  );
+}
+
+/** Half-width readout used inside a GPU card. */
+function Gauge({ label, value, pct, tone, trail = null }) {
+  const shown = Math.max(0, Math.min(100, pct ?? 0));
+  return (
+    <div className="min-w-0">
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="readout text-[8px] uppercase tracking-wider text-muted">{label}</span>
+        <span className="text-[11px] font-semibold text-ink tabular-nums truncate">{value}</span>
+      </div>
+      <div className="mt-1 h-1.5 rounded-full bg-paper3 overflow-hidden">
+        <div
+          className="h-full rounded-full transition-[width] duration-500"
+          style={{
+            width: `${Math.max(shown, 1)}%`,
+            background: shown >= 88 ? 'var(--color-danger)' : tone,
+            boxShadow: shown > 4 ? '0 0 8px var(--color-glow)' : 'none',
+          }}
+        />
+      </div>
+      {trail && trail.length > 3 && (
+        <span className="block mt-0.5 opacity-70"><Spark points={trail} tone={tone} /></span>
       )}
     </div>
   );

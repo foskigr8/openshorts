@@ -61,9 +61,10 @@ export default function HomeRail({ onViewAll, search = '', projects = [], active
   const [storage, setStorage] = useState(null);
   const [filter, setFilter] = useState('all');
   const [playingId, setPlayingId] = useState(null);
-  const [railOpen, toggleRail] = usePanelState('rail', true);
+  const [railOpen, toggleRail] = usePanelState('rail', false);
   const [deleting, setDeleting] = useState(null);
   const [deleteError, setDeleteError] = useState('');
+  const [stale, setStale] = useState(false);
   const itemRefs = useRef({});
 
   // Any project running anywhere keeps the rail live — not just the one on
@@ -73,16 +74,28 @@ export default function HomeRail({ onViewAll, search = '', projects = [], active
   // The rail is a live view of the same state the main panel shows, not a
   // one-time snapshot: it re-reads history while a job runs (so finished clips
   // appear as they land) and once more when the job reaches a terminal state.
+  // A poll that fails must NEVER blank the list. /api/history walks the whole
+  // output directory (and can touch remote storage), so under load it times
+  // out now and then — and `setVideos(d?.videos || [])` turned every one of
+  // those into "all your projects just disappeared". The last good answer
+  // stands until a better one arrives.
   useEffect(() => {
     let cancelled = false;
     const load = () => {
       apiFetch('/api/history')
         .then((r) => (r.ok ? r.json() : null))
-        .then((d) => { if (!cancelled) setVideos(d?.videos || []); })
-        .catch(() => {});
+        .then((d) => {
+          if (cancelled || !d || !Array.isArray(d.videos)) {
+            if (!cancelled && d === null) setStale(true);
+            return;
+          }
+          setVideos(d.videos);
+          setStale(false);
+        })
+        .catch(() => { if (!cancelled) setStale(true); });
       apiFetch('/api/system')
         .then((r) => (r.ok ? r.json() : null))
-        .then((d) => { if (!cancelled) setStorage(d?.storage || null); })
+        .then((d) => { if (!cancelled && d?.storage) setStorage(d.storage); })
         .catch(() => {});
     };
     load();
@@ -421,6 +434,11 @@ export default function HomeRail({ onViewAll, search = '', projects = [], active
 
       {deleteError && (
         <p className="px-4 py-2 text-[11px] text-danger shrink-0">{deleteError}</p>
+      )}
+      {stale && videos !== null && (
+        <p className="px-4 py-1.5 text-[10px] text-muted shrink-0 lowercase">
+          couldn't refresh — showing the last known list
+        </p>
       )}
 
       {storage && (

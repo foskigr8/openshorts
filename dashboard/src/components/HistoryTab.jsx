@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Loader2, Download, Film, FolderOpen, Trash2, AlertTriangle, Maximize2, Minimize2, ChevronDown } from 'lucide-react';
+import { Loader2, Download, Film, FolderOpen, Trash2, AlertTriangle, Maximize2, Minimize2, ChevronDown, RefreshCw } from 'lucide-react';
 import { apiJson, apiFetch } from '../lib/api';
 import { pauseAllOtherPlayers, registerPlayer } from '../lib/playerSync';
 import { usePanelState } from './ui/CollapsiblePanel';
@@ -25,12 +25,27 @@ export default function HistoryTab({ onReopenProject, search = '' }) {
   const [wide, toggleWide] = usePanelState('history-wide', false);
   const [expanded, setExpanded] = useState({});   // jobId → show its clips
 
+  // Loaded on mount AND on demand. A single failed fetch used to leave this
+  // tab stuck on its spinner with no way back except switching tabs — under
+  // load (/api/history walks the whole output dir) that is not rare.
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
+    let cancelled = false;
     apiJson('/api/history')
-      .then((d) => setVideos(d.videos || []))
-      .catch(() => setError('Could not load your library.'));
+      .then((d) => {
+        if (cancelled) return;
+        if (Array.isArray(d.videos)) { setVideos(d.videos); setError(''); }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setError('Could not load your library — the server may be busy.');
+          // Never leave it null: null renders as a permanent spinner.
+          setVideos((prev) => (prev === null ? [] : prev));
+        }
+      });
     apiJson('/api/projects')
       .then((d) => {
+        if (cancelled) return;
         const map = {};
         for (const p of d.projects || []) map[p.job_id] = p;
         setProjects(map);
@@ -38,9 +53,10 @@ export default function HistoryTab({ onReopenProject, search = '' }) {
       .catch(() => {});
     apiFetch('/api/system')
       .then((r) => (r.ok ? r.json() : null))
-      .then((d) => setSystem(d))
+      .then((d) => { if (!cancelled && d) setSystem(d); })
       .catch(() => {});
-  }, []);
+    return () => { cancelled = true; };
+  }, [reloadKey]);
 
   // Group videos by job. Newest-to-oldest AT ALL TIMES: each job's clips
   // are sorted by their own recency (a clip finished a minute ago leads its
@@ -189,13 +205,22 @@ export default function HistoryTab({ onReopenProject, search = '' }) {
             Kept until you delete it. Open a project to keep editing its clips.
           </p>
         </div>
-        <button
-          onClick={toggleWide}
-          className="btn-ghost px-3 py-2 text-xs shrink-0"
-          title={wide ? 'back to a readable column' : 'use the full width'}
-        >
-          {wide ? <><Minimize2 size={14} /> compact</> : <><Maximize2 size={14} /> full width</>}
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            onClick={() => setReloadKey((k) => k + 1)}
+            className="btn-ghost px-3 py-2 text-xs"
+            title="reload the library"
+          >
+            <RefreshCw size={14} /> refresh
+          </button>
+          <button
+            onClick={toggleWide}
+            className="btn-ghost px-3 py-2 text-xs"
+            title={wide ? 'back to a readable column' : 'use the full width'}
+          >
+            {wide ? <><Minimize2 size={14} /> compact</> : <><Maximize2 size={14} /> full width</>}
+          </button>
+        </div>
       </div>
 
       {storage && (

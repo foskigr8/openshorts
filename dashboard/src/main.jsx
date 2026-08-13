@@ -5,6 +5,7 @@ import App from './App.jsx'
 import Legal from './Legal.jsx'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import { ProjectProvider } from './contexts/ProjectContext'
+import ErrorBoundary from './components/ErrorBoundary'
 import { capture as captureAttribution } from './lib/attribution'
 import { BRAND, applyBrand } from './brand'
 import PricingPage from './components/PricingPage'
@@ -81,10 +82,12 @@ applyBrand();
 
 createRoot(document.getElementById('root')).render(
   <StrictMode>
-    <AuthProvider>
-      <ProjectProvider>
-        <Root />
-      </ProjectProvider>
-    </AuthProvider>
+    <ErrorBoundary>
+      <AuthProvider>
+        <ProjectProvider>
+          <Root />
+        </ProjectProvider>
+      </AuthProvider>
+    </ErrorBoundary>
   </StrictMode>,
 )

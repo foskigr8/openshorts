@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import { getApiUrl } from '../../config';
 import SourceStep from './steps/SourceStep';
@@ -88,8 +88,23 @@ export default function CreateFlow({ onSubmit, onCancel, starting = false, error
     });
   };
 
-  // A failed start must not leave the panel mid-flight forever.
+  // The launch animation ends at opacity 0 (`animation-fill-mode: both`), so
+  // anything that leaves this component mounted afterwards leaves it INVISIBLE
+  // — a blank panel. That is exactly what happened when the submit came back
+  // without a running job: the quality gate, the quota wall, or an error.
+  // Belt and braces: clear it when the parent stops starting, when an error
+  // arrives, and on a timer that always outlives the 620ms animation.
+  useEffect(() => {
+    if (!launching) return undefined;
+    const t = setTimeout(() => setLaunching(false), 1500);
+    return () => clearTimeout(t);
+  }, [launching]);
   useEffect(() => { if (error) setLaunching(false); }, [error]);
+  const wasStarting = useRef(false);
+  useEffect(() => {
+    if (wasStarting.current && !starting) setLaunching(false);
+    wasStarting.current = starting;
+  }, [starting]);
 
   const body = {
     source: (

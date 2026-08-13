@@ -252,6 +252,14 @@ function App() {
   } = useProjects();
 
   const status = active?.status ?? 'idle';
+  // A job the server reports as `queued` (waiting for a concurrency slot)
+  // matched NEITHER the launcher (idle) nor the workspace, so the screen went
+  // blank until it started running. Anything that isn't idle has a project to
+  // show.
+  const hasProject = status !== 'idle' && !!active;
+  // Waiting for a free concurrency slot is work in progress as far as the
+  // screen is concerned — the stage readout still says "queued".
+  const viewStatus = status === 'queued' ? 'processing' : status;
   const results = active?.results ?? null;
   const logs = active?.logs ?? [];
   const progress = active?.progress ?? null;
@@ -577,7 +585,7 @@ function App() {
     load();
     // Keep counts live for the duration of a run, and pick up the terminal
     // state right after it ends, without the user refreshing anything.
-    const interval = status === 'processing' ? setInterval(load, 5000) : null;
+    const interval = liveCount > 0 ? setInterval(load, 5000) : null;
     return () => { cancelled = true; if (interval) clearInterval(interval); };
   }, [jobId, status]);
 
@@ -1256,8 +1264,12 @@ function App() {
           )}
 
           {/* View: no project open — the launcher */}
-          {activeTab === 'dashboard' && status === 'idle' && (
+          {activeTab === 'dashboard' && !hasProject && (
             <div className="flex h-full min-h-0">
+              {/* No side panel on arrival. The launcher already shows every
+                  project as a tile — a second list of the same thing, open by
+                  default, was clutter on the one screen that should feel
+                  calm. The rail belongs to the workspace, not the doorway. */}
               <div className="flex-1 min-w-0 flex flex-col animate-fade">
                 <ProjectLauncher
                   projects={railProjects}
@@ -1267,18 +1279,11 @@ function App() {
                   error={startError}
                 />
               </div>
-              <HomeRail
-                onViewAll={() => setActiveTab("history")}
-                search={historySearch}
-                onOpenProject={handleOpenProject}
-                projects={railProjects}
-                activeId={jobId}
-              />
             </div>
           )}
 
           {/* View: Processing / Results (Split View) */}
-          {activeTab === 'dashboard' && (status === 'processing' || status === 'complete' || status === 'error' || status === 'cancelled') && (
+          {activeTab === 'dashboard' && hasProject && (
             <div className="flex h-full min-h-0">
               <div className="flex-1 min-w-0 flex flex-col">
                 {/* Processing hero — same gradient-emphasis headline as Home */}
@@ -1323,7 +1328,7 @@ function App() {
                   <ProcessingAnimation
                     media={processingMedia}
                     isComplete={status === 'complete'}
-                    status={status}
+                    status={viewStatus}
                     progress={progress}
                     title={
                       processingMedia.type === 'file'
@@ -1338,7 +1343,7 @@ function App() {
                       horizontal: '16:9',
                       auto: 'auto',
                     }[submittedFormat] || submittedFormat}
-                    onCancel={status === 'processing' ? handleCancelJob : null}
+                    onCancel={viewStatus === 'processing' ? handleCancelJob : null}
                   />
                 )}
 
@@ -1432,7 +1437,7 @@ function App() {
                     // their slot to a real ResultCard the moment the backend
                     // surfaces them; the rest stay "rendering…" placeholders.
                     const readyCount = results?.clips?.length || 0;
-                    const slotCount = status === 'processing'
+                    const slotCount = viewStatus === 'processing'
                       ? (progress?.clips_total || requestedClipCount || 0)
                       : 0;
                     const total = Math.max(readyCount, slotCount);
@@ -1456,7 +1461,7 @@ function App() {
                             // four 420px editor cards buried the pipeline the
                             // user was trying to watch. Clicking one unfolds
                             // the full editor in place; nothing is removed.
-                            results?.clips?.[i] && status === 'processing' && expandedClip !== i ? (
+                            results?.clips?.[i] && viewStatus === 'processing' && expandedClip !== i ? (
                               <ClipRow
                                 key={`row-${jobId}-${i}`}
                                 clip={results.clips[i]}
@@ -1494,14 +1499,14 @@ function App() {
                                 key={`ph-${i}`}
                                 index={i}
                                 total={total}
-                                state={status === 'processing' && i === readyCount ? 'rendering' : 'queued'}
+                                state={viewStatus === 'processing' && i === readyCount ? 'rendering' : 'queued'}
                               />
                             )
                           ))}
                         </div>
                       );
                     }
-                    if (status === 'processing') {
+                    if (viewStatus === 'processing') {
                       return (
                         <div className="h-full flex flex-col items-center justify-center text-muted space-y-4">
                           <Loader2 size={32} className="animate-spin text-brass" />
@@ -1567,12 +1572,13 @@ function App() {
                   id="telemetry"
                   title="pipeline detail"
                   subtitle="log · stage"
+                  defaultOpen={false}
                   className="shrink-0 !bg-transparent !border-0"
                   bodyClassName="pt-3"
                 >
                   <TelemetryGrid
                     logs={logs}
-                    status={status}
+                    status={viewStatus}
                     raw={logsRaw}
                     onRawToggle={() => setLogsRaw((v) => !v)}
                     stageDurations={stageDurations}
