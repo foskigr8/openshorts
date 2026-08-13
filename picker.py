@@ -40,12 +40,18 @@ _MIN_SEGMENT_CHARS_BEFORE_MERGE = 12
 # Transient Gemini failures worth retrying inside one picker call (same list
 # the old 2-pass stage used). Policy blocks are handled separately and never
 # retried — they are deterministic.
+_AUTH_FAILURE_TOKENS = (
+    "unauthenticated", "access_token_type_unsupported",
+    "invalid authentication", "api key not valid", "invalid_api_key",
+    "api key not found", "permission_denied",
+)
+
 _TRANSIENT_TOKENS = (
     "503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED",
     "500", "INTERNAL", "overloaded", "Deadline",
     "empty response body", "did not contain a JSON object",
     "Failed to parse Gemini JSON response",
-)
+) + _AUTH_FAILURE_TOKENS
 
 
 class KeepSpan(BaseModel):
@@ -490,7 +496,7 @@ def _call_gemini(api_key, prompt):
             raise  # deterministic policy block — never retry, surface the reason
         except Exception as e:
             last_exc = e
-            if not any(tok in str(e) for tok in _TRANSIENT_TOKENS):
+            if not any(tok in str(e).lower() for tok in _TRANSIENT_TOKENS):
                 raise
             if i < len(keys) - 1:
                 print(f"⚠️ Gemini key {i + 1}/{len(keys)} hit a transient "
@@ -537,6 +543,10 @@ def _call_with_key(api_key, prompt):
             raise  # deterministic policy block — never retry, surface the reason
         except Exception as e:
             msg = str(e)
+            if any(tok in msg.lower() for tok in _AUTH_FAILURE_TOKENS):
+                # A bad key will never succeed on retry or model fallback —
+                # raise immediately so _call_gemini rotates to the next key.
+                raise
             if attempt == max_attempts or not any(tok in msg for tok in _TRANSIENT_TOKENS):
                 raise
             wait = 5 * (2 ** (attempt - 1))
