@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, LayoutDashboard, Settings, Plus, History, X, Shield, LayoutGrid, Image, Globe, Calendar, AlertTriangle, KeyRound, Bot, Loader2, Download, Search, Flame, TrendingUp, ChevronRight, Film, HardDrive } from 'lucide-react';
 import KeyInput from './components/KeyInput';
 import KeyListInput from './components/KeyListInput';
-import MediaInput from './components/MediaInput';
+import ProjectLauncher from './components/project/ProjectLauncher';
 import ResultCard from './components/ResultCard';
 import ProcessingAnimation from './components/ProcessingAnimation';
 import ClipSlotPlaceholder from './components/ClipSlotPlaceholder';
@@ -250,7 +250,7 @@ function App() {
   // The workspace no longer owns job state — ProjectContext does, so several
   // projects can run at once and none of them is lost by switching tabs.
   const {
-    list: projectList, active, activeId: jobId, setActiveId, patch: patchProject,
+    list: projectList, active, activeId: jobId, liveCount, setActiveId, patch: patchProject,
     startProject, openProject: restoreProject, inspectProject, cancelProject,
     closeProject, updateClipState, flushClipState, hydrateDurable, setRawLogs,
   } = useProjects();
@@ -1313,74 +1313,17 @@ function App() {
             <ThumbnailStudio geminiApiKey={apiKey} uploadPostKey={uploadPostKey} uploadUserId={uploadUserId} managed={isManaged} />
           )}
 
-          {/* View: Dashboard (Idle) */}
+          {/* View: no project open — the launcher */}
           {activeTab === 'dashboard' && status === 'idle' && (
             <div className="flex h-full min-h-0">
-              <div className="flex-1 min-w-0 flex flex-col">
-                <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar animate-fade">
-                  <div className="relative min-h-full flex flex-col items-center justify-center px-4 py-6 sm:p-6">
-                    {/* Large, very-low-opacity brand mark behind the hero
-                        (round 3, item 6) — own branding, not a copied motif */}
-                    <div
-                      aria-hidden="true"
-                      className="pointer-events-none absolute -top-10 right-0 sm:-right-10 w-[320px] h-[320px] opacity-[0.05] -z-10 select-none"
-                    >
-                      <img src="/logo-openshorts.png" alt="" className="w-full h-full object-contain" />
-                    </div>
-                  <div className="max-w-xl w-full text-center space-y-8">
-                    <div className="space-y-4 relative">
-                      {/* Ambient pool behind the headline — pure CSS gradient,
-                          no blur filter, so it costs nothing to composite. */}
-                      <div
-                        aria-hidden="true"
-                        className="pointer-events-none absolute left-1/2 -translate-x-1/2 -top-24 w-[560px] h-[320px] -z-10"
-                        style={{ background: 'radial-gradient(50% 50% at 50% 50%, rgba(239,68,68,0.16) 0%, transparent 70%)' }}
-                      />
-                      <p className="eyebrow flex items-center justify-center gap-2">
-                        <Sparkles size={12} className="text-brass glow-accent" />
-                        clip generator
-                      </p>
-                      <h1 className="font-display lowercase text-4xl md:text-5xl text-ink tracking-tight">
-                        create{' '}
-                        <span
-                          style={{
-                            background: 'linear-gradient(180deg, #f87171 0%, #ef4444 60%, #991b1b 100%)',
-                            WebkitBackgroundClip: 'text',
-                            WebkitTextFillColor: 'transparent',
-                            backgroundClip: 'text',
-                          }}
-                        >
-                          viral shorts
-                        </span>
-                      </h1>
-                      <p className="text-muted text-lg">
-                        Drop your long-form video below to instantly generate viral clips with AI.
-                      </p>
-                    </div>
-
-                    <MediaInput onProcess={handleProcess} isProcessing={starting} />
-
-                    {startError && (
-                      <p className="text-xs text-danger text-left px-1">{startError}</p>
-                    )}
-
-                    <div className="flex flex-wrap items-center justify-center gap-2.5 text-muted">
-                      {[
-                        { Icon: Youtube, label: 'YouTube' },
-                        { Icon: Instagram, label: 'Instagram' },
-                        { Icon: TikTokIcon, label: 'TikTok' },
-                      ].map(({ Icon, label }) => (
-                        <span
-                          key={label}
-                          className="flex items-center gap-2 px-3 py-1.5 rounded-full border border-rule bg-paper2 text-xs lowercase"
-                        >
-                          <Icon size={14} className="text-ink2" /> {label}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-                </div>
+              <div className="flex-1 min-w-0 flex flex-col animate-fade">
+                <ProjectLauncher
+                  projects={railProjects}
+                  onOpenProject={(p) => handleOpenProject(p.id)}
+                  onSubmit={handleProcess}
+                  starting={starting}
+                  error={startError}
+                />
               </div>
               <HomeRail
                 onViewAll={() => setActiveTab("history")}
