@@ -141,7 +141,11 @@ def confirm_clip_identities(video_path, tracks, segments,
                             model: Optional[str] = None) -> Optional[Dict[str, int]]:
     """One Gemini call: labeled face crops + the diarized transcript ->
     {speaker_label: track_id}. None on any failure (fail-open)."""
-    if os.environ.get("IDENTITY_CONFIRM", "1").strip().lower() in (
+    # Default OFF: the rendered-clip review (8b33917d) showed "picture and
+    # voice don't match" — the per-clip maps can't reliably tell speakers
+    # apart in a crowded show, so the LR-ASD fusion is the primary again.
+    # Opt in with IDENTITY_CONFIRM=1 to experiment.
+    if os.environ.get("IDENTITY_CONFIRM", "0").strip().lower() in (
             "0", "false", "no", "off"):
         return None
     if not tracks or not segments:

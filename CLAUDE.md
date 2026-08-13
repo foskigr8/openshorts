@@ -206,7 +206,9 @@ GPU pieces that were silently wrong and are now deterministic:
   alternating, ambiguous signal — can never trigger it.
   `SPEAKER_REBIND_SECONDS=0` disables re-binding entirely.
 - `IDENTITY_CONFIRM` — director v2's Gemini face-identity confirmation
-  (default `1`; set `0` to disable): after
+  (default `0` = off; the rendered-clip review showed the per-clip maps
+  can't reliably tell speakers apart in a crowd — the LR-ASD fusion is the
+  primary again. Opt in with `1` to experiment): after
   each clip's face spine, Gemini receives labeled face
   crops + the diarized transcript and returns the speaker->face map
   (`identity_confirm.py`). When it lands, framing is **ASR-first** — the
@@ -253,7 +255,8 @@ GPU pieces that were silently wrong and are now deterministic:
 - **4:3 WIDE shots** — the owner-approved "show everyone" framing: moments
   with no confident subject (reaction / unbound speaker / "both people are
   relevant") render as a 4:3 crop of the source, letterboxed into the 9:16
-  frame (fit-width, black bars top/bottom). Far-apart pairs the camera can
+  frame (fit-width, black bars top/bottom). When faces are known the crop
+  ZOOMS to them (no tiny-people dead space). Far-apart pairs the camera can
   still capture in one 4:3 crop get the wide instead of a split; only
   people too far apart for even that become the vertical split. It only
   ever appears in those moments — never as the default framing.
