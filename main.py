@@ -2150,6 +2150,12 @@ if __name__ == '__main__':
             # before starting a fresh run of the same URL.
             clips_data['source_url'] = args.url or ""
             clips_data['source_file'] = os.path.basename(input_video)
+            # Stable "when was this job generated" stamp — history orders by
+            # this and it rides along with metadata.json through HF restores,
+            # so a restored job keeps its ORIGINAL date instead of the
+            # restore/download time (which is what made History dates
+            # fluctuate).
+            clips_data['created_at'] = time.time()
             # PART 6: surface the verified source specs (written by the
             # download gate) in the job metadata so the dashboard can show
             # "Source: 1080p · 4.3 Mbps" next to the clips instead of leaving

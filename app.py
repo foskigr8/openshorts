@@ -2321,18 +2321,6 @@ def _job_created_at(job_path):
         return time.time()
 
 
-def _clip_created_at(job_path, filename, fallback_iso):
-    """When this clip was ACTUALLY generated — its own file mtime — so
-    newest-to-oldest ordering is per-clip, not per-job (a clip finished a
-    minute ago sorts above one from yesterday's run, even in the same job).
-    Falls back to the job's created_at when the file isn't local."""
-    try:
-        ts = os.path.getmtime(os.path.join(job_path, filename))
-        return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
-    except OSError:
-        return fallback_iso
-
-
 @app.get("/api/thumbnails/{job_id}/{clip_index}")
 async def clip_thumbnail(job_id: str, clip_index: int, request: Request):
     """Cached poster frame for a delivered clip (PART 5.3, 6-aug-2026).
@@ -2672,8 +2660,15 @@ async def list_history(request: Request):
                 data = json.load(f)
             base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
             clips = data.get('shorts', [])
+            # The job's stable generation stamp from metadata.json when the
+            # job wrote one (rides along through HF restores, so a restored
+            # job keeps its ORIGINAL date instead of the restore time — the
+            # cause of History dates fluctuating); falls back to the dir
+            # marker/oldest-file heuristic for legacy jobs.
+            _created_ts = float(data.get("created_at")
+                                or _job_created_at(job_path))
             created_at = datetime.fromtimestamp(
-                _job_created_at(job_path), tz=timezone.utc).isoformat()
+                _created_ts, tz=timezone.utc).isoformat()
             # Per-job status for the history rail's filter chips: real signal
             # from progress.json when present; fall back to playability for
             # legacy jobs (pre-progress) — metadata with no playable clips
@@ -2738,12 +2733,7 @@ async def list_history(request: Request):
                     "title": (clip.get("title")
                               or clip.get("video_title_for_youtube_short")
                               or (base_name if base_name != "metadata.json" else "Short")),
-                    # The clip's OWN file mtime = when it was actually
-                    # generated, so newest-first is per-clip everywhere
-                    # (a clip finished a minute ago sorts above one from
-                    # yesterday, even inside the same job).
-                    "created_at": _clip_created_at(
-                        job_path, filename, created_at),
+                    "created_at": created_at,
                     "status": job_status,
                     "duration": max(0.0, float(clip.get("end") or 0) - float(clip.get("start") or 0)),
                     "size_bytes": os.path.getsize(os.path.join(job_path, filename))

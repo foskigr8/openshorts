@@ -760,9 +760,12 @@ def _crop_resize_panel(frame, crop: Optional[Rect], frame_w: int, frame_h: int,
     if w <= 0 or h <= 0:
         return np.zeros((out_h, out_w, 3), dtype=np.uint8)
     actual = w / h
-    if abs(actual - aspect) > 0.03:
-        # Letterbox: scale to fit inside the panel box, black bars for the
-        # rest. Preserves the whole-frame view without distortion.
+    # Letterbox ONLY on the genuine fallback (a full-frame crop dropped into
+    # a panel — a 16:9 frame into a 9:8 panel would distort faces badly).
+    # Small deviations (a smart-crop containment nudge, the min-size floor)
+    # fill the panel instead: the 1-5% stretch is imperceptible, and it
+    # keeps the stacked panels edge-to-edge with no visible bars/border.
+    if actual > aspect * 1.10 or actual < aspect * 0.90:
         scale = min(out_w / w, out_h / h)
         resized = cv2.resize(
             frame[y:y + h, x:x + w],

@@ -417,21 +417,27 @@ export default function MediaInput({ onProcess, isProcessing }) {
                         </span>
                     </label>
                     {longContextClips > 0 && (
-                        <div className="flex items-center gap-2 mt-2.5">
-                            <span className="readout text-[10px] text-muted">how many</span>
-                            <input
-                                type="number"
-                                min="1"
-                                max="5"
-                                value={longContextClips}
-                                onChange={(e) => {
-                                    const v = Number(e.target.value);
-                                    setLongContextClips(Number.isFinite(v) ? Math.max(0, Math.min(5, v)) : 0);
-                                }}
-                                className="input-field py-1 px-2 w-16 text-sm"
-                                aria-label="Number of long-context clips"
-                            />
-                        </div>
+                        <>
+                            <div className="flex items-center gap-2 mt-2.5">
+                                <span className="readout text-[10px] text-muted">how many</span>
+                                <input
+                                    type="number"
+                                    min="1"
+                                    max="5"
+                                    value={longContextClips}
+                                    onChange={(e) => {
+                                        const v = Number(e.target.value);
+                                        setLongContextClips(Number.isFinite(v) ? Math.max(0, Math.min(5, v)) : 0);
+                                    }}
+                                    className="input-field py-1 px-2 w-16 text-sm"
+                                    aria-label="Number of long-context clips"
+                                />
+                            </div>
+                            <p className="readout text-[10px] text-brass mt-2">
+                                total: {clipCount + longContextClips} clips
+                                ({clipCount} shorts + {longContextClips} long-context)
+                            </p>
+                        </>
                     )}
                 </div>
 

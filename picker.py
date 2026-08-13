@@ -612,6 +612,10 @@ def select_viral_clips(transcript_result, video_duration, clip_count=None,
                          "clip_count — auto mode was removed")
     target = int(clip_count) + int(long_context_count or 0)
     target = max(1, target)
+    print(f"🎯 Picker target: {int(clip_count)} short clip(s)"
+          + (f" + {int(long_context_count or 0)} long-context"
+             if long_context_count else "")
+          + f" = {target} total")
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY not found in environment variables.")
