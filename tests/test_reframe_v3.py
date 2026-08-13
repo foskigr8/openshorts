@@ -324,6 +324,23 @@ def test_crop_never_exceeds_a_small_frame():
     assert w / h == pytest.approx(VERTICAL_9_16, rel=0.05)
 
 
+def test_enforce_min_crop_widens_tiny_crops_only():
+    # A small face crop must not be upscaled into a blurry passport — the
+    # floor widens it (never tightens) to at least 0.45 of the frame height.
+    from reframe_v3 import _enforce_min_crop
+    x, y, w, h = _enforce_min_crop((800.0, 400.0, 90.0, 120.0),
+                                   1920, 1080, 0.5625)
+    assert h >= 0.45 * 1080 - 0.5
+    assert w / h == pytest.approx(0.5625)
+    assert x >= 0 and y >= 0 and x + w <= 1920 and y + h <= 1080
+
+
+def test_enforce_min_crop_leaves_big_crops_untouched():
+    from reframe_v3 import _enforce_min_crop
+    crop = (300.0, 200.0, 900.0, 700.0)
+    assert _enforce_min_crop(crop, 1920, 1080, 0.5625) == crop
+
+
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
 
@@ -616,7 +633,10 @@ def test_compose_shot_bystander_bright_spot_cannot_pull_the_crop():
     speaker = spine[1]["boxes"][0]
     assert contains(composed.crop, speaker)
     # Attention stayed on the speaker, so the crop is the base composition.
-    base = crop_rect_containing(speaker, 1920, 1080, VERTICAL_9_16)
+    from reframe_v3 import _enforce_min_crop
+    base = _enforce_min_crop(
+        crop_rect_containing(speaker, 1920, 1080, VERTICAL_9_16),
+        1920, 1080, VERTICAL_9_16)
     assert abs(composed.crop[0] - base[0]) <= 1.0
 
 
@@ -641,7 +661,10 @@ def test_compose_reaction_shot_no_reaction_stays_on_subject():
     composed = _compose_shot(shot, spine, [1, 1, 1], saliency, 1920, 1080, VERTICAL_9_16)
 
     reactor = spine[2]["boxes"][0]
-    base = crop_rect_containing(reactor, 1920, 1080, VERTICAL_9_16)
+    from reframe_v3 import _enforce_min_crop
+    base = _enforce_min_crop(
+        crop_rect_containing(reactor, 1920, 1080, VERTICAL_9_16),
+        1920, 1080, VERTICAL_9_16)
     assert contains(composed.crop, reactor)
     assert abs(composed.crop[0] - base[0]) <= 1.0
 

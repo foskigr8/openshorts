@@ -141,8 +141,7 @@ def confirm_clip_identities(video_path, tracks, segments,
                             model: Optional[str] = None) -> Optional[Dict[str, int]]:
     """One Gemini call: labeled face crops + the diarized transcript ->
     {speaker_label: track_id}. None on any failure (fail-open)."""
-    # Default OFF: the owner fell back to base. Opt in with IDENTITY_CONFIRM=1.
-    if os.environ.get("IDENTITY_CONFIRM", "0").strip().lower() in (
+    if os.environ.get("IDENTITY_CONFIRM", "1").strip().lower() in (
             "0", "false", "no", "off"):
         return None
     if not tracks or not segments:

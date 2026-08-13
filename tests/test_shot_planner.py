@@ -94,10 +94,20 @@ def test_run_meeting_minimum_survives():
     assert result == [(0.0, 5.0, 0), (5.0, 7.0, 1), (7.0, 10.0, 0)]
 
 
-def test_first_run_kept_even_if_short():
+def test_first_short_run_merges_forward():
+    # A sub-minimum opening blip has nothing preceding it to reabsorb into —
+    # it merges FORWARD into the next run instead of shipping a sub-minimum
+    # shot (which used to fail validate_composition and kill the whole clip:
+    # 'shot 0 [0.00-1.00s]: duration 1.00s < min 1.2s').
     runs = [(0.0, 0.5, 0), (0.5, 10.0, 1)]
     result = sp.merge_short_runs(runs, min_shot_seconds=1.2, forced_boundaries=None)
-    assert result == [(0.0, 0.5, 0), (0.5, 10.0, 1)]
+    assert result == [(0.0, 10.0, 1)]
+
+
+def test_first_run_meeting_minimum_is_kept():
+    runs = [(0.0, 2.0, 0), (2.0, 10.0, 1)]
+    result = sp.merge_short_runs(runs, min_shot_seconds=1.2, forced_boundaries=None)
+    assert result == [(0.0, 2.0, 0), (2.0, 10.0, 1)]
 
 
 def test_short_run_at_forced_boundary_is_never_reabsorbed():

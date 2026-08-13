@@ -190,6 +190,29 @@ DEFAULT_VERT_MARGIN = 0.35
 VERTICAL_9_16 = 9.0 / 16.0
 
 
+def _enforce_min_crop(crop: Rect, frame_w: int, frame_h: int,
+                      aspect: float, min_frac: float = 0.45) -> Rect:
+    """Never let a crop zoom tighter than `min_frac` of the source height.
+    A tiny crop (a small face in a wide group shot) upscaled to 1080x1920 is
+    exactly the "zoomed in and blurry, can't see what's going on" failure —
+    this only ever WIDENS the crop (never tightens), preserves the aspect
+    and the vertical centre so the head stays put."""
+    x, y, w, h = crop
+    floor_h = min_frac * frame_h
+    if h >= floor_h or h >= frame_h:
+        return crop
+    new_h = min(floor_h, float(frame_h))
+    new_w = new_h * aspect
+    if new_w > frame_w:
+        new_w = float(frame_w)
+        new_h = new_w / aspect
+    cy = y + h / 2.0
+    new_y = max(0.0, min(cy - new_h / 2.0, frame_h - new_h))
+    cx = x + w / 2.0
+    new_x = max(0.0, min(cx - new_w / 2.0, frame_w - new_w))
+    return (new_x, new_y, new_w, new_h)
+
+
 def crop_rect_containing(subject: Box, frame_w: int, frame_h: int,
                          aspect: float = VERTICAL_9_16,
                          head_y: float = DEFAULT_HEAD_Y,
@@ -705,6 +728,9 @@ def _compose_shot(shot, spine_tracks: Dict[int, dict], active_tracks,
         # subject containment constraint (the "half a person" fix) still
         # bounds the result, and validate_composition below re-checks it.
         crop = attention_shifted_crop(crop, subject, attention_x, frame_w, frame_h)
+        crop = _enforce_min_crop(
+            crop, frame_w, frame_h, aspect,
+            float(os.environ.get("MIN_CROP_FRAC", "0.45")))
     return ComposedShot(shot.start, shot.end, layout, crop, subjects)
 
 
@@ -1256,7 +1282,7 @@ def render(input_video, final_output_video, aspect_ratio,
                 vert_margin=float(os.environ.get(
                     "VSPLIT_VERT_MARGIN", str(DEFAULT_VERT_MARGIN))),
                 min_height_frac=float(os.environ.get(
-                    "VSPLIT_PANEL_MIN_FRAC", "0.25")),
+                    "VSPLIT_PANEL_MIN_FRAC", "0.45")),
                 dead_zone=float(os.environ.get("VSPLIT_DEADZONE", "0.02")),
                 smooth=float(os.environ.get("VSPLIT_SMOOTH", "0.12")),
                 smooth_zoom=float(os.environ.get("VSPLIT_SMOOTH_ZOOM", "0.06")),

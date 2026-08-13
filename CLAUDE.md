@@ -206,7 +206,7 @@ GPU pieces that were silently wrong and are now deterministic:
   alternating, ambiguous signal — can never trigger it.
   `SPEAKER_REBIND_SECONDS=0` disables re-binding entirely.
 - `IDENTITY_CONFIRM` — director v2's Gemini face-identity confirmation
-  (default `0` = off; the owner fell back to base — opt in with `1`): after
+  (default `1`; set `0` to disable): after
   each clip's face spine, Gemini receives labeled face
   crops + the diarized transcript and returns the speaker->face map
   (`identity_confirm.py`). When it lands, framing is **ASR-first** — the
@@ -239,11 +239,13 @@ GPU pieces that were silently wrong and are now deterministic:
   SINGLE shot would frame that person, then stacked: the tracked panels use
   the same breathing room as the static engine
   (`reframe_v3.DEFAULT_SIDE_MARGIN` / `DEFAULT_VERT_MARGIN`), and
-  `VSPLIT_PANEL_MIN_FRAC=0.25` floors a panel crop at a quarter of the source
+  `VSPLIT_PANEL_MIN_FRAC=0.45` floors a panel crop at ~half the source
   height so a small or distant face can never zoom into a passport close-up.
   Tuning knobs:
   `VSPLIT_HEADROOM=0.18`, `VSPLIT_SIDE_MARGIN=0.55`, `VSPLIT_VERT_MARGIN=0.35`,
-  `VSPLIT_PANEL_MIN_FRAC=0.25` (fraction of source height),
+  `VSPLIT_PANEL_MIN_FRAC=0.45` (fraction of source height),
+  `MIN_CROP_FRAC=0.45` (same floor for regular single/two-shot crops — the
+  blurry-zoom fix: a tiny crop upscaled to 1080x1920 is unreadable),
   `VSPLIT_DEADZONE=0.02` (fraction of crop), `VSPLIT_SMOOTH=0.12` (pan lerp),
   `VSPLIT_SMOOTH_ZOOM=0.06` (zoom lerp), `VSPLIT_FULLWIDTH_FRAC=0.60` (box
   area fraction that triggers the wide-shot fallback), `VSPLIT_LOST_HOLD_FRAMES=30`,

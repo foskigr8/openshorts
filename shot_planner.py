@@ -182,8 +182,11 @@ def merge_short_runs(runs: List[Tuple[float, float, Optional[int]]],
 
     Never reabsorbs across a forced boundary (a run starting exactly at one
     is kept even if short — the video is physically spliced there, a cut
-    must exist no matter how brief the resulting shot is) and never
-    reabsorbs the very first run (nothing precedes it). Also coalesces
+    must exist no matter how brief the resulting shot is). The very first
+    run has nothing to reabsorb INTO, so a sub-minimum opening blip is
+    merged FORWARD into the next run instead — shipping a 1.0s shot would
+    otherwise fail validate_composition and kill the whole clip. Also
+    coalesces
     immediately-adjacent runs left with an identical target after a
     reabsorption, so the output never contains two consecutive shots with
     the same track for no reason.
@@ -200,6 +203,14 @@ def merge_short_runs(runs: List[Tuple[float, float, Optional[int]]],
             output[-1] = (prev_start, end, prev_value)
         else:
             output.append((start, end, value))
+    # Opening blip shorter than the floor (nothing preceded it to reabsorb
+    # into): merge it forward into the next run.
+    while (len(output) > 1
+           and output[0][1] - output[0][0] < min_shot_seconds
+           and output[0][0] not in forced):
+        first = output.pop(0)
+        nxt = output[0]
+        output[0] = (first[0], nxt[1], nxt[2])
     return output
 
 

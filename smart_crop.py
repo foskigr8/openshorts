@@ -41,7 +41,7 @@ DEFAULT_VERT_MARGIN = 0.35
 # pixels tall — technically "correctly framed" and unwatchably close. The
 # floor is a lower bound on the crop, so it can only ever pull the camera
 # WIDER than the margin geometry asked for, never tighter.
-DEFAULT_MIN_HEIGHT_FRAC = 0.25
+DEFAULT_MIN_HEIGHT_FRAC = 0.45
 
 
 def _clamp(value: float, lo: float, hi: float) -> float:

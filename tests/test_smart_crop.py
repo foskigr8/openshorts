@@ -66,10 +66,10 @@ class TestSmoothing:
         for _ in range(300):
             t.step((1000, 250, 100, 100))
         x, y, w, h = t.crop
-        # Target is (915, 232, 270, 270); the glide settles inside the dead
+        # Target is (807, 232, 486, 486); the glide settles inside the dead
         # zone around it rather than landing exactly on it.
-        assert x == pytest.approx(915, abs=6)
-        assert y == pytest.approx(232, abs=6)
+        assert x == pytest.approx(807, abs=12)
+        assert y == pytest.approx(232, abs=12)
 
 
 class TestContainmentProjection:
@@ -85,7 +85,7 @@ class TestContainmentValve:
     def test_face_leaving_the_crop_snaps_back(self):
         t = _tracker().reset((0, 0, 400, 400))
         crop = t.step((1500, 500, 100, 100))
-        assert crop == (1415.0, 482.0, 270.0, 270.0)
+        assert crop == (1307.0, 482.0, 486.0, 486.0)
 
 
 class TestBoundaryClamping:
@@ -100,7 +100,7 @@ class TestHardCutReset:
     def test_scene_cut_snaps_instantly(self):
         t = _tracker().reset((500, 400, 400, 400))
         crop = t.step((1500, 100, 100, 100), scene_cut=True)
-        assert crop == (1415.0, 82.0, 270.0, 270.0)
+        assert crop == (1307.0, 82.0, 486.0, 486.0)
 
 
 class TestFallbacks:
