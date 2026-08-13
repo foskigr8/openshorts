@@ -20,6 +20,7 @@ from google import genai
 from google.genai import types as genai_types
 
 import context_layer
+from download_gate import ClientCannotServeFloor, can_serve_hd_floor
 import gemini_worker
 import gemini_pool
 import picker
@@ -592,10 +593,22 @@ def download_youtube_video(url, output_dir=".", require_hd=False):
                                       or d.get('total_bytes_estimate')
                                       or d.get('downloaded_bytes') or 0)
 
-    def _attempt(extractor_args, fmt, proxy, use_cookies=True):
+    def _attempt(extractor_args, fmt, proxy, use_cookies=True,
+                 allow_subfloor=False):
         _dl_bytes["total"] = 0
         with yt_dlp.YoutubeDL(_base_opts(extractor_args, proxy, use_cookies)) as ydl:
             info = ydl.extract_info(url, download=False)
+        # Pre-download capability gate: this probe already fetched the
+        # client's FULL format list — if that list can't serve the HD floor
+        # (e.g. a spoofed client that YouTube only offers ~360p), skip the
+        # download instead of pulling a low-res file the HD gate would throw
+        # away anyway. allow_subfloor keeps the FINAL ladder strategy exempt
+        # so the low-quality restore path (ALLOW_LOW_QUALITY_SOURCE=1) still
+        # has a file to work with when nothing HD exists.
+        if not allow_subfloor and not can_serve_hd_floor(info):
+            fmts = info.get("formats") or []
+            best = max((f.get("height") or 0) for f in fmts)
+            raise ClientCannotServeFloor(best)
         sanitized = sanitize_filename(info.get('title', 'youtube_video'))
         expected = os.path.join(output_dir, f'{sanitized}.mp4')
         if os.path.exists(expected):
@@ -680,7 +693,9 @@ def download_youtube_video(url, output_dir=".", require_hd=False):
         for retry in range(2):
             try:
                 print(f"📥 Download attempt: {label}" + (f" (retry {retry})" if retry else ""))
-                sanitized_title = _attempt(ea, fmt, proxy, use_cookies)
+                sanitized_title = _attempt(ea, fmt, proxy, use_cookies,
+                                           allow_subfloor=(
+                                               idx == len(attempts) - 1))
                 used_proxy = proxy is not None
                 print(f"✅ Download succeeded ({label}).")
                 # Verify what actually landed BEFORE deciding to proceed.
@@ -710,6 +725,15 @@ def download_youtube_video(url, output_dir=".", require_hd=False):
                                 print(f"   ⚠️ Could not park best download ({_e})")
                             sanitized_title = None  # keep climbing
                             break
+                break
+            except ClientCannotServeFloor as _skip:
+                # The probe decided this client can't serve the floor at
+                # all; its format list is stable, so retrying is pointless —
+                # move to the next strategy without burning a download.
+                last_err = _skip
+                print(f"   ↪️ {label} can't serve the HD floor "
+                      f"(best {_skip.best_height}p) — skipping to the next "
+                      "strategy")
                 break
             except Exception as e:
                 last_err = e

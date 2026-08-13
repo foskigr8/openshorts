@@ -35,7 +35,11 @@ in Cell 2).
    AV1 are excluded (Turing's NVDEC can't decode either — they'd silently
    CPU-decode). A video whose GPU-decodable streams cap below 1080p fails
    loudly instead of shipping soft clips. The landed codec + pixel format
-   print in the source specs.
+   print in the source specs. Each ladder strategy probes the client's full
+   format list BEFORE downloading and skips straight to the next strategy
+   when that client can't serve the HD floor at all (a spoofed client that
+   YouTube only offers ~360p no longer costs a full low-res download); the
+   final strategy is exempt so the low-quality restore path keeps working.
 4. **Transcribe** — AssemblyAI (API, diarization + sentiment + highlights)
    when `ASSEMBLYAI_API_KEY` is set, else CPU faster-whisper. Silent video →
    `get_visual_clips` (Gemini watches the footage).
