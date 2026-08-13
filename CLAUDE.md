@@ -188,12 +188,15 @@ GPU pieces that were silently wrong and are now deterministic:
   fabricates a split exchange. `0`/`1` disables the smoothing.
 - `ASD_DECISIVE_MARGIN` — how far LR-ASD's winning face must lead the next
   best on-screen face, that second, for the second to vote at all (default
-  `0.10`). The model already computes the lead (`score_clip`'s
+  `0` — every second counts, the pre-experiment behaviour; the framing
+  experiment's `0.10` gate degraded the last session). The model already
+  computes the lead (`score_clip`'s
   `per_second_margin`); seconds where two faces scored within the margin are
   the model saying "could be either", and they no longer pollute the
   one-binding-per-clip vote. `0` counts every second (the old behaviour).
 - `SPEAKER_REBIND_SECONDS` / `SPEAKER_REBIND_WINDOW` — the gate on
-  correcting a binding mid-clip (defaults `4` and `8`). One binding per clip
+  correcting a binding mid-clip (default `0` = disabled, the pre-experiment
+  behaviour; `4` and `8` were the experiment's values). One binding per clip
   killed the per-frame flip-flop but meant a binding that came out WRONG held
   the camera on the wrong person for the whole clip. Now, when a bound
   speaker is talking and decisive ASD points at a different track for
@@ -203,14 +206,15 @@ GPU pieces that were silently wrong and are now deterministic:
   alternating, ambiguous signal — can never trigger it.
   `SPEAKER_REBIND_SECONDS=0` disables re-binding entirely.
 - `IDENTITY_CONFIRM` — director v2's Gemini face-identity confirmation
-  (default `1`): after each clip's face spine, Gemini receives labeled face
+  (default `0` = off; the owner fell back to base — opt in with `1`): after
+  each clip's face spine, Gemini receives labeled face
   crops + the diarized transcript and returns the speaker->face map
   (`identity_confirm.py`). When it lands, framing is **ASR-first** — the
   transcript decides WHO, the map decides WHICH FACE, and unmapped speakers
   go wide/hold instead of defaulting to a wrong face (no host-default).
   Fail-open: any error falls back to the LR-ASD fusion unchanged.
   `IDENTITY_CONFIRM_MODEL` picks the model (default `GEMINI_MODEL` /
-  `gemini-3.1-flash-lite`); `IDENTITY_CONFIRM=0` disables.
+  `gemini-3.1-flash-lite`).
 
 ## Dashboard ordering & data files
 

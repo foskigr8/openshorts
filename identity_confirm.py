@@ -141,7 +141,8 @@ def confirm_clip_identities(video_path, tracks, segments,
                             model: Optional[str] = None) -> Optional[Dict[str, int]]:
     """One Gemini call: labeled face crops + the diarized transcript ->
     {speaker_label: track_id}. None on any failure (fail-open)."""
-    if os.environ.get("IDENTITY_CONFIRM", "1").strip().lower() in (
+    # Default OFF: the owner fell back to base. Opt in with IDENTITY_CONFIRM=1.
+    if os.environ.get("IDENTITY_CONFIRM", "0").strip().lower() in (
             "0", "false", "no", "off"):
         return None
     if not tracks or not segments:
@@ -175,7 +176,11 @@ def confirm_clip_identities(video_path, tracks, segments,
         "Rules: map a speaker only when you are reasonably confident; leave "
         "a speaker OUT of the mapping when you cannot tell which face is "
         "them. Never invent face labels.")
-    parts.append(genai_types.Part.from_text(prompt))
+    # Part(text=...) (the dataclass field) instead of Part.from_text(): the
+    # installed google-genai on Kaggle rejects from_text() with
+    # 'takes 1 positional argument but 2 were given' (version drift) — the
+    # field constructor is stable across versions.
+    parts.append(genai_types.Part(text=prompt))
 
     model = model or IDENTITY_CONFIRM_MODEL
     import gemini_worker

@@ -1169,9 +1169,14 @@ def render(input_video, final_output_video, aspect_ratio,
         _, active = speaker_fusion.fuse_speaker_tracks(
             asd_boxes, tracks, segments, clip_start, effective_end,
             smooth_window=int(os.environ.get("SPEAKER_SMOOTH_WINDOW", "3")),
+            # Fall-back-to-base defaults: the decisive-margin gating and the
+            # gated mid-clip re-binding (both from the framing experiment)
+            # degraded the last session — margin 0 counts every second and
+            # rebind 0 disables re-binding, matching the pre-experiment
+            # binding. Both remain tunable via env.
             asd_per_second_margin=asd_margins,
-            decisive_margin=float(os.environ.get("ASD_DECISIVE_MARGIN", "0.10")),
-            rebind_seconds=int(os.environ.get("SPEAKER_REBIND_SECONDS", "4")),
+            decisive_margin=float(os.environ.get("ASD_DECISIVE_MARGIN", "0")),
+            rebind_seconds=int(os.environ.get("SPEAKER_REBIND_SECONDS", "0")),
             rebind_window=int(os.environ.get("SPEAKER_REBIND_WINDOW", "8")))
     if _identity_map is None and not any(track is not None for track in active):
         # A transcript/ASD gap must not turn a known person into an untracked
