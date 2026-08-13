@@ -398,6 +398,14 @@ def main():
     print(f"\n{passed}/{len(results)} passed")
     failed = [label for label, ok in results if not ok]
     if failed:
+        # Loud banner FIRST so a headless run's output cannot be mistaken for
+        # a clean pass — the report is the deliverable, not the exit code.
+        print("\n" + "=" * 64)
+        print(f"  ⚠️  SMOKE TEST: {passed}/{len(results)} passed — "
+              f"{len(failed)} FAILURE(S)")
+        print("  Read the details above. The session stays up so the "
+              "dashboard keeps working.")
+        print("=" * 64)
         print("\nFailed: " + ", ".join(failed))
         if "YouTube download" in failed:
             if not os.path.exists(os.path.join(REPO_DIR, "cookies.txt")):
@@ -425,9 +433,7 @@ def main():
         # turning the printed URL into a Cloudflare "tunnel error" page.
         # The report above is the deliverable; the session stays up so the
         # dashboard keeps working. --strict restores the old gate behaviour.
-        print("\nFailures are reported above but are NOT fatal — the "
-              "session/tunnel stays up. Use --strict to make them exit "
-              "non-zero.")
+        print("Use --strict to make failures exit non-zero (the old gate).")
     return 1 if (failed and args.strict) else 0
 
 
