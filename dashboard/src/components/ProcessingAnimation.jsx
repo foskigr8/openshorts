@@ -37,6 +37,7 @@ const ProcessingAnimation = ({
   title = '',
   format = '',
   onCancel = null,
+  stageDurations = null,
 }) => {
   const [videoSrc, setVideoSrc] = useState(null);
   const [isYouTube, setIsYouTube] = useState(false);
@@ -212,7 +213,7 @@ const ProcessingAnimation = ({
           // kept it frozen while a clip played.
           ref={videoRef}
           src={videoSrc}
-          className="absolute inset-0 w-full h-full object-cover"
+          className="absolute inset-0 w-full h-full object-contain"
           autoPlay
           muted
           loop
@@ -320,7 +321,7 @@ const ProcessingAnimation = ({
   // The 9:16 companion: whichever clip is being compared right now.
   const compareOwner = compare ? `compare:${compare.id || compare.url}` : null;
   const comparePane = compare && (
-    <div className="shrink-0 w-full max-w-[300px] min-w-[150px]">
+    <div className="shrink-0 h-full flex flex-col">
       <div className="flex items-center justify-between mb-1.5 gap-2">
         <p className="readout text-[9px] uppercase tracking-wider text-brass truncate" title={compare.title}>
           {compare.title || 'clip'}
@@ -333,7 +334,7 @@ const ProcessingAnimation = ({
           <X size={13} />
         </button>
       </div>
-      <div className="relative aspect-[9/16] w-full rounded-input overflow-hidden bg-black border border-brass/40">
+      <div className="relative flex-1 min-h-0 aspect-[9/16] rounded-input overflow-hidden bg-black border border-brass/40">
         <video
           key={compare.url}
           src={compare.url}
@@ -383,41 +384,69 @@ const ProcessingAnimation = ({
   // shrinks to one strip so the frames get the space.
   if (isComplete) {
     return (
-      <div className="card-lit rounded-card bg-paper animate-fade shrink-0 p-4 sm:p-5 space-y-3">
-        {header}
-        <div className="flex gap-4 items-stretch">
-          <div className="flex-1 min-w-0">
-            <div className="relative w-full aspect-video rounded-input overflow-hidden border border-rule bg-black">
-              {sourceFrame}
+      <div className="card-lit rounded-card bg-paper animate-fade shrink-0 p-3 sm:p-4">
+        {/* One row across the full width. Height-driven (a full-width 16:9
+            preview is ~800px tall on a 1080p laptop), and the width the 16:9
+            frame does not need goes to the readout column instead of sitting
+            as a field of black — which is exactly what a centred preview in a
+            1750px card looked like. */}
+        <div
+          className="flex gap-4 items-stretch"
+          style={{ height: 'clamp(190px, 34vh, 380px)' }}
+        >
+          <div className="relative h-full aspect-video shrink-0 max-w-[62%] rounded-input overflow-hidden border border-rule bg-black">
+            {sourceFrame}
+          </div>
+
+          {comparePane}
+
+          <div className="flex-1 min-w-0 flex flex-col gap-2 py-0.5">
+            {header}
+
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-ok/40 bg-ok/10 text-[11px] text-ok">
+                <CheckCircle2 size={12} /> complete
+              </span>
+              {clipsTotal > 0 && (
+                <span className="px-2.5 py-1 rounded-full border border-rule text-[10px] readout text-muted">
+                  {clipsDone}/{clipsTotal} clips
+                </span>
+              )}
+              {format && (
+                <span className="px-2.5 py-1 rounded-full border border-rule text-[10px] readout text-muted">
+                  {format}
+                </span>
+              )}
+              {duration != null && (
+                <span className="px-2.5 py-1 rounded-full border border-rule text-[10px] readout text-muted">
+                  source {fmtDuration(duration)}
+                </span>
+              )}
+            </div>
+
+            <p className="text-[11px] text-muted lowercase flex items-center gap-1.5">
+              <Maximize2 size={11} className="shrink-0" />
+              {compare
+                ? 'playing beside the source, same moment'
+                : 'play any clip — it opens here beside the source'}
+            </p>
+
+            {/* The measured run, where there is finally room to show it. */}
+            <div className="mt-auto grid grid-cols-2 xl:grid-cols-4 gap-1.5">
+              {['download', 'transcribe', 'analyze', 'render'].map((k) => {
+                const v = Number(stageDurations?.[k]) || 0;
+                if (!v) return null;
+                return (
+                  <div key={k} className="rounded-input border border-rule bg-paper2 px-2.5 py-1.5 min-w-0">
+                    <p className="readout text-[8px] uppercase tracking-wider text-muted truncate">{k}</p>
+                    <p className="text-xs font-semibold text-ink2 tabular-nums mt-0.5">
+                      {v < 60 ? `${Math.round(v)}s` : `${Math.floor(v / 60)}m ${Math.round(v % 60)}s`}
+                    </p>
+                  </div>
+                );
+              })}
             </div>
           </div>
-          {comparePane}
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-ok/40 bg-ok/10 text-[11px] text-ok">
-            <CheckCircle2 size={12} /> complete
-          </span>
-          {clipsTotal > 0 && (
-            <span className="px-2.5 py-1 rounded-full border border-rule text-[10px] readout text-muted">
-              {clipsDone}/{clipsTotal} clips
-            </span>
-          )}
-          {format && (
-            <span className="px-2.5 py-1 rounded-full border border-rule text-[10px] readout text-muted">
-              {format}
-            </span>
-          )}
-          {duration != null && (
-            <span className="px-2.5 py-1 rounded-full border border-rule text-[10px] readout text-muted">
-              source {fmtDuration(duration)}
-            </span>
-          )}
-          <span className="ml-auto text-[11px] text-muted lowercase flex items-center gap-1.5">
-            <Maximize2 size={11} />
-            {compare
-              ? 'playing side by side with the source'
-              : 'play any clip — the source follows it here'}
-          </span>
         </div>
       </div>
     );

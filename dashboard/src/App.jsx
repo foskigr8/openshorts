@@ -1213,6 +1213,7 @@ function App() {
                       auto: 'auto',
                     }[submittedFormat] || submittedFormat}
                     onCancel={viewStatus === 'processing' ? handleCancelJob : null}
+                    stageDurations={stageDurations}
                   />
                 )}
 
@@ -1297,7 +1298,7 @@ function App() {
 
                 <div className={clipView === 'row'
                   ? 'overflow-x-auto overflow-y-hidden custom-scrollbar pb-2'
-                  : 'max-h-[70vh] overflow-y-auto custom-scrollbar p-1'}
+                  : 'max-h-[38vh] overflow-y-auto custom-scrollbar p-1'}
                 >
                   {(() => {
                     // Live grid: as many slots as the job will produce

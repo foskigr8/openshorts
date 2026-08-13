@@ -24,3 +24,5 @@ dist-ssr
 *.sw?
 .config
 .config/*  
+# headless layout screenshots (scripts/shoot.sh)
+.shots

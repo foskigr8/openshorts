@@ -20,54 +20,56 @@ export default function ClipSlotPlaceholder({ index, total = null, state = 'rend
   const rendering = state === 'rendering';
 
   return (
+    // Same geometry as a finished clip's card (ClipRow): one strip of
+    // identically sized objects, some done and some not — a pending slot that
+    // is 20px taller makes the row look broken.
     <div
-      className={`rounded-input border overflow-hidden transition-colors ${
+      className={`rounded-input border overflow-hidden transition-colors h-[104px] ${
         rendering ? 'border-brass/30' : 'border-rule'
       }`}
       style={{
         background: 'linear-gradient(180deg, rgba(255,255,255,0.03) 0%, transparent 45%), var(--color-paper)',
       }}
     >
-      <div className="flex items-center gap-3 p-3">
-        {/* Thumbnail well — fixed size so a pending slot never balloons to a
-            full-width 9:16 box the way an unsized placeholder used to. */}
+      <div className="flex items-stretch gap-2.5 p-2.5 h-full">
         <div
-          className={`w-16 h-24 rounded-md shrink-0 relative overflow-hidden flex items-center justify-center bg-paper3 ${
+          className={`w-[54px] shrink-0 rounded-md relative overflow-hidden flex items-center justify-center bg-paper3 ${
             rendering ? 'animate-pulse' : ''
           }`}
         >
           {rendering
-            ? <Loader2 size={20} className="animate-spin text-brass" />
-            : <Clock size={18} className="text-muted" />}
+            ? <Loader2 size={16} className="animate-spin text-brass" />
+            : <Clock size={15} className="text-muted" />}
           <span className="absolute top-1 left-1 readout text-[8px] text-muted/70">
             {String(index + 1).padStart(2, '0')}
           </span>
         </div>
 
-        <div className="min-w-0 flex-1">
-          <p className={`text-sm truncate ${rendering ? 'text-ink2' : 'text-muted'}`}>
+        <div className="min-w-0 flex-1 flex flex-col">
+          <p className={`text-[13px] leading-snug truncate ${rendering ? 'text-ink2' : 'text-muted'}`}>
             {rendering
               ? `Rendering clip ${index + 1}${total ? ` of ${total}` : ''}…`
-              : `Clip ${index + 1} — queued`}
+              : `Clip ${index + 1}`}
           </p>
-          {/* Skeleton lines stand in for the title/meta that will land here. */}
-          <div className="mt-2 space-y-1.5">
-            <div className={`h-2.5 w-3/4 rounded bg-paper3 ${rendering ? 'animate-pulse' : 'opacity-50'}`} />
+          <div className="mt-1.5 space-y-1.5">
+            <div className={`h-2 w-3/4 rounded bg-paper3 ${rendering ? 'animate-pulse' : 'opacity-50'}`} />
             <div className={`h-2 w-1/2 rounded bg-paper3 ${rendering ? 'animate-pulse' : 'opacity-50'}`} />
           </div>
+          <div className="mt-auto flex items-center">
+            <span className="readout text-[9px] uppercase tracking-wider text-muted">
+              {rendering ? 'rendering' : 'queued'}
+            </span>
+            <span className="flex-1" />
+            <ProgressRing
+              size={18}
+              stroke={2}
+              state={rendering ? 'processing' : 'pending'}
+              indeterminate={rendering}
+              pct={0}
+              label={null}
+            />
+          </div>
         </div>
-
-        {/* Same ring component used everywhere else — indeterminate while
-            rendering (there is no real per-clip percentage), muted when the
-            slot hasn't started. Never a fake number. */}
-        <ProgressRing
-          size={30}
-          stroke={3}
-          state={rendering ? 'processing' : 'pending'}
-          indeterminate={rendering}
-          pct={0}
-          label={null}
-        />
       </div>
     </div>
   );
