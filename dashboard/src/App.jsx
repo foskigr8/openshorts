@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, LayoutDashboard, Settings, Plus, History, X, Shield, LayoutGrid, Image, Globe, Calendar, AlertTriangle, KeyRound, Bot, Loader2, Download, Search, Flame, TrendingUp, ChevronRight, ChevronLeft, Film, HardDrive } from 'lucide-react';
+import { Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, LayoutDashboard, Settings, Plus, History, X, Shield, LayoutGrid, Image, Globe, Calendar, AlertTriangle, KeyRound, Bot, Loader2, Download, Search, Flame, TrendingUp, ChevronRight, ChevronLeft, Film, HardDrive, Rows3, Columns3 } from 'lucide-react';
 import KeyInput from './components/KeyInput';
 import KeyListInput from './components/KeyListInput';
 import Sidebar from './components/Sidebar';
@@ -172,16 +172,6 @@ const UserProfileSelector = ({ profiles, selectedUserId, onSelect }) => {
   );
 };
 
-// Human "2m 30s" style readout for the ETA returned by /api/status.
-const formatEta = (seconds) => {
-  const s = Number(seconds);
-  if (!Number.isFinite(s) || s < 0) return null;
-  if (s < 60) return `${Math.max(1, Math.round(s))}s`;
-  const m = Math.floor(s / 60);
-  const rem = Math.round(s % 60);
-  return rem ? `${m}m ${rem}s` : `${m}m`;
-};
-
 function App() {
   // Cloud auth/billing session (inert when billing is disabled).
   const { billingEnabled, isManaged, isSignedIn, me, plan, refreshMe } = useAuth();
@@ -250,7 +240,7 @@ function App() {
   const {
     list: projectList, active, activeId: jobId, liveCount, setActiveId, patch: patchProject,
     startProject, openProject: restoreProject, inspectProject, cancelProject,
-    closeProject, updateClipState, flushClipState, hydrateDurable, setRawLogs,
+    updateClipState, flushClipState, hydrateDurable, setRawLogs,
   } = useProjects();
 
   const status = active?.status ?? 'idle';
@@ -274,10 +264,6 @@ function App() {
 
   // Local mutations of the active project, by the names the JSX already uses.
   const setResults = (v) => jobId && patchProject(jobId, { results: v });
-  const setStatus = (v) => jobId && patchProject(jobId, { status: v });
-  const setLogs = (v) => jobId && patchProject(jobId, (cur) => ({
-    logs: typeof v === 'function' ? v(cur.logs || []) : v,
-  }));
 
   // The gap between pressing generate and the server handing back a job id —
   // an upload can take a while, and the screen must not look idle meanwhile.
@@ -685,7 +671,6 @@ function App() {
       return;
     }
     setQualityGate(null);
-    setRightTab('clips');
     setStarting(true);
 
     // BYOK sends the Gemini header; managed users rely on the bearer token
@@ -732,7 +717,6 @@ function App() {
   const handleReset = () => {
     flushClipState();
     setActiveId(null);
-    setRightTab('clips');
     setStartError('');
     clearCompareClip();
   };

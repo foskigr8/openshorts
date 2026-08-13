@@ -67,25 +67,38 @@ export default function CreateFlow({ onSubmit, onCancel, starting = false, error
     return () => window.removeEventListener('keydown', onKey);
   }, [onCancel, starting]);
 
-  const launch = () => {
+  const [localError, setLocalError] = useState('');
+
+  const launch = async () => {
     if (!draft.source) { go(0); return; }
     const placement = CAPTION_PLACEMENTS[draft.captionPlacement] || CAPTION_PLACEMENTS.bottom;
     setLaunching(true);
-    onSubmit({
-      type: draft.source.type,
-      payload: draft.source.payload,
-      acknowledged: true,          // stated on the launch step, above the button
-      outputFormat: draft.outputFormat,
-      customWidth: draft.custom.width,
-      customHeight: draft.custom.height,
-      captions: draft.captions,
-      captionPosition: placement.position,
-      captionMargin: placement.margin,
-      // "isolate" = voice separation, the only mode that removes music.
-      removeBackgroundAudio: draft.removeBgAudio ? 'isolate' : '',
-      clipCount: draft.clipCount,
-      longContextClips: draft.longContextClips,
-    });
+    setLocalError('');
+    // AWAITED, and caught. An unhandled rejection here (a bad reference in the
+    // submit handler, a network failure) left the button mid-launch forever
+    // with nothing on screen to explain it — press generate, watch it spin,
+    // never arrive.
+    try {
+      await onSubmit({
+        type: draft.source.type,
+        payload: draft.source.payload,
+        acknowledged: true,        // stated on the launch step, above the button
+        outputFormat: draft.outputFormat,
+        customWidth: draft.custom.width,
+        customHeight: draft.custom.height,
+        captions: draft.captions,
+        captionPosition: placement.position,
+        captionMargin: placement.margin,
+        // "isolate" = voice separation, the only mode that removes music.
+        removeBackgroundAudio: draft.removeBgAudio ? 'isolate' : '',
+        clipCount: draft.clipCount,
+        longContextClips: draft.longContextClips,
+      });
+    } catch (e) {
+      setLocalError(e?.message || 'Could not start this run.');
+    } finally {
+      setLaunching(false);
+    }
   };
 
   // The launch animation ends at opacity 0 (`animation-fill-mode: both`), so
@@ -143,7 +156,7 @@ export default function CreateFlow({ onSubmit, onCancel, starting = false, error
         onJump={go}
         onLaunch={launch}
         starting={starting}
-        error={error}
+        error={error || localError}
       />
     ),
   }[STEPS[step]];
