@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, LayoutDashboard, Settings, Plus, History, X, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Loader2, Download, Search, Flame, TrendingUp, ChevronRight, Film, HardDrive } from 'lucide-react';
+import { Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, LayoutDashboard, Settings, Plus, History, X, Shield, LayoutGrid, Image, Globe, Calendar, AlertTriangle, KeyRound, Bot, Loader2, Download, Search, Flame, TrendingUp, ChevronRight, Film, HardDrive } from 'lucide-react';
 import KeyInput from './components/KeyInput';
 import KeyListInput from './components/KeyListInput';
 import MediaInput from './components/MediaInput';
@@ -24,6 +24,7 @@ import HistoryTab from './components/HistoryTab';
 import ProfileMenu from './components/ProfileMenu';
 import Modal from './components/ui/Modal';
 import { useAuth } from './contexts/AuthContext';
+import { useProjects } from './contexts/ProjectContext';
 import { apiFetch, apiJson, QuotaError } from './lib/api';
 import { clearCompareClip, setCompareClip, subscribeSourceSync } from './lib/sourceSync';
 import { getApiUrl } from './config';
@@ -166,9 +167,6 @@ const UserProfileSelector = ({ profiles, selectedUserId, onSelect }) => {
   );
 };
 
-const SESSION_KEY = 'openshorts_session';
-const SESSION_MAX_AGE = 3600000; // 1 hour (matches server job retention)
-
 // Human "2m 30s" style readout for the ETA returned by /api/status.
 const formatEta = (seconds) => {
   const s = Number(seconds);
@@ -179,13 +177,6 @@ const formatEta = (seconds) => {
   return rem ? `${m}m ${rem}s` : `${m}m`;
 };
 
-// Mock polling function
-const pollJob = async (jobId, raw = false) => {
-  const res = await apiFetch(`/api/status/${jobId}${raw ? '?raw=1' : ''}`);
-  if (!res.ok) throw new Error('Status check failed');
-  return res.json();
-};
-
 function App() {
   // Cloud auth/billing session (inert when billing is disabled).
   const { billingEnabled, isManaged, isSignedIn, me, plan, refreshMe } = useAuth();
@@ -194,9 +185,6 @@ function App() {
   const [showPlanChoice, setShowPlanChoice] = useState(false);
   const [showTrialUpgrade, setShowTrialUpgrade] = useState(false);
   const [topUpInfo, setTopUpInfo] = useState({});
-  // Durable R2 URLs (per clip index) for the current job — used as a fallback when
-  // the ephemeral local /videos/ files have been cleaned up (e.g. after a reload).
-  const [durableClips, setDurableClips] = useState({});
 
   // Header search: filters the Generated Shorts rail / History library by
   // title (real, client-side substring match on what /api/history already
@@ -259,22 +247,46 @@ function App() {
   const [uploadUserId, setUploadUserId] = useState(() => localStorage.getItem('uploadUserId') || '');
   const [userProfiles, setUserProfiles] = useState([]); // List of {username, connected: []}
   const [showKeyModal, setShowKeyModal] = useState(false);
-  const [jobId, setJobId] = useState(null);
-  const [status, setStatus] = useState('idle'); // idle, processing, complete, error
-  const [results, setResults] = useState(null);
+  // The workspace no longer owns job state — ProjectContext does, so several
+  // projects can run at once and none of them is lost by switching tabs.
+  const {
+    list: projectList, active, activeId: jobId, setActiveId, patch: patchProject,
+    startProject, openProject: restoreProject, inspectProject, cancelProject,
+    closeProject, updateClipState, flushClipState, hydrateDurable, setRawLogs,
+  } = useProjects();
+
+  const status = active?.status ?? 'idle';
+  const results = active?.results ?? null;
+  const logs = active?.logs ?? [];
+  const progress = active?.progress ?? null;
+  const stageDurations = active?.stageDurations ?? null;
+  const projectState = active?.projectState ?? null;
+  const processingMedia = active?.source ?? null;
+  const requestedClipCount = active?.requestedClipCount ?? null;
+  const submittedFormat = active?.submittedFormat ?? 'auto';
+  const durableClips = active?.durableClips ?? {};
+
+  // Local mutations of the active project, by the names the JSX already uses.
+  const setResults = (v) => jobId && patchProject(jobId, { results: v });
+  const setStatus = (v) => jobId && patchProject(jobId, { status: v });
+  const setLogs = (v) => jobId && patchProject(jobId, (cur) => ({
+    logs: typeof v === 'function' ? v(cur.logs || []) : v,
+  }));
+
+  // The gap between pressing generate and the server handing back a job id —
+  // an upload can take a while, and the screen must not look idle meanwhile.
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState('');
   // Bulk subtitles: apply one style to every clip of the job (triggered from
   // within a clip's subtitle modal via "apply to all").
   const [bulkSub, setBulkSub] = useState({ running: false, current: 0, total: 0, errors: 0 });
   const [downloadingAll, setDownloadingAll] = useState(false);
   // Pre-flight quality gate: { info: {max_height, min_height, cookies_invalid}, data }
   const [qualityGate, setQualityGate] = useState(null);
-  const [logs, setLogs] = useState([]);
   // Live pipeline progress from main.py's progress.json: {stage, overall_pct,
   // clips_done, clips_total}. null until the backend reports a snapshot.
-  const [progress, setProgress] = useState(null);
   // Telemetry: raw-log toggle + per-stage averages for the performance chart.
   const [logsRaw, setLogsRaw] = useState(false);
-  const [stageDurations, setStageDurations] = useState(null);
   // Right-panel view: 'clips' (Generated Shorts) or 'source' (original video
   // + stills — round-5 Source section).
   const [rightTab, setRightTab] = useState('clips');
@@ -284,20 +296,12 @@ function App() {
   // The clip count the user requested at submit — sizes the placeholder
   // slots in the live grid before progress.json knows the total. Always an
   // explicit number; auto mode was removed.
-  const [requestedClipCount, setRequestedClipCount] = useState(null);
-  const [processingMedia, setProcessingMedia] = useState(null);
-  const [submittedFormat, setSubmittedFormat] = useState('auto');
   // Sidebar "Today" mini-stats, derived from the disk-backed history.
   const [todayStats, setTodayStats] = useState({ generated: 0, processing: 0, successRate: 100, loaded: false });
   const [activeTab, setActiveTab] = useState('dashboard'); // dashboard, settings
   // Reopened-project state (paid mode): per-clip {index, server_file, active_layers}
   // restored from the backend so ResultCards resume editing where they left off.
-  const [projectState, setProjectState] = useState(null);
-  // True when the current job was reopened from the library: its source video
-  // was never persisted, so the session must not fall back to /api/source.
-  const [noSource, setNoSource] = useState(false);
 
-  const [sessionRecovered, setSessionRecovered] = useState(false);
   const [showScheduleWeek, setShowScheduleWeek] = useState(false);
 
   // Silent-success "saved" states for the settings key inputs (design.md: no alert popups)
@@ -337,99 +341,41 @@ function App() {
   };
 
   // --- Project persistence (paid mode) ---
-  // Debounced sync of each clip's browser-only edit state (Remotion layers +
-  // current server file) to the backend, so a reopened project resumes intact.
-  const clipStateSync = useRef({ jobId: null, pending: {}, timer: null });
-
-  const flushClipState = () => {
-    const s = clipStateSync.current;
-    if (s.timer) { clearTimeout(s.timer); s.timer = null; }
-    const entries = Object.entries(s.pending);
-    if (!s.jobId || entries.length === 0) return;
-    const clips = entries.map(([i, v]) => ({
-      index: Number(i),
-      active_layers: v.activeLayers,
-      server_file: v.serverVideoFile,
-    }));
-    s.pending = {};
-    apiFetch(`/api/projects/${s.jobId}/state`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ clips }),
-    }).catch(() => {});
-  };
-
+  // The debounce + flush now live in ProjectContext, so an edit made in one
+  // project can't be dropped by switching to another mid-save.
   const handleClipStateChange = (index, state) => {
     if (!isManaged || !jobId) return;
-    const s = clipStateSync.current;
-    if (s.jobId !== jobId) { s.pending = {}; s.jobId = jobId; }
-    s.pending[index] = state;
-    if (s.timer) clearTimeout(s.timer);
-    s.timer = setTimeout(flushClipState, 2000);
+    updateClipState(jobId, index, state);
   };
 
-  // Reopen an archived project from the History tab: the backend re-downloads
-  // its files from R2 into the server's working dir and returns the full state.
-  const restoreProject = async (projectJobId) => {
-    const data = await apiJson(`/api/projects/${projectJobId}/restore`, { method: 'POST' });
-    flushClipState();
-    setProjectState(data.project_state || null);
-    setNoSource(true);
-    setJobId(data.job_id);
-    setResults(data.result || null);
-    setLogs(['♻️ Project restored from your library.']);
-    // Point the preview at the job's source so a reopened project can still
-    // be compared against the original. The panel degrades gracefully to
-    // "source no longer on disk" when the file really is gone, which is far
-    // better than reopening into an empty frame.
-    setProcessingMedia({ type: 'server', payload: `/api/source/${data.job_id}` });
-    clearCompareClip();
-    setComparedId(null);
-    setQualityGate(null);
-    setStatus('complete');
-    setActiveTab('dashboard');
-  };
-
-  // Open any project from the rail — including a failed one. A failed job has
-  // no restorable project state (the pipeline never got far enough to write
-  // metadata), so restoring would 404; instead it opens in the error state with
-  // whatever the backend still knows, so the run can actually be inspected
-  // rather than being a dead tile you can only delete.
-  const openProject = async (v) => {
-    const targetId = v?.job_id;
+  // Open any project from the rail or History — including a failed one. A
+  // failed job has no restorable state (the pipeline never wrote metadata), so
+  // it opens read-only with whatever the backend still knows, rather than
+  // being a dead tile you can only delete.
+  const handleOpenProject = async (v) => {
+    const targetId = typeof v === 'string' ? v : v?.job_id;
     if (!targetId) return;
+    const meta = typeof v === 'string' ? {} : v;
     setActiveTab('dashboard');
-    if (v.status === 'completed') {
+    flushClipState();
+    clearCompareClip();
+    setQualityGate(null);
+    // Already in the workspace (a run started this session, or one opened
+    // earlier): just look at it. Re-restoring a live job would stomp its
+    // in-flight logs and progress with a stale snapshot.
+    if (projectList.some((p) => p.id === targetId)) {
+      setActiveId(targetId);
+      return;
+    }
+    if (meta.status === undefined || meta.status === 'completed') {
       try {
-        await restoreProject(targetId);
+        await restoreProject(targetId, meta);
         return;
       } catch (e) {
-        // fall through to the read-only view below
+        // Not restorable — fall through and inspect it instead.
       }
     }
-    flushClipState();
-    setProjectState(null);
-    setNoSource(true);
-    setProcessingMedia(null);
-    setQualityGate(null);
-    setResults(null);
-    setJobId(targetId);
-    setStatus(v.status === 'processing' ? 'processing' : 'error');
-    // /api/status only knows jobs still in memory; after a backend restart it
-    // 404s, so say so plainly rather than leaving the log panel implying more
-    // output is still coming.
-    try {
-      const data = await apiJson(`/api/status/${targetId}`);
-      setLogs(data.logs?.length ? data.logs : ['No logs retained for this run.']);
-      if (data.progress) setProgress(data.progress);
-      if (data.status) setStatus(data.status === 'processing' ? 'processing' : data.status);
-      if (data.result) setResults(data.result);
-    } catch (e) {
-      setLogs([
-        `Opened "${v.title || targetId}" from your library.`,
-        'This run failed and its live logs are no longer retained on the server.',
-      ]);
-    }
+    await inspectProject(targetId, meta);
   };
 
   // Apply one subtitle style to every clip of the job, sequentially.
@@ -473,7 +419,7 @@ function App() {
     setBulkSub({ running: false, current: total, total, errors });
     // Refresh results so each ResultCard picks up its new subtitled video_url.
     try {
-      const data = await pollJob(jobId);
+      const data = await apiJson(`/api/status/${jobId}`);
       if (data.result) setResults(data.result);
     } catch { /* keep current results */ }
   };
@@ -484,8 +430,7 @@ function App() {
     if (!window.confirm('Stop this job? Clips already rendered will stay, the rest will not be generated.')) return;
     setCancelling(true);
     try {
-      await apiFetch(`/api/jobs/${jobId}/cancel`, { method: 'POST' });
-      setStatus('cancelled');
+      await cancelProject(jobId);
     } catch (e) {
       console.error('Cancel failed', e);
     } finally {
@@ -515,66 +460,9 @@ function App() {
     }
   };
 
-  // Session Recovery: Restore on mount
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem(SESSION_KEY);
-      if (!saved) return;
-      const session = JSON.parse(saved);
-      if (Date.now() - session.timestamp > SESSION_MAX_AGE) {
-        localStorage.removeItem(SESSION_KEY);
-        return;
-      }
-      if (session.jobId && session.status && session.status !== 'idle') {
-        setJobId(session.jobId);
-        setResults(session.results || null);
-        // Restore the source preview. Older sessions (or uploads) saved no
-        // media, so fall back to the backend-served source for this job —
-        // except for reopened projects, whose source was never persisted.
-        if (session.processingMedia) setProcessingMedia(session.processingMedia);
-        else if (!session.noSource) setProcessingMedia({ type: 'server', payload: `/api/source/${session.jobId}` });
-        if (session.noSource) setNoSource(true);
-        if (session.projectState) setProjectState(session.projectState);
-        if (session.activeTab) setActiveTab(session.activeTab);
-        // If was processing, resume polling; if complete/error, just show results
-        setStatus(session.status === 'processing' ? 'processing' : session.status);
-        setSessionRecovered(true);
-        setTimeout(() => setSessionRecovered(false), 5000);
-      }
-    } catch (e) {
-      localStorage.removeItem(SESSION_KEY);
-    }
-  }, []);
-
-  // Session Recovery: Save state changes
-  useEffect(() => {
-    if (status === 'idle') {
-      localStorage.removeItem(SESSION_KEY);
-      return;
-    }
-    try {
-      // URL (YouTube) media serializes as-is. Uploaded 'file' media is a blob
-      // that can't be persisted, so point the recovered preview at the source
-      // served by the backend instead of dropping it.
-      let persistMedia = null;
-      if (processingMedia?.type === 'url') persistMedia = processingMedia;
-      else if (processingMedia && jobId) persistMedia = { type: 'server', payload: `/api/source/${jobId}` };
-      const sessionData = {
-        jobId,
-        status,
-        results,
-        processingMedia: persistMedia,
-        activeTab,
-        noSource,
-        projectState,
-        timestamp: Date.now()
-      };
-      localStorage.setItem(SESSION_KEY, JSON.stringify(sessionData));
-    } catch (e) {
-      // localStorage full or serialization error - ignore
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [jobId, status, results, activeTab, noSource, projectState]);
+  // Session recovery is gone: ProjectContext persists every project (and
+  // keeps polling the live ones), so a reload or a tab switch resumes on its
+  // own instead of restoring one job from a special-case snapshot.
 
   // True persistence: whenever the dashboard re-mounts a completed job
   // (tab switch, view re-mount), re-fetch the clips from the backend's disk
@@ -622,78 +510,20 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [uploadPostKey, isManaged]);
 
-  // For managed users, fetch the durable R2 URLs of the current job's clips so the
-  // preview can fall back to them when the local files have been cleaned up.
+  // Durable storage URLs for the active project's clips (managed accounts),
+  // so a preview still plays once the ephemeral local file is cleaned up.
   useEffect(() => {
-    if (!isManaged || !jobId || !(results?.clips?.length)) { setDurableClips({}); return; }
-    let cancelled = false;
-    apiJson('/api/history')
-      .then((d) => {
-        if (cancelled) return;
-        const map = {};
-        for (const v of (d.videos || [])) {
-          if (v.job_id === jobId && v.clip_index != null) map[v.clip_index] = v.view_url;
-        }
-        setDurableClips(map);
-      })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [isManaged, jobId, results]);
+    if (!isManaged || !jobId || !(results?.clips?.length)) return;
+    hydrateDurable(jobId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isManaged, jobId, results?.clips?.length]);
 
+  // Polling lives in ProjectContext — one timer for EVERY live project, so a
+  // second run is not a second interval and switching projects doesn't stop
+  // the one you left. The raw-log preference is per project.
   useEffect(() => {
-    let interval;
-    if ((status === 'processing' || status === 'completed') && jobId) {
-      interval = setInterval(async () => {
-        try {
-          const data = await pollJob(jobId, logsRaw);
-          console.log("Job status:", data);
-
-          // Update results if available (real-time)
-          if (data.result) {
-            setResults(data.result);
-          }
-          // Update live pipeline progress (stage + percentage + clips done).
-          if (data.progress) {
-            setProgress(data.progress);
-          }
-          // Rolling per-stage averages + raw-log mode for the telemetry grid.
-          if (data.stage_durations) setStageDurations(data.stage_durations);
-
-          if (data.status === 'completed') {
-            setStatus('complete');
-            clearInterval(interval);
-          } else if (data.status === 'failed') {
-            setStatus('error');
-            const lastLog = data.logs && data.logs.length > 0
-              ? (typeof data.logs[data.logs.length - 1] === 'string'
-                  ? data.logs[data.logs.length - 1]
-                  : data.logs[data.logs.length - 1].text)
-              : "Process failed";
-            const errorMsg = data.error || lastLog;
-            // Set ONCE — the poll loop hits this branch repeatedly, and
-            // appending the same error every poll spammed the log with
-            // identical "Process failed" lines.
-            setLogs((prev) => {
-              const last = prev[prev.length - 1];
-              const asText = typeof last === 'string' ? last : last?.text || '';
-              if (asText.startsWith('Error: ')) return prev;
-              return [...prev, "Error: " + errorMsg];
-            });
-            clearInterval(interval);
-          } else if (data.status === 'cancelled') {
-            setStatus('cancelled');
-            clearInterval(interval);
-          } else {
-            // Update logs if available
-            if (data.logs) setLogs(data.logs);
-          }
-        } catch (e) {
-          console.error("Polling error", e);
-        }
-      }, 2000);
-    }
-    return () => clearInterval(interval);
-  }, [status, jobId, logsRaw]);
+    if (jobId) setRawLogs(jobId, logsRaw);
+  }, [jobId, logsRaw, setRawLogs]);
 
   // System status strip: real, itemized checks (backend reachability, YouTube
   // cookie freshness, GPU) — refreshed every 30s while the dashboard is open.
@@ -846,124 +676,68 @@ function App() {
       setShowKeyModal(true);
       return;
     }
-    setStatus('processing');
-    setLogs(["Starting process..."]);
-    setResults(null);
-    setProgress(null);
-    setRequestedClipCount(data.clipCount ?? 8);
-    setSubmittedFormat(data.outputFormat || 'auto');
-    setRightTab('clips');
-    setProcessingMedia(data);
     setQualityGate(null);
-    setProjectState(null);
-    setNoSource(false);
+    setRightTab('clips');
+    setStarting(true);
+
+    // BYOK sends the Gemini header; managed users rely on the bearer token
+    // apiFetch attaches. AssemblyAI + the extra Gemini pool are optional — the
+    // pipeline falls back (Whisper / a single key) when they are unset.
+    const headers = apiKey ? { 'X-Gemini-Key': apiKey } : {};
+    if (assemblyaiKey) headers['X-AssemblyAI-Key'] = assemblyaiKey;
+    if (geminiExtraKeys.length > 0) headers['X-Gemini-Keys'] = geminiExtraKeys.join(',');
 
     try {
-      let body;
-      // BYOK sends the Gemini header; managed users rely on the bearer token
-      // that apiFetch attaches automatically. AssemblyAI + extra Gemini pool
-      // keys are optional — the pipeline falls back (Whisper / single Gemini
-      // key) when any of these are unset.
-      const headers = apiKey ? { 'X-Gemini-Key': apiKey } : {};
-      if (assemblyaiKey) headers['X-AssemblyAI-Key'] = assemblyaiKey;
-      if (geminiExtraKeys.length > 0) headers['X-Gemini-Keys'] = geminiExtraKeys.join(',');
-
-      if (data.type === 'url') {
-        headers['Content-Type'] = 'application/json';
-        body = JSON.stringify({
-          url: data.payload,
-          acknowledged: !!data.acknowledged,
-          output_format: data.outputFormat || 'auto',
-          force_low_quality: forceLowQuality,
-          clip_count: data.clipCount ?? 8,
-          long_context_clips: data.longContextClips || 0,
-          remove_background_audio: data.removeBackgroundAudio || '',
-          // 7-aug-2026: reversed back to reuse-by-default. force_new:true was
-          // set 6-aug-2026 because reuse silently landed on a finished project
-          // with no way to force a fresh run — but the owner now wants the
-          // opposite tradeoff: resubmitting a URL that already has clips
-          // (locally or restorable from HF storage) should pull them back
-          // instantly instead of re-downloading/re-analyzing/re-rendering.
-          force_new: false,
-          custom_width: data.outputFormat === 'custom' ? data.customWidth : null,
-          custom_height: data.outputFormat === 'custom' ? data.customHeight : null,
-          captions: data.captions !== false,
-          zoom_mode: data.zoomMode || 'auto',
-          style_variant: data.styleVariant || 'balanced',
-          caption_position: data.captionPosition || 'bottom',
-          caption_margin: data.captionMargin ?? null,
-        });
-      } else {
-        const formData = new FormData();
-        formData.append('file', data.payload);
-        formData.append('acknowledged', data.acknowledged ? 'true' : 'false');
-        formData.append('output_format', data.outputFormat || 'auto');
-        if (data.clipCount != null) formData.append('clip_count', String(data.clipCount));
-        if (data.longContextClips > 0) formData.append('long_context_clips', String(data.longContextClips));
-        if (data.removeBackgroundAudio) formData.append('remove_background_audio', data.removeBackgroundAudio);
-        if (data.outputFormat === 'custom') {
-          formData.append('custom_width', String(data.customWidth || 1080));
-          formData.append('custom_height', String(data.customHeight || 1350));
-        }
-        formData.append('captions', data.captions !== false ? 'true' : 'false');
-        formData.append('zoom_mode', data.zoomMode || 'auto');
-        formData.append('style_variant', data.styleVariant || 'balanced');
-        formData.append('caption_position', data.captionPosition || 'bottom');
-        if (data.captionMargin != null) formData.append('caption_margin', String(data.captionMargin));
-        body = formData;
-      }
-
-      const res = await apiFetch('/api/process', { method: 'POST', headers, body });
-
-      if (!res.ok) throw new Error(await res.text());
-      const resData = await res.json();
-
-      // Quality gate: the source is below the min resolution — ask before burning
-      // 20 min on it. On confirm we resend with force_low_quality.
-      if (resData.needs_confirmation) {
-        setStatus('idle');
-        setQualityGate({ info: resData.quality_check, data });
+      const out = await startProject(data, {
+        headers,
+        force: forceLowQuality,
+        parentId: data.parentId || null,
+      });
+      // Pre-flight gate: the source is below the minimum resolution. Ask
+      // before burning twenty minutes on it; confirming resends with
+      // force_low_quality.
+      if (out.needsConfirmation) {
+        setQualityGate({ info: out.qualityCheck, data });
         return;
       }
-
-      setJobId(resData.job_id);
-
+      setActiveTab('dashboard');
     } catch (e) {
       if (e instanceof QuotaError) {
-        setStatus('idle');
-        // Trial users hit the trial minute cap → prompt them to activate the plan
-        // now (unlocks full minutes). Active users → offer a top-up.
-        if (me?.status === 'trialing') {
-          setShowTrialUpgrade(true);
-        } else {
+        // Trial users hit the trial cap → offer activation (full minutes).
+        // Active users → offer a top-up.
+        if (me?.status === 'trialing') setShowTrialUpgrade(true);
+        else {
           setTopUpInfo({ required: e.minutesRequired, remaining: e.minutesRemaining });
           setShowTopUp(true);
         }
         return;
       }
-      setStatus('error');
-      setLogs(l => [...l, `Error starting job: ${e.message}`]);
+      setStartError(e.message || 'Could not start this job.');
+    } finally {
+      setStarting(false);
     }
   };
 
+  // "New project" no longer throws work away: it clears the WORKSPACE
+  // selection, and the project itself stays in the drawer (and on the server)
+  // to come back to.
   const handleReset = () => {
-    // Flush any pending edit-state sync before dropping the project: the clips
-    // themselves are already archived to R2 as they were edited.
     flushClipState();
-    setStatus('idle');
-    setJobId(null);
-    setResults(null);
-    setLogs([]);
-    setProgress(null);
-    setRequestedClipCount(null);
+    setActiveId(null);
     setRightTab('clips');
-    setProcessingMedia(null);
-    setProjectState(null);
-    setNoSource(false);
+    setStartError('');
     clearCompareClip();
-    setComparedId(null);
-    localStorage.removeItem(SESSION_KEY);
   };
+
+  // Every project the workspace knows about, in the shape the rail renders.
+  // Plural on purpose: more than one can be running at a time.
+  const railProjects = projectList.map((p) => ({
+    id: p.id,
+    title: p.title,
+    status: p.status,
+    pct: p.progress?.overall_pct ?? null,
+    createdAt: p.createdAt,
+  }));
 
   // --- UI Components ---
 
@@ -1054,9 +828,9 @@ function App() {
                   // visible in the main panel must never coexist with a "0
                   // processing" sidebar, even in the window before the backend
                   // history has caught up.
-                  value: Math.max(todayStats.processing, status === 'processing' ? 1 : 0),
+                  value: Math.max(todayStats.processing, liveCount),
                   tone: 'text-brass',
-                  spin: status === 'processing',
+                  spin: liveCount > 0,
                 },
                 { icon: TrendingUp, label: 'success rate', value: `${todayStats.successRate}%`, tone: 'text-ok' },
               ].map((s) => {
@@ -1211,20 +985,6 @@ function App() {
               className="btn-quiet px-3 py-1.5 text-xs shrink-0"
             >
               Go to Settings
-            </button>
-          </div>
-        )}
-
-        {/* Session Recovery Banner */}
-        {sessionRecovered && (
-          <div className="mx-6 mt-2 px-4 py-3 bg-paper2 border border-rule rounded-card flex items-center justify-between animate-fade shrink-0">
-            <div className="flex items-center gap-2 text-sm text-ink2">
-              <RotateCcw size={16} className="text-brass" />
-              <span className="font-medium">Session recovered</span>
-              <span className="text-muted text-xs">Your previous work has been restored.</span>
-            </div>
-            <button onClick={() => setSessionRecovered(false)} className="text-muted hover:text-ink transition-colors">
-              <X size={14} />
             </button>
           </div>
         )}
@@ -1535,7 +1295,7 @@ function App() {
           {activeTab === 'history' && (
             <div className="h-full overflow-y-auto custom-scrollbar animate-fade">
               <div className="max-w-6xl mx-auto p-6 md:p-8">
-                <HistoryTab onReopenProject={restoreProject} search={historySearch} />
+                <HistoryTab onReopenProject={handleOpenProject} search={historySearch} />
               </div>
             </div>
           )}
@@ -1598,7 +1358,11 @@ function App() {
                       </p>
                     </div>
 
-                    <MediaInput onProcess={handleProcess} isProcessing={status === 'processing'} />
+                    <MediaInput onProcess={handleProcess} isProcessing={starting} />
+
+                    {startError && (
+                      <p className="text-xs text-danger text-left px-1">{startError}</p>
+                    )}
 
                     <div className="flex flex-wrap items-center justify-center gap-2.5 text-muted">
                       {[
@@ -1621,17 +1385,9 @@ function App() {
               <HomeRail
                 onViewAll={() => setActiveTab("history")}
                 search={historySearch}
-                onOpenProject={openProject}
-                activeJob={jobId ? {
-                  id: jobId,
-                  status,
-                  pct: progress?.overall_pct ?? null,
-                  title: processingMedia?.type === 'file'
-                    ? (processingMedia.payload?.name || 'New project')
-                    : processingMedia?.type === 'url'
-                      ? processingMedia.payload
-                      : 'New project',
-                } : null}
+                onOpenProject={handleOpenProject}
+                projects={railProjects}
+                activeId={jobId}
               />
             </div>
           )}
@@ -1933,19 +1689,11 @@ function App() {
               <HomeRail
                 onViewAll={() => setActiveTab("history")}
                 search={historySearch}
-                onOpenProject={openProject}
+                onOpenProject={handleOpenProject}
                 onCompare={handleCompareClip}
                 comparedId={comparedId}
-                activeJob={jobId ? {
-                  id: jobId,
-                  status,
-                  pct: progress?.overall_pct ?? null,
-                  title: processingMedia?.type === 'file'
-                    ? (processingMedia.payload?.name || 'New project')
-                    : processingMedia?.type === 'url'
-                      ? processingMedia.payload
-                      : 'New project',
-                } : null}
+                projects={railProjects}
+                activeId={jobId}
               />
             </div>
           )}

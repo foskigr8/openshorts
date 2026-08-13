@@ -11,6 +11,13 @@ import ProgressRing from './ProgressRing';
  */
 const FILTERS = ['all', 'completed', 'processing', 'failed'];
 
+// Workspace status → the vocabulary /api/history speaks.
+const railStatus = (s) => (
+  s === 'complete' ? 'completed'
+    : s === 'error' || s === 'cancelled' ? 'failed'
+      : s === 'processing' || s === 'queued' ? 'processing'
+        : 'completed');
+
 function fmtDur(seconds) {
   const s = Number(seconds);
   if (!Number.isFinite(s) || s <= 0) return null;
@@ -48,7 +55,7 @@ function StatusRing({ status, pct = null }) {
   );
 }
 
-export default function HomeRail({ onViewAll, search = '', activeJob = null, onOpenProject = null, onCompare = null, comparedId = null }) {
+export default function HomeRail({ onViewAll, search = '', projects = [], activeId = null, onOpenProject = null, onCompare = null, comparedId = null }) {
   const [videos, setVideos] = useState(null);
   const [storage, setStorage] = useState(null);
   const [filter, setFilter] = useState('all');
@@ -57,7 +64,9 @@ export default function HomeRail({ onViewAll, search = '', activeJob = null, onO
   const [deleteError, setDeleteError] = useState('');
   const itemRefs = useRef({});
 
-  const jobRunning = activeJob?.status === 'processing';
+  // Any project running anywhere keeps the rail live — not just the one on
+  // screen, because several can be rendering at once now.
+  const jobRunning = projects.some((p) => p.status === 'processing' || p.status === 'queued');
 
   // The rail is a live view of the same state the main panel shows, not a
   // one-time snapshot: it re-reads history while a job runs (so finished clips
@@ -77,7 +86,7 @@ export default function HomeRail({ onViewAll, search = '', activeJob = null, onO
     load();
     const interval = jobRunning ? setInterval(load, 5000) : null;
     return () => { cancelled = true; if (interval) clearInterval(interval); };
-  }, [jobRunning, activeJob?.id, activeJob?.status]);
+  }, [jobRunning, projects.length]);
 
   // The playing clip's row snaps to the TOP of the visible scroll area
   // (its own top edge aligned with the container's top) — but it never
@@ -133,35 +142,39 @@ export default function HomeRail({ onViewAll, search = '', activeJob = null, onO
   // server's array order (a freshly finished clip must lead its job).
   const fetched = (videos || []).slice().sort(
     (a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
-  const activeStatus = activeJob
-    ? (activeJob.status === 'complete' ? 'completed'
-      : activeJob.status === 'error' || activeJob.status === 'cancelled' ? 'failed'
-        : 'processing')
-    : null;
+
   // History rows carry ids like "<job_id>_3", so matching them against the
   // job id itself never hit — the running job was pinned at the top a SECOND
   // time next to its own disk entry, and the disk entry's stale status (a
   // job mid-download has no metadata yet) is what made a live run read as
   // "Failed" in this panel. Match on job_id, and let the locally-known
   // status win for every row of the job this tab is running.
-  const ofActiveJob = (v) => activeJob && v.job_id === activeJob.id;
-  const reconciled = fetched.map((v) => (
-    ofActiveJob(v) && activeStatus === 'processing' && v.status !== 'completed'
-      ? { ...v, status: 'processing' }
-      : ofActiveJob(v) && activeStatus === 'failed' && v.status === 'processing'
-        ? { ...v, status: 'failed' }
-        : v));
-  const merged = activeJob && !reconciled.some(ofActiveJob)
-    ? [{
-      id: activeJob.id,
-      job_id: activeJob.id,
-      title: activeJob.title || 'New project',
-      status: activeStatus,
-      pct: activeJob.pct,
+  // The workspace's own view of each project beats the disk scan: a job
+  // mid-download has no metadata and no progress file yet, and the scan used
+  // to call that "failed" while it was plainly running.
+  const localById = new Map(projects.map((p) => [p.id, p]));
+  const reconciled = fetched.map((v) => {
+    const local = localById.get(v.job_id);
+    if (!local) return v;
+    const s = railStatus(local.status);
+    if (s === 'processing' && v.status !== 'completed') return { ...v, status: 'processing', pct: local.pct };
+    if (s === 'failed' && v.status === 'processing') return { ...v, status: 'failed' };
+    return v;
+  });
+  // A project the backend hasn't written to disk yet still belongs in the
+  // list — otherwise starting a run looks like nothing happened.
+  const unseen = projects
+    .filter((p) => !fetched.some((v) => v.job_id === p.id))
+    .map((p) => ({
+      id: p.id,
+      job_id: p.id,
+      title: p.title || 'New project',
+      status: railStatus(p.status),
+      pct: p.pct,
       pending: true,
-      created_at: new Date().toISOString(),
-    }, ...reconciled]
-    : reconciled;
+      created_at: new Date(p.createdAt || Date.now()).toISOString(),
+    }));
+  const merged = [...unseen, ...reconciled];
 
   const shown = merged
     .filter((v) => filter === 'all' || (v.status || 'completed') === filter)
@@ -211,12 +224,13 @@ export default function HomeRail({ onViewAll, search = '', activeJob = null, onO
             // expands and plays in place.
             const isPlaying = !onCompare && playingId === v.id;
             const isCompared = !!onCompare && comparedId === v.id;
+            const isOpen = activeId && v.job_id === activeId;
             return (
               <div
                 key={v.id}
                 ref={(el) => { itemRefs.current[v.id] = el; }}
                 className={`group rounded-input border overflow-hidden transition-all duration-200 ${
-                  isPlaying || isCompared
+                  isPlaying || isCompared || isOpen
                     ? 'border-brass/60'
                     : 'border-rule hover:border-[color:color-mix(in_oklab,var(--color-accent)_35%,var(--color-rule-2))] hover:-translate-y-0.5'
                 }`}
