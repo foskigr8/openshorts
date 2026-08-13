@@ -68,6 +68,7 @@ function Meter({ Icon, label, value, sub, pct, tone = 'var(--color-accent)', tra
 
 export default function SystemMonitor({ status }) {
   const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
   const [m, setM] = useState(null);
   const [failed, setFailed] = useState(false);
   const trails = useRef({ cpu: [], mem: [], gpu: [] });
@@ -101,6 +102,24 @@ export default function SystemMonitor({ status }) {
     return () => { cancelled = true; clearInterval(timer); };
   }, [open]);
 
+  // A full-screen click-catcher used to sit under this panel, which meant
+  // that with the meters open you could not scroll the page or touch a clip —
+  // it swallowed everything. Listening on the document instead leaves the
+  // workspace completely usable while you watch the load.
+  useEffect(() => {
+    if (!open) return undefined;
+    const onDown = (e) => {
+      if (!rootRef.current?.contains(e.target)) setOpen(false);
+    };
+    const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
   const gpu = m?.gpus?.[0] || null;
   const cpu = typeof m?.cpu_pct === 'number' ? m.cpu_pct : null;
   const mem = m?.memory || null;
@@ -119,7 +138,7 @@ export default function SystemMonitor({ status }) {
   if (m?.disk && m.disk.pct >= 90) warnings.push('disk almost full');
 
   return (
-    <div className="relative">
+    <div className="relative" ref={rootRef}>
       <button
         onClick={() => setOpen((v) => !v)}
         title="machine load"
@@ -153,8 +172,6 @@ export default function SystemMonitor({ status }) {
 
       {open && (
         <>
-          {/* Click-away, without trapping focus or dimming the workspace. */}
-          <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
           <div className="absolute right-0 top-11 z-40 w-[min(92vw,460px)] card p-3 space-y-2.5 animate-fade">
             <div className="flex items-center justify-between px-1">
               <p className="readout text-[9px] uppercase tracking-wider text-muted">machine</p>

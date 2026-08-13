@@ -14,7 +14,7 @@ import { ArrowLeft, ArrowRight } from 'lucide-react';
  */
 const MIN = 1;
 const MAX = 40;
-const QUICK = [3, 5, 8, 12, 20];
+const QUICK = [1, 3, 5, 8, 12, 20, 40];
 
 const SIZE = 190;
 const R = 78;
@@ -22,7 +22,9 @@ const CIRC = 2 * Math.PI * R;
 // Three-quarter dial: a gap at the bottom so start and end are distinguishable.
 const SWEEP = 0.75;
 
-export default function CountStep({ value, onChange, onNext, onBack }) {
+export default function CountStep({
+  value, onChange, longContext = 0, onLongContextChange, onNext, onBack,
+}) {
   useEffect(() => {
     const onKey = (e) => {
       if (e.key === 'ArrowRight' || e.key === 'ArrowUp') onChange(Math.min(MAX, value + 1));
@@ -93,7 +95,57 @@ export default function CountStep({ value, onChange, onNext, onBack }) {
             {n}
           </button>
         ))}
-        <span className="readout text-[10px] text-muted/70 ml-1">drag the dial for any number</span>
+        {/* Type any number in range. The quick picks are shortcuts, not the
+            menu — nobody else gets to decide your minimum. */}
+        <label className="flex items-center gap-1.5 text-[11px] text-muted">
+          or
+          <input
+            type="number"
+            min={MIN}
+            max={MAX}
+            value={value}
+            onChange={(e) => {
+              const n = Number(e.target.value);
+              if (Number.isFinite(n)) onChange(Math.max(MIN, Math.min(MAX, Math.round(n))));
+            }}
+            className="input-field py-1 px-2 w-16 text-sm text-center"
+            aria-label="exact number of clips"
+          />
+        </label>
+      </div>
+
+      {/* Long-context clips live HERE, not behind a drawer: it is a normal
+          part of choosing what this run produces, not an advanced setting. */}
+      <div className="rounded-input border border-rule bg-paper2 p-3 text-left max-w-md mx-auto">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-xs text-ink2">Long-context clips</p>
+            <p className="text-[10px] text-muted leading-snug">
+              full 1–3 minute arcs, in addition to the {value} above
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {[0, 1, 2, 3].map((n) => (
+              <button
+                key={n}
+                type="button"
+                onClick={() => onLongContextChange(n)}
+                className={`w-8 h-8 rounded-full text-xs border transition-colors ${
+                  longContext === n
+                    ? 'border-brass/60 bg-brass/10 text-ink'
+                    : 'border-rule text-muted hover:border-rule2'
+                }`}
+              >
+                {n === 0 ? 'off' : n}
+              </button>
+            ))}
+          </div>
+        </div>
+        {longContext > 0 && (
+          <p className="readout text-[10px] text-brass mt-2">
+            {value + longContext} clips total · {value} shorts + {longContext} long-context
+          </p>
+        )}
       </div>
 
       <div className="flex items-center justify-center gap-2">

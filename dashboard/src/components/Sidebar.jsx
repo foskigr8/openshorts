@@ -1,8 +1,8 @@
 import {
-  LayoutDashboard, Image, HardDrive, History, Settings, Plus, Flame, LayoutGrid,
+  Home, Image, HardDrive, History, Settings, Flame, LayoutGrid,
   Loader2, TrendingUp, Sparkles, ChevronLeft, ChevronRight,
 } from 'lucide-react';
-import { BRAND } from '../brand';
+import { BRAND, LOGO_FALLBACK } from '../brand';
 
 /**
  * The navigation rail.
@@ -15,11 +15,11 @@ import { BRAND } from '../brand';
  * not need 256px of permanent labels, and the workspace wants that width.
  */
 export default function Sidebar({
-  activeTab, onSelect, onNewProject, billingEnabled, isSignedIn,
+  activeTab, onSelect, billingEnabled, isSignedIn,
   todayStats, liveCount, open, onToggle,
 }) {
   const navItems = [
-    { id: 'dashboard', icon: LayoutDashboard, label: 'Projects' },
+    { id: 'dashboard', icon: Home, label: 'Home' },
     { id: 'thumbnails', icon: Image, label: 'YouTube Studio' },
     // Sources are disk-backed like history — visible on self-host always,
     // behind sign-in in cloud mode.
@@ -58,20 +58,6 @@ export default function Sidebar({
         {wide && (
           <span className="font-display lowercase text-lg text-ink truncate">{BRAND.name}</span>
         )}
-      </div>
-
-      <div className={wide ? 'px-4 pb-3' : 'px-3 pb-3'}>
-        <button
-          onClick={onNewProject}
-          title="New project"
-          className="w-full flex items-center justify-center gap-2 py-2.5 rounded-input text-sm font-medium text-white transition-all hover:brightness-110"
-          style={{
-            background: 'var(--grad-accent)',
-            boxShadow: '0 1px 0 rgba(255,255,255,0.18) inset, var(--shadow-glow)',
-          }}
-        >
-          <Plus size={16} /> {wide && <span>New Project</span>}
-        </button>
       </div>
 
       <nav className={`flex-1 py-4 space-y-1 ${wide ? 'px-4' : 'px-3'}`}>

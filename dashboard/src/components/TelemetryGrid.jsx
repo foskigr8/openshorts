@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Activity, Sparkles, Play, CheckCircle2, AlertTriangle, ChevronDown,
   Download, AudioLines, ScanSearch, Scissors, Clapperboard,
@@ -55,6 +55,24 @@ function LogPanel({ logs, status, raw, onRawToggle, progress }) {
   const [view, setView] = useState('compact');
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
+  const streamRef = useRef(null);
+
+  // Opening the log should land you where the work IS — the newest line, which
+  // is the stage running right now — not at the top of a 400-line scrollback
+  // you then have to scroll through. Also follows new output while it is open,
+  // but only when you are already at the bottom, so reading back through the
+  // run isn't yanked away from under you.
+  const stick = useRef(true);
+  useEffect(() => {
+    const el = streamRef.current;
+    if (!el) return;
+    if (stick.current) el.scrollTop = el.scrollHeight;
+  }, [logs, view, expanded]);
+
+  const onStreamScroll = (e) => {
+    const el = e.currentTarget;
+    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  };
 
   const failed = status === 'error' || status === 'cancelled';
   const complete = status === 'complete';
@@ -84,7 +102,11 @@ function LogPanel({ logs, status, raw, onRawToggle, progress }) {
   };
 
   const fullStream = (
-    <div className="flex-1 min-h-[140px] max-h-[260px] overflow-y-auto custom-scrollbar p-3 space-y-1">
+    <div
+      ref={streamRef}
+      onScroll={onStreamScroll}
+      className="flex-1 min-h-[140px] max-h-[260px] overflow-y-auto custom-scrollbar p-3 space-y-1"
+    >
       {(logs || []).length === 0 ? (
         <p className="text-xs text-muted text-center py-6 lowercase">waiting for output…</p>
       ) : (
@@ -206,7 +228,7 @@ function LogPanel({ logs, status, raw, onRawToggle, progress }) {
                 onClick={() => setExpanded((v) => !v)}
                 className="shrink-0 flex items-center gap-1 text-[10px] lowercase text-muted hover:text-ink transition-colors"
               >
-                {expanded ? 'collapse' : 'expand'}
+                {expanded ? 'collapse' : 'show the stream'}
                 <ChevronDown size={11} className={`transition-transform ${expanded ? 'rotate-180' : ''}`} />
               </button>
             </div>

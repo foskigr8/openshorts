@@ -84,8 +84,8 @@ export default function LaunchStep({
           onClick={() => setOpen((v) => !v)}
           className="flex items-center gap-1.5 mx-auto text-xs lowercase text-muted hover:text-ink transition-colors"
         >
-          more options
-          <ChevronDown size={13} className={`transition-transform ${open ? 'rotate-180' : ''}`} />
+          fine-tune the output
+          <ChevronDown size={13} className={`transition-transform duration-300 ${open ? 'rotate-180' : ''}`} />
         </button>
 
         {open && (
@@ -125,29 +125,6 @@ export default function LaunchStep({
                   on={draft.removeBgAudio}
                   onChange={(v) => onPatch({ removeBgAudio: v })}
                 />
-              )}
-            />
-            <Row
-              label="Long-context clips"
-              hint="full 1–3 min arcs, on top of the count"
-              control={(
-                <div className="flex items-center gap-2">
-                  <Toggle
-                    on={draft.longContextClips > 0}
-                    onChange={(v) => onPatch({ longContextClips: v ? 1 : 0 })}
-                  />
-                  {draft.longContextClips > 0 && (
-                    <input
-                      type="number" min="1" max="5" value={draft.longContextClips}
-                      onChange={(e) => {
-                        const n = Number(e.target.value);
-                        onPatch({ longContextClips: Number.isFinite(n) ? Math.max(1, Math.min(5, n)) : 1 });
-                      }}
-                      className="input-field py-1 px-2 w-14 text-xs"
-                      aria-label="how many long-context clips"
-                    />
-                  )}
-                </div>
               )}
             />
             <p className="readout text-[10px] text-muted/70">

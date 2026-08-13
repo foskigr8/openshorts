@@ -9,11 +9,16 @@
  * `logo` and `favicon` are paths under public/.
  */
 export const BRAND = {
-  name: 'Studio',
+  name: 'Ai4Ts',
   tagline: 'turn long video into shorts',
-  logo: '/logo-openshorts.png',
-  favicon: '/logo-openshorts.png',
+  // Drop the mark at dashboard/public/logo-ai4ts.png and both of these pick
+  // it up. LOGO_FALLBACK covers the window before the file lands, so a
+  // missing image never shows a broken icon in the nav.
+  logo: '/logo-ai4ts.png',
+  favicon: '/logo-ai4ts.png',
 };
+
+export const LOGO_FALLBACK = '/logo-openshorts.png';
 
 /** Apply the brand to the document (title + favicon). Called once at boot. */
 export function applyBrand() {

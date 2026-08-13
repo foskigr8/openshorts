@@ -29,8 +29,8 @@ function ProjectTile({ project, index, onOpen }) {
       onClick={() => onOpen(project)}
       className="tile-in group text-left rounded-card border border-rule bg-paper2 p-4 w-[220px]
                  hover:border-[color:color-mix(in_oklab,var(--color-accent)_45%,var(--color-rule-2))]
-                 hover:-translate-y-1 transition-all duration-200"
-      style={{ animationDelay: `${60 + index * 70}ms` }}
+                 hover:-translate-y-1 transition-[transform,border-color,box-shadow] duration-300 ease-[cubic-bezier(0.16,1,0.3,1)]"
+      style={{ animationDelay: `${140 + index * 60}ms` }}
     >
       <div className="flex items-center gap-2 mb-3">
         <Icon size={14} className={s.spin ? 'animate-spin' : ''} style={{ color: s.tone }} />
@@ -80,7 +80,7 @@ export default function ProjectLauncher({
   return (
     <div className="h-full overflow-y-auto custom-scrollbar">
       <div className="min-h-full flex flex-col items-center justify-center px-6 py-10 gap-10">
-        <div className="text-center space-y-2">
+        <div className="text-center space-y-2 rise-in">
           <h1 className="font-display lowercase text-4xl md:text-5xl text-ink tracking-tight">
             {projects.length ? 'your projects' : 'start something'}
           </h1>
@@ -97,7 +97,9 @@ export default function ProjectLauncher({
             onClick={() => setCreating(true)}
             className="tile-in group rounded-card border border-dashed border-rule2 bg-paper2/60 w-[220px]
                        flex flex-col items-center justify-center gap-3 py-8
-                       hover:border-[color:var(--color-accent)] hover:-translate-y-1 transition-all duration-200"
+                       hover:border-[color:var(--color-accent)] hover:-translate-y-1
+                       transition-[transform,border-color,box-shadow] duration-300 ease-[cubic-bezier(0.16,1,0.3,1)]"
+            style={{ animationDelay: '80ms' }}
           >
             <span
               className="w-12 h-12 rounded-full flex items-center justify-center transition-all duration-300

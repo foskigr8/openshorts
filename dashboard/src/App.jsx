@@ -6,7 +6,8 @@ import Sidebar from './components/Sidebar';
 import ProjectLauncher from './components/project/ProjectLauncher';
 import StoragePanel from './components/StoragePanel';
 import ClipRow from './components/project/ClipRow';
-import CollapsiblePanel, { usePanelState } from './components/ui/CollapsiblePanel';
+import FailureReport from './components/project/FailureReport';
+import CollapsiblePanel, { usePanelState, useStoredChoice } from './components/ui/CollapsiblePanel';
 import ResultCard from './components/ResultCard';
 import ProcessingAnimation from './components/ProcessingAnimation';
 import ClipSlotPlaceholder from './components/ClipSlotPlaceholder';
@@ -297,7 +298,9 @@ function App() {
   const [logsRaw, setLogsRaw] = useState(false);
   // Right-panel view: 'clips' (Generated Shorts) or 'source' (original video
   // + stills — round-5 Source section).
-  const [rightTab, setRightTab] = useState('clips');
+  // How the generated shorts are laid out: 'row' slides sideways, 'column'
+  // stacks down. Remembered, because it is a working preference.
+  const [clipView, setClipView] = useStoredChoice('clip-view', 'row');
   // Itemized system status for the status strip: {backend, cookies, gpu} from
   // /api/system, refreshed on an interval. null = never checked yet.
   const [systemStatus, setSystemStatus] = useState(null);
@@ -751,7 +754,6 @@ function App() {
       <Sidebar
         activeTab={activeTab}
         onSelect={setActiveTab}
-        onNewProject={() => { setActiveTab('dashboard'); handleReset(); }}
         billingEnabled={billingEnabled}
         isSignedIn={isSignedIn}
         todayStats={todayStats}
@@ -767,9 +769,10 @@ function App() {
             <button
               onClick={handleReset}
               className="btn-quiet px-3 py-1.5 text-xs shrink-0"
+              title="Back to your projects — this one keeps running"
             >
               <Plus size={14} />
-              <span className="hidden sm:inline">New Project</span>
+              <span className="hidden sm:inline">New project</span>
             </button>
           )}
 
@@ -1236,67 +1239,67 @@ function App() {
                   />
                 )}
 
-              {/* Results / live clip slots — full width beneath the status card */}
-              <div className="flex flex-col card p-4 sm:p-6 shrink-0 min-h-[260px]">
-                <h2 className="font-display lowercase text-xl text-ink mb-6 flex flex-wrap items-center gap-2 shrink-0">
-                  <div className="flex items-center gap-1.5 mr-auto">
-                    <button
-                      onClick={() => setRightTab('clips')}
-                      className={`flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs transition-colors ${
-                        rightTab === 'clips'
-                          ? 'border-brass/50 bg-brass/10 text-ink'
-                          : 'border-rule text-muted hover:border-rule2'
-                      }`}
-                    >
-                      <span className="icon-chip !w-6 !h-6"><Sparkles size={13} /></span>
-                      Generated Shorts
-                    </button>
-                    <button
-                      onClick={() => setRightTab('source')}
-                      className={`flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs transition-colors ${
-                        rightTab === 'source'
-                          ? 'border-brass/50 bg-brass/10 text-ink'
-                          : 'border-rule text-muted hover:border-rule2'
-                      }`}
-                    >
-                      <span className="icon-chip !w-6 !h-6"><Film size={13} /></span>
-                      Source
-                    </button>
-                  </div>
-                  {results?.clips?.length > 0 && (
-                    <span className="readout px-2.5 py-1 rounded-full ml-auto border border-rule bg-paper2">
-                      {results.clips.length} Clips
-                    </span>
-                  )}
-                  {results?.cost_analysis && !isManaged && (
-                    <span className="readout bg-paper3 px-2.5 py-1 rounded-full ml-2" title={`Input: ${results.cost_analysis.input_tokens} | Output: ${results.cost_analysis.output_tokens}`}>
-                      GEMINI · ${results.cost_analysis.total_cost.toFixed(5)}
-                    </span>
-                  )}
-                  {results?.clips?.length > 0 && status === 'complete' && (
-                    <div className="flex items-center gap-2 ml-auto">
-                      <button
-                        onClick={handleDownloadAll}
-                        disabled={downloadingAll}
-                        className="btn-ghost px-3 py-2 text-xs"
-                        title="Download all clips as a ZIP"
-                      >
-                        {downloadingAll
-                          ? <><Loader2 size={14} className="animate-spin" />zipping…</>
-                          : <><Download size={14} />download all</>}
-                      </button>
-                      {results.clips.length > 1 && (
+              {/* Generated shorts. Collapsible like everything else, and you
+                  choose the shape: a row that slides sideways (eight clips
+                  without eight screens of scrolling) or a column. The Source
+                  toggle that used to live here is gone — there is a dedicated
+                  Sources tab for that now. */}
+              <CollapsiblePanel
+                id="clips"
+                title="generated shorts"
+                subtitle={results?.clips?.length ? `${results.clips.length} ready` : null}
+                className="shrink-0"
+                bodyClassName="p-4 sm:p-5 pt-0"
+                right={(
+                  <>
+                    <div className="flex items-center rounded-full border border-rule overflow-hidden">
+                      {[
+                        { id: 'row', Icon: Rows3, title: 'slide sideways' },
+                        { id: 'column', Icon: Columns3, title: 'stack down' },
+                      ].map(({ id, Icon, title }) => (
                         <button
-                          onClick={() => setShowScheduleWeek(true)}
-                          className="btn-primary px-4 py-2 text-xs"
+                          key={id}
+                          onClick={() => setClipView(id)}
+                          title={title}
+                          className={`px-2 py-1.5 transition-colors ${
+                            clipView === id ? 'bg-brass/15 text-ink' : 'text-muted hover:text-ink2'
+                          }`}
                         >
-                          <Calendar size={14} />
-                          schedule week
+                          <Icon size={13} className={id === 'row' ? 'rotate-90' : ''} />
                         </button>
-                      )}
+                      ))}
                     </div>
-                  )}
-                </h2>
+                    {results?.cost_analysis && !isManaged && (
+                      <span className="readout text-[10px] text-muted hidden sm:inline" title={`Input: ${results.cost_analysis.input_tokens} | Output: ${results.cost_analysis.output_tokens}`}>
+                        ${results.cost_analysis.total_cost.toFixed(4)}
+                      </span>
+                    )}
+                    {results?.clips?.length > 0 && status === 'complete' && (
+                      <>
+                        <button
+                          onClick={handleDownloadAll}
+                          disabled={downloadingAll}
+                          className="btn-ghost px-2.5 py-1.5 text-xs"
+                          title="Download all clips as a ZIP"
+                        >
+                          {downloadingAll
+                            ? <Loader2 size={13} className="animate-spin" />
+                            : <Download size={13} />}
+                        </button>
+                        {results.clips.length > 1 && (
+                          <button
+                            onClick={() => setShowScheduleWeek(true)}
+                            className="btn-ghost px-2.5 py-1.5 text-xs"
+                            title="Schedule these across the week"
+                          >
+                            <Calendar size={13} />
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </>
+                )}
+              >
 
                 {/* Peak-moment upsell: they just SAW their clips — sell while
                     they're proud of the result. NOTE: no GitHub-star ask on this
@@ -1315,10 +1318,10 @@ function App() {
                   </div>
                 )}
 
-                {rightTab === 'source' && jobId ? (
-                  <SourcePanel jobId={jobId} />
-                ) : (
-                <div className="flex-1 overflow-y-auto custom-scrollbar p-1">
+                <div className={clipView === 'row'
+                  ? 'overflow-x-auto overflow-y-hidden custom-scrollbar pb-2'
+                  : 'max-h-[70vh] overflow-y-auto custom-scrollbar p-1'}
+                >
                   {(() => {
                     // Live grid: as many slots as the job will produce
                     // (progress.json's clips_total once render starts,
@@ -1340,17 +1343,29 @@ function App() {
                       // each card's action-button grid down to ~20px wide
                       // and overlapping every label. auto-fit sizes off the
                       // real container width instead.
-                      const gridClass = status === 'complete'
-                        ? 'grid-cols-[repeat(auto-fit,minmax(440px,1fr))]'
-                        : 'grid-cols-1';
+                      // Row view lays the clips out along one line you slide
+                      // sideways — eight clips stop meaning eight screens of
+                      // scrolling. Column view keeps the stack, sized to this
+                      // container's real width (a viewport breakpoint fires on
+                      // a wide monitor even when this pane is ~670px, which is
+                      // what used to squeeze each card's buttons to ~20px).
+                      const layoutClass = clipView === 'row'
+                        ? 'flex gap-4 pb-2 w-max'
+                        : status === 'complete'
+                          ? 'grid gap-4 pb-4 grid-cols-[repeat(auto-fit,minmax(440px,1fr))]'
+                          : 'grid gap-3 pb-4 grid-cols-1';
+                      const itemClass = clipView === 'row'
+                        ? (status === 'complete' ? 'w-[440px] shrink-0' : 'w-[320px] shrink-0')
+                        : '';
                       return (
-                        <div className={`grid gap-4 pb-10 ${gridClass}`}>
+                        <div className={layoutClass}>
                           {Array.from({ length: total }).map((_, i) => (
                             // While the job runs, a finished clip is a ROW —
                             // four 420px editor cards buried the pipeline the
                             // user was trying to watch. Clicking one unfolds
                             // the full editor in place; nothing is removed.
-                            results?.clips?.[i] && viewStatus === 'processing' && expandedClip !== i ? (
+                            <div key={`slot-${jobId}-${i}`} className={itemClass}>
+                            {results?.clips?.[i] && viewStatus === 'processing' && expandedClip !== i ? (
                               <ClipRow
                                 key={`row-${jobId}-${i}`}
                                 clip={results.clips[i]}
@@ -1390,7 +1405,8 @@ function App() {
                                 total={total}
                                 state={viewStatus === 'processing' && i === readyCount ? 'rendering' : 'queued'}
                               />
-                            )
+                            )}
+                            </div>
                           ))}
                         </div>
                       );
@@ -1403,50 +1419,21 @@ function App() {
                         </div>
                       );
                     }
-                    if (status === 'error') {
-                      const lastLog = logs && logs.length > 0
-                        ? (typeof logs[logs.length - 1] === 'string' ? logs[logs.length - 1] : logs[logs.length - 1].text)
-                        : '';
-                      const joined = (logs || []).map((l) => (typeof l === 'string' ? l : l.text || '')).join(' ');
-                      let cause = 'Something went wrong on our side while processing your video.';
-                      if (/download|yt-dlp|403|url|youtube/i.test(joined)) {
-                        cause = 'We couldn\u2019t fetch this video. This can happen when it\u2019s age-restricted, private, temporarily unavailable, or the download link expired.';
-                      } else if (/gemini|deepseek|api key|transcrib/i.test(joined)) {
-                        cause = 'The AI step hit an error (transcription or analysis). Try again — if it keeps failing, check your API keys in Settings.';
-                      } else if (/reframe|ffmpeg|encode|render|scene/i.test(joined)) {
-                        cause = 'Rendering hit an error while cutting the clips. The source may be unusual (odd codec or damaged file) — try a different link or upload.';
-                      }
+                    if (status === 'error' || status === 'cancelled') {
                       return (
-                        <div className="h-full flex flex-col items-center justify-center text-center px-6 space-y-3">
-                          <span className="icon-chip !w-12 !h-12 !border-danger/30" style={{ background: 'color-mix(in oklab, var(--color-danger) 14%, transparent)', color: 'var(--color-danger)' }}>
-                            <AlertTriangle size={22} />
-                          </span>
-                          {/* Plain text, not a \u-escape: this is JSX text
-                              content, where escapes are literal characters. */}
-                          <p className="text-sm font-semibold text-ink">We couldn’t process this video</p>
-                          <p className="text-xs text-muted max-w-md leading-relaxed">{cause}</p>
-                          {lastLog && (
-                            <details className="text-[10px] text-muted/70 text-left max-w-md w-full">
-                              <summary className="cursor-pointer select-none lowercase">raw error</summary>
-                              <p className="mt-1 break-words font-mono">{lastLog}</p>
-                            </details>
-                          )}
-                          <div className="flex flex-wrap items-center justify-center gap-2 mt-1">
-                            <button onClick={handleReset} className="btn-primary px-4 py-2 text-xs">
-                              Try again
-                            </button>
-                            <button onClick={handleReset} className="btn-ghost px-4 py-2 text-xs">
-                              Use a different link
-                            </button>
-                          </div>
-                        </div>
+                        <FailureReport
+                          logs={logs}
+                          stage={progress?.stage}
+                          cancelled={status === 'cancelled'}
+                          onRetry={active?.form ? () => handleProcess(active.form) : null}
+                          onNewSource={handleReset}
+                        />
                       );
                     }
                     return null;
                   })()}
                 </div>
-                )}
-              </div>
+              </CollapsiblePanel>
 
                 {/* Telemetry: parsed logs (real server timestamps, noise filter
                     with raw toggle) + real performance data. It lives INSIDE the

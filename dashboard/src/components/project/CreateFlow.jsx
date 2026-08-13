@@ -129,6 +129,8 @@ export default function CreateFlow({ onSubmit, onCancel, starting = false, error
       <CountStep
         value={draft.clipCount}
         onChange={(v) => patch({ clipCount: v })}
+        longContext={draft.longContextClips}
+        onLongContextChange={(v) => patch({ longContextClips: v })}
         onNext={() => go(3)}
         onBack={() => go(1)}
       />
