@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { Film, ChevronRight, HardDrive, Play, X, Clock, Database, Trash2, FolderOpen, Loader2 } from 'lucide-react';
+import { Film, ChevronRight, ChevronLeft, HardDrive, Play, X, Clock, Database, Trash2, FolderOpen, Loader2, PanelRightClose } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import { pauseAllOtherPlayers, registerPlayer } from '../lib/playerSync';
 import ProgressRing from './ProgressRing';
+import { usePanelState } from './ui/CollapsiblePanel';
 
 /**
  * Persistent right rail on the Home view (reference UI): Generated Shorts /
@@ -60,6 +61,7 @@ export default function HomeRail({ onViewAll, search = '', projects = [], active
   const [storage, setStorage] = useState(null);
   const [filter, setFilter] = useState('all');
   const [playingId, setPlayingId] = useState(null);
+  const [railOpen, toggleRail] = usePanelState('rail', true);
   const [deleting, setDeleting] = useState(null);
   const [deleteError, setDeleteError] = useState('');
   const itemRefs = useRef({});
@@ -181,17 +183,54 @@ export default function HomeRail({ onViewAll, search = '', projects = [], active
     .filter((v) => !q || (v.title || '').toLowerCase().includes(q));
   const storagePct = storage ? Math.min(100, Math.max(0, storage.pct || 0)) : 0;
 
+  // Folded away, the rail is a 12px spine you can push back open — the
+  // workspace gets the width, and the choice survives a reload.
+  if (!railOpen) {
+    const running = merged.filter((v) => v.status === 'processing').length;
+    return (
+      <aside className="w-11 shrink-0 h-full border-l border-rule bg-paper2 flex flex-col items-center py-4 gap-3">
+        <button
+          onClick={toggleRail}
+          className="p-2 rounded-lg text-muted hover:text-ink hover:bg-paper3 transition-colors"
+          title="show projects"
+          aria-label="show projects"
+        >
+          <ChevronLeft size={16} />
+        </button>
+        <span
+          className="readout text-[9px] uppercase tracking-[0.2em] text-muted whitespace-nowrap"
+          style={{ writingMode: 'vertical-rl' }}
+        >
+          projects
+        </span>
+        {running > 0 && (
+          <span className="w-2 h-2 rounded-full bg-brass" style={{ boxShadow: '0 0 8px var(--color-glow)' }} />
+        )}
+      </aside>
+    );
+  }
+
   return (
-    <aside className="w-full lg:w-[400px] shrink-0 h-full flex flex-col overflow-hidden border-l border-rule bg-paper2">
-      <div className="p-5 border-b border-rule shrink-0">
-        <div className="flex items-center justify-between mb-3.5">
-          <h3 className="font-display lowercase text-lg text-ink">Generated Shorts</h3>
-          <button
-            onClick={onViewAll}
-            className="text-xs lowercase text-muted hover:text-brass transition-colors flex items-center gap-0.5"
-          >
-            view all <ChevronRight size={13} />
-          </button>
+    <aside className="w-full lg:w-[380px] shrink-0 h-full flex flex-col overflow-hidden border-l border-rule bg-paper2">
+      <div className="px-4 py-3.5 border-b border-rule shrink-0">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="font-display lowercase text-base text-ink">Projects</h3>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={onViewAll}
+              className="text-xs lowercase text-muted hover:text-brass transition-colors flex items-center gap-0.5"
+            >
+              view all <ChevronRight size={13} />
+            </button>
+            <button
+              onClick={toggleRail}
+              className="p-1.5 rounded-md text-muted hover:text-ink hover:bg-paper3 transition-colors"
+              title="hide this panel"
+              aria-label="hide projects panel"
+            >
+              <PanelRightClose size={15} />
+            </button>
+          </div>
         </div>
         <div className="flex flex-wrap gap-2">
           {FILTERS.map((f) => (

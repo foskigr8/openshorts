@@ -4,6 +4,8 @@ import KeyInput from './components/KeyInput';
 import KeyListInput from './components/KeyListInput';
 import ProjectLauncher from './components/project/ProjectLauncher';
 import StoragePanel from './components/StoragePanel';
+import ClipRow from './components/project/ClipRow';
+import CollapsiblePanel from './components/ui/CollapsiblePanel';
 import ResultCard from './components/ResultCard';
 import ProcessingAnimation from './components/ProcessingAnimation';
 import ClipSlotPlaceholder from './components/ClipSlotPlaceholder';
@@ -271,6 +273,8 @@ function App() {
   // an upload can take a while, and the screen must not look idle meanwhile.
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState('');
+  // Which clip is open as a full editor card while the job is still running.
+  const [expandedClip, setExpandedClip] = useState(null);
   // Bulk subtitles: apply one style to every clip of the job (triggered from
   // within a clip's subtitle modal via "apply to all").
   const [bulkSub, setBulkSub] = useState({ running: false, current: 0, total: 0, errors: 0 });
@@ -511,6 +515,10 @@ function App() {
   useEffect(() => {
     if (jobId) setRawLogs(jobId, logsRaw);
   }, [jobId, logsRaw, setRawLogs]);
+
+  // Clip indexes belong to one project; carrying an expansion across a switch
+  // would open a card for a clip that isn't there.
+  useEffect(() => { setExpandedClip(null); }, [jobId]);
 
   // System status strip: real, itemized checks (backend reachability, YouTube
   // cookie freshness, GPU) — refreshed every 30s while the dashboard is open.
@@ -1444,7 +1452,20 @@ function App() {
                       return (
                         <div className={`grid gap-4 pb-10 ${gridClass}`}>
                           {Array.from({ length: total }).map((_, i) => (
-                            results?.clips?.[i] ? (
+                            // While the job runs, a finished clip is a ROW —
+                            // four 420px editor cards buried the pipeline the
+                            // user was trying to watch. Clicking one unfolds
+                            // the full editor in place; nothing is removed.
+                            results?.clips?.[i] && status === 'processing' && expandedClip !== i ? (
+                              <ClipRow
+                                key={`row-${jobId}-${i}`}
+                                clip={results.clips[i]}
+                                index={i}
+                                jobId={jobId}
+                                onExpand={setExpandedClip}
+                                onPlay={setExpandedClip}
+                              />
+                            ) : results?.clips?.[i] ? (
                               <ResultCard
                                 key={`${jobId}-${i}`}
                                 clip={results.clips[i]}
@@ -1542,7 +1563,13 @@ function App() {
                     job, the entire "we couldn't process this video" explanation
                     plus its Try-again buttons) was silently cut off below the
                     fold with no indication anything was there. */}
-                <div className="shrink-0">
+                <CollapsiblePanel
+                  id="telemetry"
+                  title="pipeline detail"
+                  subtitle="log · stage"
+                  className="shrink-0 !bg-transparent !border-0"
+                  bodyClassName="pt-3"
+                >
                   <TelemetryGrid
                     logs={logs}
                     status={status}
@@ -1553,7 +1580,7 @@ function App() {
                     currentStage={progress?.stage ?? null}
                     progress={progress}
                   />
-                </div>
+                </CollapsiblePanel>
 
               </div>
 

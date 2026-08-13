@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Loader2, Download, Film, FolderOpen, Trash2, AlertTriangle } from 'lucide-react';
+import { Loader2, Download, Film, FolderOpen, Trash2, AlertTriangle, Maximize2, Minimize2, ChevronDown } from 'lucide-react';
 import { apiJson, apiFetch } from '../lib/api';
 import { pauseAllOtherPlayers, registerPlayer } from '../lib/playerSync';
+import { usePanelState } from './ui/CollapsiblePanel';
 
 // The signed-in user's saved video library (stored in R2). Private, signed links.
 // Videos are grouped by project (job); re-openable projects get a "reopen"
@@ -18,6 +19,11 @@ export default function HistoryTab({ onReopenProject, search = '' }) {
   const [showDataFiles, setShowDataFiles] = useState(false);
   const [dataFiles, setDataFiles] = useState(null);
   const [deletingData, setDeletingData] = useState(false);
+  // Compact by default: a wall of 9:16 posters is unreadable once there are
+  // more than a couple of runs. Full-screen drops the page's max width so the
+  // library can actually use the monitor.
+  const [wide, toggleWide] = usePanelState('history-wide', false);
+  const [expanded, setExpanded] = useState({});   // jobId → show its clips
 
   useEffect(() => {
     apiJson('/api/history')
@@ -175,11 +181,22 @@ export default function HistoryTab({ onReopenProject, search = '' }) {
   }
 
   return (
-    <div className="h-full overflow-y-auto p-8 max-w-5xl mx-auto animate-fade">
-      <h1 className="font-display lowercase text-2xl text-ink mb-2">Your library</h1>
-      <p className="text-muted text-sm mb-8 lowercase">
-        Every short you've generated, kept until you delete it. Reopen a project to keep editing its clips.
-      </p>
+    <div className={`h-full overflow-y-auto p-6 sm:p-8 animate-fade ${wide ? 'max-w-none' : 'max-w-5xl mx-auto'}`}>
+      <div className="flex items-start justify-between gap-4 mb-6">
+        <div>
+          <h1 className="font-display lowercase text-2xl text-ink mb-1">Your library</h1>
+          <p className="text-muted text-sm lowercase">
+            Kept until you delete it. Open a project to keep editing its clips.
+          </p>
+        </div>
+        <button
+          onClick={toggleWide}
+          className="btn-ghost px-3 py-2 text-xs shrink-0"
+          title={wide ? 'back to a readable column' : 'use the full width'}
+        >
+          {wide ? <><Minimize2 size={14} /> compact</> : <><Maximize2 size={14} /> full width</>}
+        </button>
+      </div>
 
       {storage && (
         <div className="mb-6">
@@ -239,8 +256,17 @@ export default function HistoryTab({ onReopenProject, search = '' }) {
           return (
             <section key={jobId}>
               <div className="flex flex-wrap items-center justify-between gap-3 mb-4 pb-2 border-b border-rule">
+                <button
+                  onClick={() => setExpanded((e) => ({ ...e, [jobId]: !e[jobId] }))}
+                  className="min-w-0 flex items-center gap-2 text-left group"
+                  aria-expanded={!!expanded[jobId]}
+                >
+                  <ChevronDown
+                    size={14}
+                    className={`shrink-0 text-muted transition-transform ${expanded[jobId] ? '' : '-rotate-90'}`}
+                  />
                 <div className="min-w-0">
-                  <p className="text-sm text-ink font-medium truncate" title={project?.title || vids[0]?.title}>
+                  <p className="text-sm text-ink font-medium truncate group-hover:text-brass transition-colors" title={project?.title || vids[0]?.title}>
                     {project?.title || vids[0]?.title || 'Project'}
                   </p>
                   <p className="readout mt-0.5">
@@ -254,6 +280,7 @@ export default function HistoryTab({ onReopenProject, search = '' }) {
                     )}
                   </p>
                 </div>
+                </button>
                 <div className="flex items-center gap-2 shrink-0">
                   <a
                     href={`/api/jobs/${jobId}/logs`}
@@ -290,7 +317,12 @@ export default function HistoryTab({ onReopenProject, search = '' }) {
                   </button>
                 </div>
               </div>
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-5">
+              {expanded[jobId] && (
+              <div className={`grid gap-4 animate-fade ${
+                wide
+                  ? 'grid-cols-[repeat(auto-fill,minmax(160px,1fr))]'
+                  : 'grid-cols-2 sm:grid-cols-3 lg:grid-cols-4'
+              }`}>
                 {/* A job with no playable clip contributes ONE placeholder
                     row, not a grid of "failed · no clips" tiles — and while
                     it is still running that placeholder says so. Rows whose
@@ -334,6 +366,7 @@ export default function HistoryTab({ onReopenProject, search = '' }) {
                   </div>
                 ))}
               </div>
+              )}
             </section>
           );
         })}
