@@ -602,12 +602,71 @@ for round in 1 2 3; do
     sleep 5
 done
 
+# Publish the tunnel URL somewhere reachable DURING a Batch run. Kaggle
+# commit output is only viewable after the run finishes, so the printed URL
+# alone would be invisible until the 9h cap kills the session — this uploads
+# it to HF storage instead, where it can be read any time.
+_publish_url() {
+    [ -n "${HF_TOKEN:-}" ] && [ -n "${HF_STORAGE_REPO:-}" ] || return 0
+    python3 - "$1" <<'PY' 2>/dev/null || true
+import os, sys
+import hf_storage
+local = sys.argv[1]
+if os.path.exists(local):
+    hf_storage.upload_file(local, "public_url.txt")
+    print("    URL published to HF storage: datasets/" +
+          hf_storage.repo_id() + "/public_url.txt")
+PY
+}
+
 if [ -n "$URL" ]; then
     printf '\n    \033[1;32m%s\033[0m\n\n' "$URL"
     echo "    Open that in a browser. Logs: $LOG_DIR/{backend,tunnel}.log"
     echo "$URL" > "$OUTPUT_DIR/public_url.txt" 2>/dev/null || true
     echo "    URL also saved to \$OUTPUT_DIR/public_url.txt"
+    _publish_url "$OUTPUT_DIR/public_url.txt"
 else
     echo "    tunnel did not report a URL — last $LOG_DIR/tunnel.log:"
     tail -20 "$LOG_DIR/tunnel.log"
+fi
+
+# --- 7. Batch keep-alive ---------------------------------------------------
+# Interactive sessions idle-stop after ~40 min (Kaggle counts "no cell
+# running" as inactivity — a file-touch heartbeat does not count). Commit /
+# "Save & Run All" runs have no such idle rule and can go the full 9h, but a
+# run ENDS when the last cell returns. So in Batch mode this script blocks
+# in a watchdog loop: the cell never completes, the kernel stays alive, and
+# the backend + tunnel self-heal if they die. Interactive/local runs are
+# untouched (this never blocks there).
+if { [ "${KAGGLE_KERNEL_RUN_TYPE:-}" = "Batch" ] \
+        && [ "${KEEP_ALIVE:-1}" != "0" ]; } \
+        || [ "${KEEP_ALIVE:-1}" = "1" ]; then
+    say "Batch mode — keeping this session alive (watchdog, up to the 9h cap)"
+    while true; do
+        if ! curl -sf --max-time 5 "http://localhost:$PORT/api/system" \
+                >/dev/null 2>&1; then
+            echo "[watchdog] backend down — restarting"
+            pkill -f "uvicorn app:app" 2>/dev/null || true
+            nohup python3 -m uvicorn app:app --host 0.0.0.0 --port "$PORT" \
+                > "$LOG_DIR/backend.log" 2>&1 &
+        fi
+        if ! pgrep -f "cloudflared tunnel" >/dev/null 2>&1; then
+            echo "[watchdog] tunnel down — restarting (http2)"
+            nohup "$CF" tunnel --url "http://localhost:$PORT" \
+                --protocol http2 --no-autoupdate \
+                > "$LOG_DIR/tunnel.log" 2>&1 &
+            for _ in $(seq 1 30); do
+                NEWURL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' \
+                             "$LOG_DIR/tunnel.log" 2>/dev/null | head -1) || true
+                [ -n "$NEWURL" ] && break
+                sleep 2
+            done
+            if [ -n "$NEWURL" ]; then
+                echo "$NEWURL" > "$OUTPUT_DIR/public_url.txt"
+                _publish_url "$OUTPUT_DIR/public_url.txt"
+                echo "[watchdog] new URL: $NEWURL"
+            fi
+        fi
+        sleep 60
+    done
 fi
