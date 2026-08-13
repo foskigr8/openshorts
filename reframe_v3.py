@@ -262,19 +262,18 @@ def crop_rect_containing(subject: Box, frame_w: int, frame_h: int,
 
 def _wide43_rect(frame_w: int, frame_h: int,
                  faces: Optional[Sequence[Box]] = None) -> Rect:
-    """The 4:3 'show everyone' crop. When faces are known, ZOOM to them
-    (contain the union at 4:3 with breathing room) so people aren't tiny in
-    a huge frame — the "tiny people and huge dead space" failure from the
-    rendered-clip review. No faces -> the full-frame 4:3 crop, centred."""
+    """The 4:3 'show everyone' crop, centered on the on-screen faces when
+    any are known (reactions / both people relevant), else the frame."""
     crop_h = min(float(frame_h), float(frame_w) / WIDE_ASPECT)
     crop_w = crop_h * WIDE_ASPECT
     if faces:
         real = [f for f in faces if f is not None]
         if real:
-            u = union_box(*real)
-            return crop_rect_containing(
-                u, frame_w, frame_h, WIDE_ASPECT,
-                head_y=0.42, side_margin=0.5, vert_margin=0.45)
+            ux, uy, uw, uh = union_box(*real)
+            cx, cy = ux + uw / 2.0, uy + uh / 2.0
+            x = max(0.0, min(cx - crop_w / 2.0, frame_w - crop_w))
+            y = max(0.0, min(cy - crop_h / 2.0, frame_h - crop_h))
+            return (x, y, crop_w, crop_h)
     return ((frame_w - crop_w) / 2.0, (frame_h - crop_h) / 2.0,
             crop_w, crop_h)
 
@@ -928,20 +927,22 @@ def _crop_resize_panel(frame, crop: Optional[Rect], frame_w: int, frame_h: int,
     if w <= 0 or h <= 0:
         return np.zeros((out_h, out_w, 3), dtype=np.uint8)
     actual = w / h
-    # NEVER letterbox a panel: black bars between stacked panels read as a
-    # broken split (the rendered-clip review: "black bar between them").
-    # When a crop's aspect drifts from the panel's (smart-crop containment
-    # nudge, a degenerate full-frame), centre-crop to the panel aspect and
-    # fill — the panels stay edge-to-edge, no bars, no distortion.
+    # Letterbox ONLY on the genuine fallback (a full-frame crop dropped into
+    # a panel — a 16:9 frame into a 9:8 panel would distort faces badly).
+    # Small deviations (a smart-crop containment nudge, the min-size floor)
+    # fill the panel instead: the 1-5% stretch is imperceptible, and it
+    # keeps the stacked panels edge-to-edge with no visible bars/border.
     if actual > aspect * 1.10 or actual < aspect * 0.90:
-        if actual > aspect:  # too wide -> trim the sides
-            new_w = h * aspect
-            x = x + (w - new_w) / 2
-            w = new_w
-        else:  # too tall -> trim top/bottom
-            new_h = w / aspect
-            y = y + (h - new_h) / 2
-            h = new_h
+        scale = min(out_w / w, out_h / h)
+        resized = cv2.resize(
+            frame[y:y + h, x:x + w],
+            (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+            interpolation=cv2.INTER_LANCZOS4)
+        canvas = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+        ox = max(0, (out_w - resized.shape[1]) // 2)
+        oy = max(0, (out_h - resized.shape[0]) // 2)
+        canvas[oy:oy + resized.shape[0], ox:ox + resized.shape[1]] = resized
+        return canvas
     return cv2.resize(frame[y:y + h, x:x + w], (out_w, out_h),
                       interpolation=cv2.INTER_LANCZOS4)
 

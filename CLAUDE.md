@@ -255,8 +255,7 @@ GPU pieces that were silently wrong and are now deterministic:
 - **4:3 WIDE shots** — the owner-approved "show everyone" framing: moments
   with no confident subject (reaction / unbound speaker / "both people are
   relevant") render as a 4:3 crop of the source, letterboxed into the 9:16
-  frame (fit-width, black bars top/bottom). When faces are known the crop
-  ZOOMS to them (no tiny-people dead space). Far-apart pairs the camera can
+  frame (fit-width, black bars top/bottom). Far-apart pairs the camera can
   still capture in one 4:3 crop get the wide instead of a split; only
   people too far apart for even that become the vertical split. It only
   ever appears in those moments — never as the default framing.
