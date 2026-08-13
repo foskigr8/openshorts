@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, LayoutDashboard, Settings, Plus, History, X, Shield, LayoutGrid, Image, Globe, Calendar, AlertTriangle, KeyRound, Bot, Loader2, Download, Search, Flame, TrendingUp, ChevronRight, Film, HardDrive } from 'lucide-react';
+import { Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, LayoutDashboard, Settings, Plus, History, X, Shield, LayoutGrid, Image, Globe, Calendar, AlertTriangle, KeyRound, Bot, Loader2, Download, Search, Flame, TrendingUp, ChevronRight, ChevronLeft, Film, HardDrive } from 'lucide-react';
 import KeyInput from './components/KeyInput';
 import KeyListInput from './components/KeyListInput';
+import Sidebar from './components/Sidebar';
 import ProjectLauncher from './components/project/ProjectLauncher';
 import StoragePanel from './components/StoragePanel';
 import ClipRow from './components/project/ClipRow';
-import CollapsiblePanel from './components/ui/CollapsiblePanel';
+import CollapsiblePanel, { usePanelState } from './components/ui/CollapsiblePanel';
 import ResultCard from './components/ResultCard';
 import ProcessingAnimation from './components/ProcessingAnimation';
 import ClipSlotPlaceholder from './components/ClipSlotPlaceholder';
@@ -283,6 +284,7 @@ function App() {
   const [startError, setStartError] = useState('');
   // Which clip is open as a full editor card while the job is still running.
   const [expandedClip, setExpandedClip] = useState(null);
+  const [navOpen, toggleNav] = usePanelState('nav', false);
   // Bulk subtitles: apply one style to every clip of the job (triggered from
   // within a clip's subtitle modal via "apply to all").
   const [bulkSub, setBulkSub] = useState({ running: false, current: 0, total: 0, errors: 0 });
@@ -744,138 +746,19 @@ function App() {
 
   // --- UI Components ---
 
-  const Sidebar = () => {
-    // Five destinations, no ordinals. The numbering ("01 · CLIP GENERATOR")
-    // told the user nothing they could not read from the label itself, and
-    // the tools that were never used (AI Shorts, AI Agent, UGC Gallery) are
-    // gone — their backend endpoints are untouched.
-    const navItems = [
-      { id: 'dashboard', icon: LayoutDashboard, label: 'Projects' },
-      { id: 'thumbnails', icon: Image, label: 'YouTube Studio' },
-      // Sources are disk-backed like history — visible on self-host always,
-      // behind sign-in in cloud mode.
-      ...(!billingEnabled || isSignedIn ? [{ id: 'sources', icon: HardDrive, label: 'Sources' }] : []),
-      // History must be reachable on self-host too: /api/history is disk-backed
-      // and works without sign-in, so the tab was hidden exactly when the user
-      // needed it most ("my projects disappeared" was this, not data loss).
-      // Cloud mode still gates it behind sign-in (R2 library is per-account).
-      ...(!billingEnabled || isSignedIn ? [{ id: 'history', icon: History, label: 'History' }] : []),
-      { id: 'settings', icon: Settings, label: 'Settings' },
-    ];
-
-    return (
-      <div className="w-20 lg:w-64 bg-paper2 border-r border-rule flex flex-col h-full shrink-0 transition-all duration-300">
-        <div className="p-6 flex items-center gap-3">
-          <div className="w-8 h-8 bg-paper3 rounded-input flex items-center justify-center shrink-0 overflow-hidden border border-rule">
-            <img src={BRAND.logo} alt="" className="w-full h-full object-cover" />
-          </div>
-          <span className="font-display lowercase text-lg text-ink hidden lg:block">{BRAND.name}</span>
-        </div>
-
-        {/* New Project CTA (reference sidebar) */}
-        <div className="px-4 pb-3">
-          <button
-            onClick={() => { setActiveTab('dashboard'); handleReset(); }}
-            className="w-full flex items-center justify-center gap-2 py-2.5 rounded-input text-sm font-medium text-white transition-all hover:brightness-110"
-            style={{
-              background: 'var(--grad-accent)',
-              boxShadow: '0 1px 0 rgba(255,255,255,0.18) inset, var(--shadow-glow)',
-            }}
-          >
-            <Plus size={16} /> <span className="hidden lg:inline">New Project</span>
-          </button>
-        </div>
-
-        <nav className="flex-1 px-4 py-4 space-y-1">
-          {navItems.map((item) => {
-            const NavIcon = item.icon;
-            const isActive = activeTab === item.id;
-            return (
-              <button
-                key={item.id}
-                onClick={() => setActiveTab(item.id)}
-                className={`relative w-full flex items-center gap-3 px-3 py-2.5 rounded-input transition-all ${isActive ? 'text-ink' : 'text-muted hover:text-ink2 hover:bg-paper3/50'}`}
-                style={isActive ? {
-                  background: 'linear-gradient(90deg, rgba(239,68,68,0.18) 0%, rgba(239,68,68,0.04) 65%, transparent 100%)',
-                  boxShadow: 'inset 0 0 0 1px rgba(239,68,68,0.16)',
-                } : undefined}
-              >
-                {isActive && (
-                  <span
-                    className="absolute left-0 top-1.5 bottom-1.5 w-[3px] rounded-full"
-                    style={{ background: 'var(--color-accent)', boxShadow: '0 0 8px var(--color-glow)' }}
-                    aria-hidden="true"
-                  />
-                )}
-                <NavIcon size={18} className={`shrink-0 ${isActive ? 'text-brass glow-accent' : ''}`} />
-                <span className="text-sm hidden lg:block flex-1 text-left truncate">{item.label}</span>
-              </button>
-            );
-          })}
-        </nav>
-
-        {/* Today mini-stats (reference sidebar) */}
-        <div className="px-4 pb-4">
-          <div className="card p-3.5">
-            <div className="flex items-center justify-between mb-2.5">
-              <p className="readout text-[10px] uppercase tracking-wider text-muted">today</p>
-              <Flame size={13} className="text-brass glow-accent" />
-            </div>
-            <div className="space-y-2">
-              {[
-                { icon: LayoutGrid, label: 'shorts generated', value: todayStats.generated, tone: 'text-ink' },
-                {
-                  icon: Loader2,
-                  label: 'processing',
-                  // Reconciled with the job this tab is actually running: a job
-                  // visible in the main panel must never coexist with a "0
-                  // processing" sidebar, even in the window before the backend
-                  // history has caught up.
-                  value: Math.max(todayStats.processing, liveCount),
-                  tone: 'text-brass',
-                  spin: liveCount > 0,
-                },
-                { icon: TrendingUp, label: 'success rate', value: `${todayStats.successRate}%`, tone: 'text-ok' },
-              ].map((s) => {
-                const SIcon = s.icon;
-                return (
-                  <div key={s.label} className="flex items-center gap-2">
-                    <SIcon size={13} className={`shrink-0 ${s.tone === 'text-ink' ? 'text-muted' : s.tone} ${s.spin ? 'animate-spin' : ''}`} />
-                    <span className="text-[11px] lowercase text-muted flex-1 truncate hidden lg:block">{s.label}</span>
-                    {/* Never show a static 0 that could be mistaken for a real
-                        count while the first fetch is still in flight. */}
-                    {todayStats.loaded ? (
-                      <span className={`text-xs font-semibold ${s.tone}`}>{s.value}</span>
-                    ) : (
-                      <span className="inline-block w-6 h-3 rounded bg-paper3 animate-pulse" />
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-
-        {/* Footer: no landing page, no upstream repo link, no support address
-            for somebody else's product. Only what this workspace owns. */}
-        <div className="p-4 border-t border-rule space-y-1">
-          {billingEnabled && (
-            <a
-              href="#/pricing"
-              className="flex items-center gap-2 px-3 py-1.5 text-xs lowercase text-muted hover:text-ink2 transition-colors"
-            >
-              <span className="icon-chip-muted !w-6 !h-6 shrink-0"><Sparkles size={13} /></span>
-              <span className="hidden lg:block truncate">plans &amp; pricing</span>
-            </a>
-          )}
-        </div>
-      </div>
-    );
-  };
-
   return (
     <div className="flex h-screen bg-paper overflow-hidden">
-      <Sidebar />
+      <Sidebar
+        activeTab={activeTab}
+        onSelect={setActiveTab}
+        onNewProject={() => { setActiveTab('dashboard'); handleReset(); }}
+        billingEnabled={billingEnabled}
+        isSignedIn={isSignedIn}
+        todayStats={todayStats}
+        liveCount={liveCount}
+        open={navOpen}
+        onToggle={toggleNav}
+      />
 
       <main className="flex-1 flex flex-col h-full overflow-hidden relative">
         {/* Top Header */}
@@ -1266,10 +1149,6 @@ function App() {
           {/* View: no project open — the launcher */}
           {activeTab === 'dashboard' && !hasProject && (
             <div className="flex h-full min-h-0">
-              {/* No side panel on arrival. The launcher already shows every
-                  project as a tile — a second list of the same thing, open by
-                  default, was clutter on the one screen that should feel
-                  calm. The rail belongs to the workspace, not the doorway. */}
               <div className="flex-1 min-w-0 flex flex-col animate-fade">
                 <ProjectLauncher
                   projects={railProjects}
@@ -1279,6 +1158,16 @@ function App() {
                   error={startError}
                 />
               </div>
+              {/* Folded to its spine here rather than removed: closed on
+                  arrival is the point, but there still has to be a way to
+                  reach your library from the home screen. */}
+              <HomeRail
+                onViewAll={() => setActiveTab("history")}
+                search={historySearch}
+                onOpenProject={handleOpenProject}
+                projects={railProjects}
+                activeId={jobId}
+              />
             </div>
           )}
 

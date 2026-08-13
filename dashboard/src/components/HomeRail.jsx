@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Film, ChevronRight, ChevronLeft, HardDrive, Play, X, Clock, Database, Trash2, FolderOpen, Loader2, PanelRightClose } from 'lucide-react';
+import { Film, ChevronRight, ChevronLeft, HardDrive, Play, X, Clock, Database, Trash2, FolderOpen, Loader2, PanelRightClose, PanelRightOpen } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import { pauseAllOtherPlayers, registerPlayer } from '../lib/playerSync';
 import ProgressRing from './ProgressRing';
@@ -200,25 +200,42 @@ export default function HomeRail({ onViewAll, search = '', projects = [], active
   // workspace gets the width, and the choice survives a reload.
   if (!railOpen) {
     const running = merged.filter((v) => v.status === 'processing').length;
+    const done = merged.length - running;
     return (
-      <aside className="w-11 shrink-0 h-full border-l border-rule bg-paper2 flex flex-col items-center py-4 gap-3">
+      <aside className="w-12 shrink-0 h-full border-l border-rule bg-paper2 flex flex-col items-center py-3 gap-3">
         <button
           onClick={toggleRail}
-          className="p-2 rounded-lg text-muted hover:text-ink hover:bg-paper3 transition-colors"
-          title="show projects"
-          aria-label="show projects"
+          className="w-9 h-9 rounded-lg border border-rule text-muted hover:text-ink hover:border-rule2
+                     hover:bg-paper3 transition-colors flex items-center justify-center relative"
+          title="open your library"
+          aria-label="open your library"
         >
-          <ChevronLeft size={16} />
+          <PanelRightOpen size={16} />
+          {running > 0 && (
+            <span
+              className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-brass"
+              style={{ boxShadow: '0 0 8px var(--color-glow)' }}
+            />
+          )}
         </button>
-        <span
-          className="readout text-[9px] uppercase tracking-[0.2em] text-muted whitespace-nowrap"
-          style={{ writingMode: 'vertical-rl' }}
+        <button
+          onClick={toggleRail}
+          className="flex-1 flex flex-col items-center gap-3 group"
+          title="open your library"
         >
-          projects
-        </span>
-        {running > 0 && (
-          <span className="w-2 h-2 rounded-full bg-brass" style={{ boxShadow: '0 0 8px var(--color-glow)' }} />
-        )}
+          <span
+            className="readout text-[9px] uppercase tracking-[0.22em] text-muted group-hover:text-ink2
+                       transition-colors whitespace-nowrap"
+            style={{ writingMode: 'vertical-rl' }}
+          >
+            library
+          </span>
+          {(running > 0 || done > 0) && (
+            <span className="readout text-[9px] text-muted tabular-nums" style={{ writingMode: 'vertical-rl' }}>
+              {running > 0 ? `${running} running` : `${done}`}
+            </span>
+          )}
+        </button>
       </aside>
     );
   }
