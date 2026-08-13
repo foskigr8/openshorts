@@ -313,6 +313,27 @@ def per_second_active_track(per_second_speaker: List[Optional[str]],
     return out
 
 
+def active_from_identity_map(per_second_speaker: List[Optional[str]],
+                             identity_map: Dict[str, int],
+                             ) -> List[Optional[int]]:
+    """ASR-first active track: the diarized transcript decides WHO, and the
+    confirmed identity map decides WHICH FACE.
+
+    This is the director-v2 path: once a speaker label has been mapped to a
+    face track (Gemini confirmation, see identity_confirm.py), each second's
+    active track is simply that label's confirmed track — no LR-ASD
+    per-second voting, no host-default. Seconds whose label is unconfirmed
+    (absent from the map) are None: the caller must NOT guess — wide/hold.
+    """
+    out = []
+    for i, label in enumerate(per_second_speaker):
+        if label is not None and label in identity_map:
+            out.append(identity_map[label])
+        else:
+            out.append(None)
+    return out
+
+
 def apply_gated_rebinding(per_second_speaker: List[Optional[str]],
                           predicted_track_ps: List[Optional[int]],
                           bindings: Dict[str, int],

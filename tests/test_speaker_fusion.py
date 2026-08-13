@@ -60,6 +60,23 @@ def test_does_not_bind_below_min_seconds():
     assert "A" not in bindings
 
 
+class TestActiveFromIdentityMap:
+    def test_confirmed_labels_map_to_their_tracks(self):
+        speaker = ["A", "A", "B", None, "C"]
+        mapping = {"A": 3, "B": 7}
+        assert sf.active_from_identity_map(speaker, mapping) == [3, 3, 7, None, None]
+
+    def test_unconfirmed_labels_are_none_not_guessed(self):
+        # Director v2 rule: an unmapped speaker must never default to a
+        # track (no host-default) — None sends the caller to wide/hold.
+        speaker = ["A", "C", "C"]
+        mapping = {"A": 1}
+        assert sf.active_from_identity_map(speaker, mapping) == [1, None, None]
+
+    def test_empty_map_yields_all_none(self):
+        assert sf.active_from_identity_map(["A", "B"], {}) == [None, None]
+
+
 # ---------------------------------------------------------------------------
 # decisive_seconds — throwing out the coin-flip seconds before they vote
 # ---------------------------------------------------------------------------

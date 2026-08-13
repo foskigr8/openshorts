@@ -202,6 +202,15 @@ GPU pieces that were silently wrong and are now deterministic:
   with the current binding decays the case, so a one-second blip — or an
   alternating, ambiguous signal — can never trigger it.
   `SPEAKER_REBIND_SECONDS=0` disables re-binding entirely.
+- `IDENTITY_CONFIRM` — director v2's Gemini face-identity confirmation
+  (default `1`): after each clip's face spine, Gemini receives labeled face
+  crops + the diarized transcript and returns the speaker->face map
+  (`identity_confirm.py`). When it lands, framing is **ASR-first** — the
+  transcript decides WHO, the map decides WHICH FACE, and unmapped speakers
+  go wide/hold instead of defaulting to a wrong face (no host-default).
+  Fail-open: any error falls back to the LR-ASD fusion unchanged.
+  `IDENTITY_CONFIRM_MODEL` picks the model (default `GEMINI_MODEL` /
+  `gemini-3.1-flash-lite`); `IDENTITY_CONFIRM=0` disables.
 
 ## Dashboard ordering & data files
 

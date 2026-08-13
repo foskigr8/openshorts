@@ -1139,14 +1139,35 @@ def render(input_video, final_output_video, aspect_ratio,
     except Exception as exc:
         print(f"   ⚠️ LR-ASD unavailable for v3 ({type(exc).__name__}: {exc})")
     segments = (transcript or {}).get("segments", [])
-    _, active = speaker_fusion.fuse_speaker_tracks(
-        asd_boxes, tracks, segments, clip_start, effective_end,
-        smooth_window=int(os.environ.get("SPEAKER_SMOOTH_WINDOW", "3")),
-        asd_per_second_margin=asd_margins,
-        decisive_margin=float(os.environ.get("ASD_DECISIVE_MARGIN", "0.10")),
-        rebind_seconds=int(os.environ.get("SPEAKER_REBIND_SECONDS", "4")),
-        rebind_window=int(os.environ.get("SPEAKER_REBIND_WINDOW", "8")))
-    if not any(track is not None for track in active):
+    # Director v2 (ASR-first): when Gemini confirms the speaker->face map for
+    # this clip, the diarized transcript decides WHO and the map decides
+    # WHICH FACE — no per-second LR-ASD voting. Fail-open: on any error the
+    # LR-ASD fusion below runs exactly as before.
+    _identity_map = None
+    if any(seg.get("speaker") for seg in segments):
+        try:
+            import identity_confirm
+            _identity_map = identity_confirm.confirm_clip_identities(
+                input_video, tracks, segments, clip_start, effective_end)
+        except Exception as exc:
+            print(f"   ⚠️ Identity confirmation failed "
+                  f"({type(exc).__name__}: {exc})")
+    if _identity_map:
+        _speaker_ps = speaker_fusion.per_second_speaker_label(
+            segments, clip_start, effective_end)
+        active = speaker_fusion.active_from_identity_map(
+            _speaker_ps, _identity_map)
+        print(f"   ↳ ASR-first binding ({len(_identity_map)} confirmed "
+              "speaker(s))")
+    else:
+        _, active = speaker_fusion.fuse_speaker_tracks(
+            asd_boxes, tracks, segments, clip_start, effective_end,
+            smooth_window=int(os.environ.get("SPEAKER_SMOOTH_WINDOW", "3")),
+            asd_per_second_margin=asd_margins,
+            decisive_margin=float(os.environ.get("ASD_DECISIVE_MARGIN", "0.10")),
+            rebind_seconds=int(os.environ.get("SPEAKER_REBIND_SECONDS", "4")),
+            rebind_window=int(os.environ.get("SPEAKER_REBIND_WINDOW", "8")))
+    if _identity_map is None and not any(track is not None for track in active):
         # A transcript/ASD gap must not turn a known person into an untracked
         # full-frame crop. Prefer the scene context's key subject when it
         # names one; otherwise hold the most continuously observed identity.
