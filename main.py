@@ -1995,6 +1995,15 @@ if __name__ == '__main__':
             else:
                 output_dir = "."
 
+        # Publish a progress snapshot BEFORE the download starts. Until this
+        # existed, progress.json only appeared once the source had landed, so
+        # for the whole download (minutes on a long video) the dashboard's
+        # history scan saw a job dir with no metadata and no progress and
+        # reported the running job as FAILED.
+        _write_progress(output_dir, "download",
+                        note="fetching the source video",
+                        step="fetching the source video", step_pct=0)
+
         # Per-source persistent reuse (source_store.py): a URL we have seen
         # before skips the download entirely — the source video is hardlinked
         # from the cache, and the transcript + context blob ride along.
@@ -2109,6 +2118,21 @@ if __name__ == '__main__':
                 print(f"ℹ️  Context blob not ready in time "
                       f"(waited {_ctx_wait:.0f}s) — the picker runs "
                       "transcript-only; the count is still fulfilled.")
+        # The video-link (from_uri) tier is quota-exhausted long before the
+        # text tier (confirmed: 4 keys all 429 on the video call while the
+        # picker's text calls work). When the video brain didn't land, build
+        # the same 3-part blob from the transcript with a plain-text call so
+        # the picker still gets context.
+        if context_blob is None and transcript is not None and args.url:
+            try:
+                context_blob = context_layer.build_context_from_transcript(
+                    transcript, source_url=args.url,
+                    source_title=video_title)
+                if context_blob:
+                    source_store.save_context(args.url, context_blob)
+            except Exception as e:
+                print(f"   ⚠️ Transcript context fallback failed "
+                      f"({type(e).__name__}: {e})")
 
         # 4. Gemini Analysis (transcript-driven, or vision for silent videos)
         _write_progress(output_dir, "analyze", note="finding the viral moments",

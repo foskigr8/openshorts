@@ -313,6 +313,84 @@
   50% { opacity: 0.86; }
 }
 
+/* --- Scanning overlay -------------------------------------------------
+   What "we are working on this footage" looks like ON TOP of the footage:
+   a travelling band plus its bright leading edge, over a faint grid. The
+   video underneath stays fully visible — the point is to watch the source
+   while it is being analysed, not to dim it behind a badge. */
+.scan-fx {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.scan-fx::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  opacity: 0.16;
+  background-image:
+    repeating-linear-gradient(0deg, transparent 0 22px, rgba(255, 255, 255, 0.5) 22px 23px),
+    repeating-linear-gradient(90deg, transparent 0 22px, rgba(255, 255, 255, 0.5) 22px 23px);
+}
+
+.scan-fx .scan-band {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 26%;
+  top: -20%;
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    color-mix(in oklab, var(--color-accent) 26%, transparent) 60%,
+    color-mix(in oklab, var(--color-accent) 44%, transparent) 100%
+  );
+  animation: scan-overlay 2.8s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+.scan-fx .scan-edge {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  top: 0;
+  background: linear-gradient(90deg, transparent, var(--color-accent), transparent);
+  box-shadow: 0 0 14px var(--color-glow);
+  animation: scan 2.8s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+.scan-corner {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border: 2px solid color-mix(in oklab, var(--color-accent) 70%, transparent);
+  opacity: 0.85;
+}
+
+/* --- Stage visuals ---------------------------------------------------- */
+@keyframes eq-bounce {
+  0%, 100% { transform: scaleY(0.25); }
+  50% { transform: scaleY(1); }
+}
+
+@keyframes drop-in {
+  0% { transform: translateY(-140%); opacity: 0; }
+  25% { opacity: 1; }
+  70% { transform: translateY(0); opacity: 1; }
+  100% { transform: translateY(0); opacity: 0.15; }
+}
+
+@keyframes strip-slide {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+@keyframes orbit-dash {
+  to { stroke-dashoffset: -220; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;

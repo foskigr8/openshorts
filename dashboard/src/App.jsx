@@ -10,7 +10,6 @@ import SystemStatusStrip from './components/SystemStatusStrip';
 import StageTracker from './components/StageTracker';
 import HomeRail from './components/HomeRail';
 import TelemetryGrid from './components/TelemetryGrid';
-import FloatingInputBar from './components/FloatingInputBar';
 import SourcePanel from './components/SourcePanel';
 // import Gallery from './components/Gallery';
 import ThumbnailStudio from './components/ThumbnailStudio';
@@ -30,6 +29,8 @@ import ProfileMenu from './components/ProfileMenu';
 import Modal from './components/ui/Modal';
 import { useAuth } from './contexts/AuthContext';
 import { apiFetch, apiJson, QuotaError } from './lib/api';
+import { clearCompareClip, setCompareClip, subscribeSourceSync } from './lib/sourceSync';
+import { getApiUrl } from './config';
 
 // Enhanced "Encryption" using XOR + Base64 with a Salt
 // This is better than plain Base64 but still client-side.
@@ -307,19 +308,35 @@ function App() {
   const [falSaved, setFalSaved] = useState(false);
   const [assemblyaiSaved, setAssemblyaiSaved] = useState(false);
 
-  // Sync state for original video playback
-  const [syncedTime, setSyncedTime] = useState(0);
-  const [isSyncedPlaying, setIsSyncedPlaying] = useState(false);
-  const [syncTrigger, setSyncTrigger] = useState(0);
+  // Clip → source playback sync lives in lib/sourceSync.js, not in App
+  // state: the playing clip publishes its position several times a second,
+  // and routing that through a top-level setState re-rendered every result
+  // card on every tick. The preview panel subscribes to the bus directly.
 
-  const handleClipPlay = (startTime) => {
-    setSyncedTime(startTime);
-    setIsSyncedPlaying(true);
-    setSyncTrigger(prev => prev + 1);
-  };
-
-  const handleClipPause = () => {
-    setIsSyncedPlaying(false);
+  // A clip picked from the right rail opens BIG next to the source preview
+  // instead of playing inside a 200px card. When it belongs to the job on
+  // screen we also know its offset in the source, so the two play in step.
+  const [comparedId, setComparedId] = useState(null);
+  // The bus is the single source of truth for what is being compared, so
+  // closing the pane from the preview panel un-highlights the rail row too.
+  useEffect(() => subscribeSourceSync((s) => setComparedId(s.clip?.id ?? null)), []);
+  const handleCompareClip = (v) => {
+    if (!v?.view_url) return;
+    if (comparedId === v.id) {          // clicking it again closes it
+      clearCompareClip();
+      return;
+    }
+    const index = Number(String(v.id).split('_').pop());
+    const own = v.job_id === jobId ? results?.clips?.[index] : null;
+    setCompareClip({
+      id: v.id,
+      url: getApiUrl(v.view_url),
+      title: v.title || 'clip',
+      // Only a clip of the job on screen can drive the source: for any other
+      // job the preview is a different video entirely, so it just plays
+      // alongside rather than pretending to be in sync.
+      start: own?.start ?? null,
+    });
   };
 
   // --- Project persistence (paid mode) ---
@@ -364,7 +381,13 @@ function App() {
     setJobId(data.job_id);
     setResults(data.result || null);
     setLogs(['♻️ Project restored from your library.']);
-    setProcessingMedia(null);
+    // Point the preview at the job's source so a reopened project can still
+    // be compared against the original. The panel degrades gracefully to
+    // "source no longer on disk" when the file really is gone, which is far
+    // better than reopening into an empty frame.
+    setProcessingMedia({ type: 'server', payload: `/api/source/${data.job_id}` });
+    clearCompareClip();
+    setComparedId(null);
     setQualityGate(null);
     setStatus('complete');
     setActiveTab('dashboard');
@@ -942,6 +965,8 @@ function App() {
     setProcessingMedia(null);
     setProjectState(null);
     setNoSource(false);
+    clearCompareClip();
+    setComparedId(null);
     localStorage.removeItem(SESSION_KEY);
   };
 
@@ -1823,9 +1848,6 @@ function App() {
                   <ProcessingAnimation
                     media={processingMedia}
                     isComplete={status === 'complete'}
-                    syncedTime={syncedTime}
-                    isSyncedPlaying={isSyncedPlaying}
-                    syncTrigger={syncTrigger}
                     status={status}
                     progress={progress}
                     title={
@@ -1842,7 +1864,6 @@ function App() {
                       auto: 'auto',
                     }[submittedFormat] || submittedFormat}
                     onCancel={status === 'processing' ? handleCancelJob : null}
-                    logs={logs}
                   />
                 )}
 
@@ -1972,8 +1993,6 @@ function App() {
                                 isManaged={isManaged}
                                 connectedPlatforms={(userProfiles.find((p) => p.username === uploadUserId) || userProfiles[0])?.connected ?? null}
                                 onConnectSocials={isManaged ? handleConnectSocials : null}
-                                onPlay={(time) => handleClipPlay(time)}
-                                onPause={handleClipPause}
                                 onBulkSubtitle={handleBulkSubtitles}
                                 clipCount={readyCount}
                                 bulkProgress={bulkSub}
@@ -2068,24 +2087,24 @@ function App() {
                     stageDurations={stageDurations}
                     speedMultiplier={progress?.speed_multiplier ?? null}
                     currentStage={progress?.stage ?? null}
+                    progress={progress}
                   />
                 </div>
 
               </div>
 
-                {/* Queue-another-video bar, only while a job is actually
-                    running. Once the job is finished or failed the work on this
-                    screen is reviewing the result, and a persistent "generate"
-                    field at the bottom just competes with that — New Project in
-                    the sidebar is the real entry point for the next run. */}
-                {status === 'processing' && (
-                  <FloatingInputBar onProcess={handleProcess} isProcessing />
-                )}
+                {/* No paste-a-link bar on this screen. While a job runs the
+                    only thing that matters here is watching it; queueing the
+                    next video is what New Project in the sidebar is for, and
+                    the bar was costing a strip of vertical space on every
+                    run. (Removed at the owner's request, 13-aug-2026.) */}
               </div>
               <HomeRail
                 onViewAll={() => setActiveTab("history")}
                 search={historySearch}
                 onOpenProject={openProject}
+                onCompare={handleCompareClip}
+                comparedId={comparedId}
                 activeJob={jobId ? {
                   id: jobId,
                   status,

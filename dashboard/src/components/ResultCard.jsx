@@ -11,6 +11,7 @@ import WatermarkModal, { watermarkNoticeDismissed } from './WatermarkModal';
 import { useAuth } from '../contexts/AuthContext';
 import { renderInBrowser } from '../lib/renderInBrowser';
 import { pauseAllOtherPlayers, registerPlayer } from '../lib/playerSync';
+import { sourceSyncPlay, sourceSyncTime, sourceSyncStop } from '../lib/sourceSync';
 
 const QUIET_BTN = 'group flex flex-col items-center justify-center gap-1 py-2 px-1 rounded-input border border-rule hover:bg-paper3 text-[11px] lowercase text-ink2 whitespace-nowrap transition-colors disabled:opacity-45 disabled:cursor-not-allowed';
 
@@ -36,12 +37,21 @@ export default function ResultCard({ clip, index, jobId, durableUrl, uploadPostK
     // Register this clip's <video> so any other card's play() can pause it
     // (singleton audio across the grid). Deregisters on unmount.
     React.useEffect(() => registerPlayer(videoRef.current), []);
+    // This card's identity on the source-sync bus. Only the clip that started
+    // the sync may stop it, so clip B taking over no longer gets switched off
+    // an instant later by clip A's own pause event.
+    const syncOwner = `${jobId}:${index}`;
+    const sourceTime = (el) => (clip.start || 0) + (el?.currentTime || 0);
     // Claim exclusive playback: pausing every OTHER mounted result clip first
-    // is what stops two unmuted videos playing at once (item 2).
+    // is what stops two unmuted videos playing at once (item 2). The muted
+    // source preview is deliberately not in that registry — it must keep
+    // rolling alongside this clip.
     const handlePlay = () => {
         pauseAllOtherPlayers(videoRef.current);
-        const currentTime = videoRef.current ? videoRef.current.currentTime : 0;
-        onPlay && onPlay(clip.start + currentTime);
+        // No compare pane for this one: the card IS on screen already, so
+        // duplicating it next to the source would just play it twice.
+        sourceSyncPlay(syncOwner, sourceTime(videoRef.current), null);
+        onPlay && onPlay(clip.start + (videoRef.current?.currentTime || 0));
     };
     // Pristine base clip (no burned subtitles/hook), stable regardless of how
     // clip.video_url mutates after server edits. Used as the compositing base
@@ -637,15 +647,20 @@ export default function ResultCard({ clip, index, jobId, durableUrl, uploadPostK
                         if (durableUrl && currentVideoUrl !== durableUrl) setCurrentVideoUrl(durableUrl);
                         else setVideoErrored(true);
                     }}
-                    onPlay={() => {
-                        handlePlay();
+                    onPlay={handlePlay}
+                    onSeeked={(e) => {
+                        // Scrubbing the clip re-seeks the source with it.
+                        if (!e.currentTarget.paused) handlePlay();
                     }}
+                    onTimeUpdate={(e) => sourceSyncTime(syncOwner, sourceTime(e.currentTarget))}
                     onPause={() => {
+                        sourceSyncStop(syncOwner);
                         onPause && onPause();
                     }}
                     onEnded={() => {
                         // Clean stop: no silent infinite loop. Ending a clip
                         // also stops the synced source-preview playback.
+                        sourceSyncStop(syncOwner);
                         onPause && onPause();
                     }}
                 />

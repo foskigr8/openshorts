@@ -263,7 +263,11 @@ export default function HistoryTab({ onReopenProject, search = '' }) {
                   >
                     <span className="icon-chip-muted !w-6 !h-6"><Download size={13} /></span> logs
                   </a>
-                  {project && onReopenProject && (
+                  {/* Offered for every job, not only ones /api/projects
+                      happened to list: the restore endpoint is the thing that
+                      knows whether a project can come back, and hiding the
+                      button left jobs that WOULD restore with no way to try. */}
+                  {onReopenProject && (
                     <button
                       onClick={() => handleReopen(jobId)}
                       disabled={!!reopening}
@@ -288,6 +292,11 @@ export default function HistoryTab({ onReopenProject, search = '' }) {
                 </div>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-5">
+                {/* A job with no playable clip contributes ONE placeholder
+                    row, not a grid of "failed · no clips" tiles — and while
+                    it is still running that placeholder says so. Rows whose
+                    only content was a data file never reach here at all
+                    (the backend stopped emitting them as videos). */}
                 {vids.map((v, vi) => (
                   <div key={v.id} className="card card-hover overflow-hidden group">
                     {v.view_url ? (
@@ -304,14 +313,14 @@ export default function HistoryTab({ onReopenProject, search = '' }) {
                       </div>
                     ) : v.status === 'processing' || vids[0]?.status === 'processing' ? (
                       <div className="aspect-[9/16] bg-paper3 flex flex-col items-center justify-center gap-2 text-brass relative overflow-hidden">
-                        <div className="absolute inset-0 bg-gradient-to-b from-brass/5 via-brass/20 to-brass/5 animate-pulse" />
+                        <div className="scan-fx"><span className="scan-band" /><span className="scan-edge" /></div>
                         <Loader2 size={24} className="animate-spin relative z-10 text-brass" />
-                        <span className="readout text-[10px] uppercase relative z-10 text-ink">rendering clip…</span>
+                        <span className="readout text-[10px] uppercase relative z-10 text-ink">working…</span>
                       </div>
                     ) : (
-                      <div className="aspect-[9/16] bg-paper3 flex flex-col items-center justify-center gap-2 text-muted">
+                      <div className="aspect-[9/16] bg-paper3 flex flex-col items-center justify-center gap-2 text-muted px-3 text-center">
                         <AlertTriangle size={22} />
-                        <span className="readout text-[10px] uppercase">failed · no clips</span>
+                        <span className="readout text-[10px] uppercase">no clips produced</span>
                       </div>
                     )}
                     <div className="p-3">

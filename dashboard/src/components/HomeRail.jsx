@@ -48,7 +48,7 @@ function StatusRing({ status, pct = null }) {
   );
 }
 
-export default function HomeRail({ onViewAll, search = '', activeJob = null, onOpenProject = null }) {
+export default function HomeRail({ onViewAll, search = '', activeJob = null, onOpenProject = null, onCompare = null, comparedId = null }) {
   const [videos, setVideos] = useState(null);
   const [storage, setStorage] = useState(null);
   const [filter, setFilter] = useState('all');
@@ -138,16 +138,30 @@ export default function HomeRail({ onViewAll, search = '', activeJob = null, onO
       : activeJob.status === 'error' || activeJob.status === 'cancelled' ? 'failed'
         : 'processing')
     : null;
-  const merged = activeJob && !fetched.some((v) => v.id === activeJob.id)
+  // History rows carry ids like "<job_id>_3", so matching them against the
+  // job id itself never hit — the running job was pinned at the top a SECOND
+  // time next to its own disk entry, and the disk entry's stale status (a
+  // job mid-download has no metadata yet) is what made a live run read as
+  // "Failed" in this panel. Match on job_id, and let the locally-known
+  // status win for every row of the job this tab is running.
+  const ofActiveJob = (v) => activeJob && v.job_id === activeJob.id;
+  const reconciled = fetched.map((v) => (
+    ofActiveJob(v) && activeStatus === 'processing' && v.status !== 'completed'
+      ? { ...v, status: 'processing' }
+      : ofActiveJob(v) && activeStatus === 'failed' && v.status === 'processing'
+        ? { ...v, status: 'failed' }
+        : v));
+  const merged = activeJob && !reconciled.some(ofActiveJob)
     ? [{
       id: activeJob.id,
+      job_id: activeJob.id,
       title: activeJob.title || 'New project',
       status: activeStatus,
       pct: activeJob.pct,
       pending: true,
       created_at: new Date().toISOString(),
-    }, ...fetched]
-    : fetched;
+    }, ...reconciled]
+    : reconciled;
 
   const shown = merged
     .filter((v) => filter === 'all' || (v.status || 'completed') === filter)
@@ -191,19 +205,24 @@ export default function HomeRail({ onViewAll, search = '', activeJob = null, onO
           </div>
         ) : (
           shown.map((v) => {
-            const isPlaying = playingId === v.id;
+            // With a preview panel on screen, a clip opens THERE — big, next
+            // to the 16:9 source, which is the comparison the rail's ~200px
+            // card could never give. Without one (the home view) it still
+            // expands and plays in place.
+            const isPlaying = !onCompare && playingId === v.id;
+            const isCompared = !!onCompare && comparedId === v.id;
             return (
               <div
                 key={v.id}
                 ref={(el) => { itemRefs.current[v.id] = el; }}
                 className={`group rounded-input border overflow-hidden transition-all duration-200 ${
-                  isPlaying
+                  isPlaying || isCompared
                     ? 'border-brass/60'
                     : 'border-rule hover:border-[color:color-mix(in_oklab,var(--color-accent)_35%,var(--color-rule-2))] hover:-translate-y-0.5'
                 }`}
                 style={{
                   background: 'linear-gradient(180deg, rgba(255,255,255,0.035) 0%, transparent 42%), var(--color-paper)',
-                  boxShadow: isPlaying ? '0 0 0 1px rgba(239,68,68,0.10), 0 16px 40px -20px rgba(239,68,68,0.4)' : undefined,
+                  boxShadow: isPlaying || isCompared ? '0 0 0 1px rgba(239,68,68,0.10), 0 16px 40px -20px rgba(239,68,68,0.4)' : undefined,
                 }}
               >
                 {isPlaying ? (
@@ -242,7 +261,7 @@ export default function HomeRail({ onViewAll, search = '', activeJob = null, onO
                   </div>
                 ) : (
                   <button
-                    onClick={() => setPlayingId(v.id)}
+                    onClick={() => (onCompare ? onCompare(v) : setPlayingId(v.id))}
                     disabled={!v.view_url}
                     className="w-full flex items-center gap-3 p-3 text-left disabled:cursor-not-allowed"
                   >
@@ -276,6 +295,11 @@ export default function HomeRail({ onViewAll, search = '', activeJob = null, onO
                         {/* An unfinished job says so outright — a card that
                             shows only "AI Generated" and dashes reads as a
                             finished clip that lost its data. */}
+                        {isCompared && (
+                          <span className="px-1.5 py-px rounded border border-brass/50 bg-brass/15 text-[9px] readout text-brass">
+                            In preview
+                          </span>
+                        )}
                         {v.status === 'processing' ? (
                           <span className="px-1.5 py-px rounded border border-brass/40 bg-brass/10 text-[9px] readout text-brass">
                             Rendering…

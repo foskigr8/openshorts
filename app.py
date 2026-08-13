@@ -2276,20 +2276,51 @@ def _mark_job_created(job_path):
         pass
 
 
+def _metadata_created_at(job_path):
+    """The generation stamp main.py wrote into this job's metadata, or None.
+
+    This is the ONLY timestamp that survives a Kaggle session wipe intact:
+    metadata.json is backed up to HF storage with the job, so a restored job
+    carries its original date. Every filesystem-derived time (mtime, dir
+    mtime) is the RESTORE time on a fresh session, which is why History used
+    to show "now" for clips generated days earlier.
+    """
+    meta = _newest_metadata_file(job_path)
+    if not meta:
+        return None
+    try:
+        with open(meta) as f:
+            ts = float(json.load(f).get("created_at") or 0)
+        return ts if ts > 0 else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def _job_created_at(job_path):
     """When this job was actually generated, newest-first ordering aside.
 
-    Prefers the explicit marker. Falls back to the OLDEST file in the job
-    directory — the first thing the pipeline wrote, i.e. roughly when
-    generation began — because the directory's own mtime tracks the LAST
-    change to its contents, not the first.
+    Prefers the stamp inside metadata.json (the only one that rides along
+    through an HF restore), then the explicit marker. Falls back to the
+    OLDEST file in the job directory — the first thing the pipeline wrote,
+    i.e. roughly when generation began — because the directory's own mtime
+    tracks the LAST change to its contents, not the first.
 
     Self-healing: when the marker is missing (legacy job, or the marker was
-    never written), the computed oldest-file time is persisted back to the
-    marker so ordering stays STABLE — later file restores/touches (HF
-    re-downloads, thumbnail regen) must not keep shifting the job's place
-    in newest-first history.
+    never written), the computed time is persisted back to the marker so
+    ordering stays STABLE — later file restores/touches (HF re-downloads,
+    thumbnail regen) must not keep shifting the job's place in
+    newest-first history.
     """
+    meta_ts = _metadata_created_at(job_path)
+    if meta_ts:
+        try:
+            marker = os.path.join(job_path, _CREATED_MARKER)
+            if not os.path.exists(marker):
+                with open(marker, "w") as f:
+                    f.write(str(meta_ts))
+        except OSError:
+            pass
+        return meta_ts
     marker = os.path.join(job_path, _CREATED_MARKER)
     try:
         with open(marker) as f:
@@ -2524,6 +2555,38 @@ async def source_video(key: str):
     return FileResponse(path, media_type="video/mp4")
 
 
+def _live_job_status(job_id):
+    """"processing" while this job is queued/running in memory, else None.
+
+    The authoritative answer to "is this job still going". The disk scan
+    below cannot answer it during the first minutes of a run: progress.json
+    is only written once the download finishes, so a job that was mid-
+    download had no metadata AND no progress file and got reported as
+    FAILED while it was actively working (the "right panel says failed while
+    it's still processing" bug).
+    """
+    st = (jobs.get(job_id) or {}).get("status")
+    return "processing" if st in ("queued", "processing") else None
+
+
+# Data files must never title a project card, and must never be mistaken for
+# a video. A job whose only remaining files are these is a dead job, not a
+# "metadata.json" video.
+_DATA_FILE_SUFFIXES = (".json", ".ass", ".srt", ".txt", ".log", ".ready",
+                       ".owner", ".created", ".npy", ".vtt")
+
+
+def _clean_project_label(name):
+    """A human title for a job, or None — never a raw data filename."""
+    if not name:
+        return None
+    base = os.path.basename(str(name))
+    if base.lower().endswith(_DATA_FILE_SUFFIXES) or "metadata" in base.lower():
+        return None
+    stem = os.path.splitext(base)[0].replace(".f140-4", "").strip()
+    return stem or None
+
+
 @app.get("/api/history")
 async def list_history(request: Request):
     """Every clip still on disk, newest job first — the durable history view.
@@ -2573,6 +2636,10 @@ async def list_history(request: Request):
         if job_owner is not None and job_owner != owner:
             continue
 
+        # Beats every disk heuristic below: a job the server is actively
+        # running is "processing", full stop.
+        live_status = _live_job_status(job_id)
+
         # _newest_metadata_file also matches a plain metadata.json (PART 5.3:
         # what HF-restored jobs get downloaded as) — a raw "*_metadata.json"
         # glob here missed it, so a job whose clips were playing fine flipped
@@ -2582,6 +2649,19 @@ async def list_history(request: Request):
         # dir visible to os.listdir() for the first time (confirmed 7-aug-2026).
         _meta = _newest_metadata_file(job_path)
         json_files = [_meta] if _meta else []
+        # A wiped session leaves the job dir behind (a restored clip, a
+        # thumbnail) with no metadata — but the backup repo still has it, and
+        # it carries the job's REAL generation time and titles. Pull it back
+        # so the entry is dated when it was made, not when it was restored.
+        if not json_files and "metadata.json" in hf_listing.get(job_id, []):
+            try:
+                if hf_storage.download_file(
+                        hf_storage.job_key(job_id, "metadata.json"),
+                        os.path.join(job_path, "metadata.json")):
+                    _meta = _newest_metadata_file(job_path)
+                    json_files = [_meta] if _meta else []
+            except Exception as e:
+                print(f"⚠️ metadata restore failed for {job_id}: {e}")
         if not json_files:
             # No metadata locally — but this may be a LEGACY job (clips
             # uploaded to HF before metadata.json backup existed — PART 5.3
@@ -2637,6 +2717,10 @@ async def list_history(request: Request):
                     _stage = None
                 if _stage not in ("finalize", "complete", "done"):
                     _status = "processing"
+            # …and if the server is still running it, it is processing even
+            # before progress.json exists (the whole download stage).
+            if live_status:
+                _status = live_status
             total = 0
             biggest = None
             for root, _dirs, files in os.walk(job_path):
@@ -2644,9 +2728,7 @@ async def list_history(request: Request):
                     # Only real media can title a video card — data files
                     # (metadata/progress/logs/ass/ready-markers) must never
                     # show up as a "video" in the library.
-                    if name.endswith((".json", ".ass", ".txt", ".log",
-                                      ".ready", ".owner", ".created",
-                                      ".npy")) or name.startswith("temp_"):
+                    if name.endswith(_DATA_FILE_SUFFIXES) or name.startswith("temp_"):
                         continue
                     try:
                         size = os.path.getsize(os.path.join(root, name))
@@ -2655,11 +2737,12 @@ async def list_history(request: Request):
                     total += size
                     if biggest is None or size > biggest[1]:
                         biggest = (name, size)
-            label = os.path.splitext(biggest[0])[0].replace('.f140-4', '') if biggest else None
+            label = _clean_project_label(biggest[0]) if biggest else None
             videos.append({
                 "id": f"{job_id}_0",
                 "job_id": job_id,
-                "title": label or "Unfinished project",
+                "title": label or ("Working…" if _status == "processing"
+                                   else "Unfinished project"),
                 "created_at": datetime.fromtimestamp(
                     _job_created_at(job_path), tz=timezone.utc).isoformat(),
                 "status": _status,
@@ -2698,6 +2781,11 @@ async def list_history(request: Request):
                         job_status = "completed"
                 except Exception:
                     pass
+            # Never let the disk heuristics call a live job dead. (Clips that
+            # already finished keep their "completed" reading — only the
+            # not-yet-done states defer to the running job.)
+            if live_status and job_status != "completed":
+                job_status = live_status
             playable = 0
             for i, clip in enumerate(clips):
                 # base_name has no real prefix to reconstruct from when this
@@ -2727,7 +2815,7 @@ async def list_history(request: Request):
                         "job_id": job_id,
                         "title": (clip.get("title")
                                   or clip.get("video_title_for_youtube_short")
-                                  or (base_name if base_name != "metadata.json" else "Short")),
+                                  or _clean_project_label(base_name) or "Short"),
                         "created_at": created_at,
                         "status": job_status,
                         "duration": max(0.0, float(clip.get("end") or 0) - float(clip.get("start") or 0)),
@@ -2745,7 +2833,7 @@ async def list_history(request: Request):
                     # "the AI isn't doing the creative part" (round-4 teardown).
                     "title": (clip.get("title")
                               or clip.get("video_title_for_youtube_short")
-                              or (base_name if base_name != "metadata.json" else "Short")),
+                              or _clean_project_label(base_name) or "Short"),
                     "created_at": created_at,
                     "status": job_status,
                     "duration": max(0.0, float(clip.get("end") or 0) - float(clip.get("start") or 0)),
@@ -2755,13 +2843,15 @@ async def list_history(request: Request):
                     "download_url": f"/videos/{job_id}/{filename}",
                 })
             if job_status == "processing" and playable == 0:
-                if has_progress:
+                if has_progress or live_status:
                     # Job is actively processing/queued — keep status as processing
                     # so the UI shows an animated rendering/scanning tile instead of failed
                     videos.append({
                         "id": f"{job_id}_0",
                         "job_id": job_id,
-                        "title": (clips[0].get("title") if clips else None) or base_name,
+                        "title": ((clips[0].get("title") if clips else None)
+                                  or _clean_project_label(base_name)
+                                  or "Untitled project"),
                         "created_at": created_at,
                         "status": "processing",
                         "view_url": "",
@@ -2773,7 +2863,9 @@ async def list_history(request: Request):
                     videos.append({
                         "id": f"{job_id}_0",
                         "job_id": job_id,
-                        "title": (clips[0].get("title") if clips else None) or base_name,
+                        "title": ((clips[0].get("title") if clips else None)
+                                  or _clean_project_label(base_name)
+                                  or "Untitled project"),
                         "created_at": created_at,
                         "status": job_status,
                         "view_url": "",
@@ -2806,13 +2898,23 @@ async def list_history(request: Request):
                 # — filename parsing was a fallback for jobs backed up before
                 # that existed, and reads as "the AI isn't doing its job".
                 shorts_meta = []
+                # Empty string only as a last resort: an entry with no date
+                # sorts to the bottom, but inventing "now" for it (which is
+                # what any filesystem timestamp would give on a fresh
+                # session) is worse — it claims old clips were made today.
+                created_at = ""
                 if "metadata.json" in filenames:
                     meta_local = os.path.join(OUTPUT_DIR, job_id, "metadata.json")
                     if hf_storage.download_file(
                             hf_storage.job_key(job_id, "metadata.json"), meta_local):
                         try:
                             with open(meta_local, 'r') as f:
-                                shorts_meta = json.load(f).get('shorts', [])
+                                _meta_blob = json.load(f)
+                            shorts_meta = _meta_blob.get('shorts', [])
+                            _ts = float(_meta_blob.get('created_at') or 0)
+                            if _ts > 0:
+                                created_at = datetime.fromtimestamp(
+                                    _ts, tz=timezone.utc).isoformat()
                         except Exception:
                             shorts_meta = []
                 for i, name in enumerate(clips):
@@ -2830,7 +2932,7 @@ async def list_history(request: Request):
                         "id": f"{job_id}_{i}",
                         "job_id": job_id,
                         "title": title,
-                        "created_at": "",
+                        "created_at": created_at,
                         "status": "completed",
                         "duration": duration,
                         "size_bytes": 0,
@@ -3208,24 +3310,62 @@ async def restore_project(job_id: str, request: Request):
         # the in-memory record from the metadata + clips that are already
         # there, and build a project_state so editing resumes unchanged.
         job_dir = os.path.join(OUTPUT_DIR, job_id)
-        json_files = _sorted_metadata(glob.glob(os.path.join(job_dir, "*_metadata.json")))
-        if not json_files or not os.path.isdir(job_dir):
+        os.makedirs(job_dir, exist_ok=True)
+        # Accept BOTH metadata shapes. The glob only matched
+        # "<title>_metadata.json", so any job whose metadata came back from HF
+        # storage as a plain "metadata.json" (every job restored after a
+        # Kaggle session wipe) 404'd here — which is why most projects could
+        # not be reopened. _newest_metadata_file knows both names, and if the
+        # file is only in the backup repo we pull it down first.
+        meta_path = _newest_metadata_file(job_dir)
+        if not meta_path and hf_storage.configured():
+            try:
+                if hf_storage.download_file(
+                        hf_storage.job_key(job_id, "metadata.json"),
+                        os.path.join(job_dir, "metadata.json")):
+                    meta_path = _newest_metadata_file(job_dir)
+            except Exception as e:
+                print(f"⚠️ metadata restore failed for {job_id}: {e}")
+        if not meta_path:
             raise HTTPException(status_code=404, detail="Project not found")
-        with open(json_files[0], 'r') as f:
+        with open(meta_path, 'r') as f:
             data = json.load(f)
-        base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
+        base_name = os.path.basename(meta_path).replace('_metadata.json', '')
+        plain_meta = base_name == "metadata.json"
         clips = data.get('shorts', [])
         state_clips = []
+        restored = []
         for i, clip in enumerate(clips):
-            filename = _canonical_clip_file(job_dir, base_name, i)
-            if not os.path.exists(os.path.join(job_dir, filename)):
+            # A plain metadata.json carries no base_name to rebuild filenames
+            # from — the name recorded at upload time is the ground truth.
+            if plain_meta and clip.get("storage_filename"):
+                filename = clip["storage_filename"]
+            else:
+                filename = _canonical_clip_file(job_dir, base_name, i)
+            local = os.path.exists(os.path.join(job_dir, filename))
+            # A clip that lives only in the backup repo is still openable:
+            # /videos/{job}/{file} restores it on demand. Dropping it here
+            # was the second half of the "I can't reopen my project" bug —
+            # a restorable project came back with zero clips.
+            restorable = bool(clip.get("storage_key")) and hf_storage.configured()
+            if not local and not restorable:
                 continue
             clip['video_url'] = f"/videos/{job_id}/{filename}"
+            restored.append(clip)
             state_clips.append({
-                "index": i,
+                # Position in the returned list, not the metadata index: the
+                # dashboard looks this up by the card's own index, and a
+                # missing clip would otherwise shift every later card's state
+                # onto the wrong video.
+                "index": len(restored) - 1,
                 "server_file": filename,
                 "active_layers": [],
             })
+        if not restored:
+            raise HTTPException(
+                status_code=404,
+                detail="This project's clips are no longer available")
+        clips = restored
         jobs[job_id] = {
             'status': 'completed',
             'logs': [_log_entry("♻️ Project restored from your library.")],
