@@ -2,7 +2,6 @@ import React from 'react';
 import { ArrowLeft } from 'lucide-react';
 
 const LAST_UPDATED = '2026-07-15';
-const ISSUES_URL = 'https://github.com/mutonby/openshorts/issues';
 const SUPPORT_EMAIL = 'info@openshorts.app';
 
 function Section({ title, children }) {
@@ -231,11 +230,7 @@ export default function Legal() {
                         We may update this notice; the "Last updated" date reflects the latest revision. For material
                         changes affecting paid subscribers we'll give reasonable notice. Continued use after a change
                         constitutes acceptance. Questions:{' '}
-                        <A href={`mailto:${SUPPORT_EMAIL}`}>{SUPPORT_EMAIL}</A> or{' '}
-                        <A href={ISSUES_URL} external>
-                            GitHub Issues
-                        </A>
-                        .
+                        <A href={`mailto:${SUPPORT_EMAIL}`}>{SUPPORT_EMAIL}</A>.
                     </p>
                     <p>These terms are governed by the laws of Spain.</p>
                 </Section>

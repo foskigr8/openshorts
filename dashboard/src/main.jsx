@@ -2,10 +2,10 @@ import { StrictMode, useState, useEffect } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.jsx'
-import Landing from './Landing.jsx'
 import Legal from './Legal.jsx'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import { capture as captureAttribution } from './lib/attribution'
+import { BRAND, applyBrand } from './brand'
 import PricingPage from './components/PricingPage'
 import AccountPage from './components/AccountPage'
 import LoginModal from './components/LoginModal'
@@ -14,7 +14,7 @@ function PageShell({ title, children }) {
   return (
     <div className="min-h-screen bg-paper text-ink2">
       <header className="h-16 border-b border-rule bg-paper flex items-center justify-between px-6">
-        <a href="#app" className="font-display lowercase text-lg text-ink">OpenShorts</a>
+        <a href="#app" className="font-display lowercase text-lg text-ink">{BRAND.name}</a>
         <a href="#app" className="text-sm lowercase text-muted hover:text-ink transition-colors">← Back to app</a>
       </header>
       <main className="p-8">
@@ -44,16 +44,16 @@ function AccountView() {
 }
 
 function Root() {
+  // The app IS the site. There is no marketing landing page any more, so an
+  // unrecognised hash resolves to the workspace instead of a splash screen you
+  // have to click past on every visit.
   const resolveView = () => {
     const hash = window.location.hash || '';
     if (hash.startsWith('#/auth/')) return 'auth';       // AuthContext consumes then redirects
     if (hash.startsWith('#/account')) return 'account';
     if (hash.startsWith('#/pricing')) return 'pricing';
     if (hash === '#legal') return 'legal';
-    // #landing = explicit landing view (app logo); section anchors keep the landing mounted
-    if (['#landing', '#features', '#how-it-works', '#pricing', '#comparison', '#faq'].includes(hash)) return 'landing';
-    if (hash === '#app' || localStorage.getItem('openshorts_skip_landing') === '1') return 'app';
-    return 'landing';
+    return 'app';
   };
 
   const [view, setView] = useState(resolveView);
@@ -64,25 +64,19 @@ function Root() {
     return () => window.removeEventListener('hashchange', handleHashChange);
   }, []);
 
-  const handleLaunchApp = () => {
-    localStorage.setItem('openshorts_skip_landing', '1');
-    window.location.hash = '#app';
-    setView('app');
-  };
-
   if (view === 'legal') return <Legal />;
   if (view === 'pricing') return <PricingView />;
   if (view === 'account') return <AccountView />;
   if (view === 'auth') {
     return <div className="min-h-screen flex items-center justify-center bg-background text-zinc-400">Signing you in…</div>;
   }
-  if (view === 'app') return <App />;
-  return <Landing onLaunchApp={handleLaunchApp} />;
+  return <App />;
 }
 
 // Before React mounts: AuthContext rewrites the URL on auth redirects, which
 // would destroy the referrer and any UTM params we still need to read.
 captureAttribution();
+applyBrand();
 
 createRoot(document.getElementById('root')).render(
   <StrictMode>

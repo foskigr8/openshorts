@@ -1,6 +1,5 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
-import seo from './vite-plugin-seo'
 
 // Backend target for the dev proxy. Defaults to the docker-compose service
 // name; set VITE_PROXY_TARGET=http://localhost:8000 to run the dev server on
@@ -10,10 +9,7 @@ const renderer = process.env.VITE_RENDER_TARGET || 'http://renderer:3100'
 
 // https://vitejs.dev/config/
 export default defineConfig({
-  // seo() runs on build only. It injects the crawler-visible homepage content
-  // into #root and emits the static /alternatives pages, sitemap.xml and
-  // llms.txt. See vite-plugin-seo.js.
-  plugins: [react(), seo()],
+  plugins: [react()],
   server: {
     allowedHosts: [
       'openshorts.app',

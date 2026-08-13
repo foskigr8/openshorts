@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Mail, Check, Loader2 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import Modal from './ui/Modal';
+import { BRAND } from '../brand';
 
 // Sign-in modal: magic link (email) + Google OAuth.
 export default function LoginModal({ onClose }) {
@@ -27,7 +28,7 @@ export default function LoginModal({ onClose }) {
   };
 
   return (
-    <Modal isOpen onClose={onClose} eyebrow="ACCOUNT" title="Sign in to OpenShorts" size="md">
+    <Modal isOpen onClose={onClose} eyebrow="ACCOUNT" title={`Sign in to ${BRAND.name}`} size="md">
       <p className="text-muted text-sm mb-6 lowercase">Access your plan and generate shorts with no API keys.</p>
 
       {sent ? (

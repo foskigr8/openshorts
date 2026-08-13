@@ -1,12 +1,12 @@
 import React, { useState } from 'react';
-import { ArrowDown, ArrowRight, Check, ChevronDown, Github, MoveRight, Cpu, KeyRound, Send, Server, HardDrive } from 'lucide-react';
+import { ArrowDown, ArrowRight, Check, ChevronDown, MoveRight, Cpu, KeyRound, Send, Server, HardDrive } from 'lucide-react';
 import PricingSection from './PricingSection';
 
 // The honest hosted-vs-self-hosted trade-off. The software is identical and open
 // source either way, so the plans have to earn their price on hardware, keys and
 // setup rather than on features. Timings are measured on our own pipeline: an
 // 8-minute input takes ~50s on the server GPU and 5-8 min on CPU.
-// The landing page carries its own shorter version of this (Landing.jsx "Two ways
+// A shorter version of this table used to live on the landing page (removed);
 // to use OpenShorts"); this detailed table is only for the standalone #/pricing.
 const HOSTED_VS_SELF = [
   {
@@ -70,24 +70,6 @@ const FAQS = [
 ];
 
 const TRUST_CARDS = [
-  {
-    eyebrow: 'open source',
-    body: (
-      <>
-        The full code is public on{' '}
-        <a
-          href="https://github.com/mutonby/openshorts"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-ink underline decoration-1 underline-offset-2 hover:text-brass transition-colors"
-        >
-          GitHub
-        </a>
-        , and self-hosting it stays free forever. What a plan here buys is the GPU, the API keys
-        and the setup, not the software.
-      </>
-    ),
-  },
   {
     eyebrow: 'no watermarks · no per-clip credits',
     body: (
@@ -242,13 +224,7 @@ export default function PricingPage({ onRequireLogin }) {
               Self-hosting is genuinely free and always will be. It costs you a machine, your own API
               keys and the time to keep it running.
             </p>
-            <a
-              href="https://github.com/mutonby/openshorts"
-              target="_blank" rel="noopener noreferrer"
-              className="shrink-0 text-sm text-muted hover:text-ink transition-colors inline-flex items-center gap-1.5"
-            >
-              <Github size={15} /> View the source
-            </a>
+
           </div>
         </div>
       </section>
@@ -302,15 +278,7 @@ export default function PricingPage({ onRequireLogin }) {
               start free
               <ArrowRight size={16} />
             </button>
-            <a
-              href="https://github.com/mutonby/openshorts"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="btn-ghost whitespace-nowrap"
-            >
-              <Github size={16} />
-              view source
-            </a>
+
           </div>
         </div>
       </section>
