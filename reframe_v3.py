@@ -1118,26 +1118,6 @@ def render(input_video, final_output_video, aspect_ratio,
     if not tracks:
         raise RuntimeError("Reframe v3 found no face tracks; refusing to silently fall back")
 
-    asd_boxes, asd_margins = [], None
-    try:
-        import asd_worker
-        if asd_worker.available():
-            # LR-ASD's per-frame face-candidate pass defaults to ctx_id=0
-            # (GPU 0), which piled every worker's detection onto one card.
-            # Pin it to THIS worker's GPU so both cards carry the load.
-            _ctx = face_spine._resolve_ctx_id(worker_device)
-            _detect = lambda frame, _ctx=_ctx: face_spine.detect_faces_per_frame(
-                frame, ctx_id=_ctx)
-            _asd = asd_worker.score_clip(
-                input_video, _detect, device=worker_device)
-            asd_boxes = _asd.get("per_second_box") or []
-            # The model already computes how far the winning face led the
-            # runner-up each second; carrying it through is free and lets the
-            # fusion throw out the seconds where it was a coin flip.
-            asd_margins = _asd.get("per_second_margin")
-            print(f"   ↳ LR-ASD: {_time.time() - _t0:.0f}s")
-    except Exception as exc:
-        print(f"   ⚠️ LR-ASD unavailable for v3 ({type(exc).__name__}: {exc})")
     segments = (transcript or {}).get("segments", [])
     # Director v2 (ASR-first): when Gemini confirms the speaker->face map for
     # this clip, the diarized transcript decides WHO and the map decides
@@ -1158,8 +1138,34 @@ def render(input_video, final_output_video, aspect_ratio,
         active = speaker_fusion.active_from_identity_map(
             _speaker_ps, _identity_map)
         print(f"   ↳ ASR-first binding ({len(_identity_map)} confirmed "
-              "speaker(s))")
+              "speaker(s)) — LR-ASD skipped")
     else:
+        # LR-ASD runs only when the identity map did NOT land: it is the
+        # fallback fusion's evidence. Director v2 trusts the Gemini map alone
+        # when it lands — the owner's chosen tradeoff (speed over the
+        # cross-check). The cross-check (option 1) can be built later on top
+        # of this same branch.
+        asd_boxes, asd_margins = [], None
+        try:
+            import asd_worker
+            if asd_worker.available():
+                # LR-ASD's per-frame face-candidate pass defaults to ctx_id=0
+                # (GPU 0), which piled every worker's detection onto one card.
+                # Pin it to THIS worker's GPU so both cards carry the load.
+                _ctx = face_spine._resolve_ctx_id(worker_device)
+                _detect = lambda frame, _ctx=_ctx: face_spine.detect_faces_per_frame(
+                    frame, ctx_id=_ctx)
+                _asd = asd_worker.score_clip(
+                    input_video, _detect, device=worker_device)
+                asd_boxes = _asd.get("per_second_box") or []
+                # The model already computes how far the winning face led the
+                # runner-up each second; carrying it through is free and lets
+                # the fusion throw out the seconds where it was a coin flip.
+                asd_margins = _asd.get("per_second_margin")
+                print(f"   ↳ LR-ASD: {_time.time() - _t0:.0f}s")
+        except Exception as exc:
+            print(f"   ⚠️ LR-ASD unavailable for v3 "
+                  f"({type(exc).__name__}: {exc})")
         _, active = speaker_fusion.fuse_speaker_tracks(
             asd_boxes, tracks, segments, clip_start, effective_end,
             smooth_window=int(os.environ.get("SPEAKER_SMOOTH_WINDOW", "3")),
