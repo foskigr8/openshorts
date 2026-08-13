@@ -1814,6 +1814,129 @@ async def system_status():
         "storage_backend": hf_storage.status(),
     }
 
+_METRICS_CACHE = {"at": 0.0, "data": None}
+_CPU_SAMPLE = {"idle": 0, "total": 0}
+
+
+def _read_cpu_percent():
+    """Whole-machine CPU load from /proc/stat, as a percentage.
+
+    Deltas between calls, so the first call after boot reports null rather
+    than the meaningless since-boot average. Linux-only by design — that is
+    what this runs on (Kaggle / a Linux host) — and it needs no psutil.
+    """
+    try:
+        with open("/proc/stat") as f:
+            parts = f.readline().split()
+        vals = [int(v) for v in parts[1:11]]
+        idle = vals[3] + vals[4]           # idle + iowait
+        total = sum(vals)
+        prev = _CPU_SAMPLE
+        d_total = total - prev["total"]
+        d_idle = idle - prev["idle"]
+        _CPU_SAMPLE.update(idle=idle, total=total)
+        if prev["total"] == 0 or d_total <= 0:
+            return None
+        return round(100.0 * (d_total - d_idle) / d_total, 1)
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _read_memory():
+    """RAM in GB from /proc/meminfo (MemAvailable is the honest 'free')."""
+    try:
+        info = {}
+        with open("/proc/meminfo") as f:
+            for line in f:
+                key, _, rest = line.partition(":")
+                info[key] = int(rest.strip().split()[0])   # kB
+        total = info.get("MemTotal", 0) / (1024 ** 2)
+        avail = info.get("MemAvailable", info.get("MemFree", 0)) / (1024 ** 2)
+        used = max(0.0, total - avail)
+        return {
+            "used_gb": round(used, 2),
+            "total_gb": round(total, 2),
+            "pct": int(round(100 * used / total)) if total else 0,
+        }
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _read_gpus():
+    """Per-GPU utilisation, VRAM and temperature via nvidia-smi.
+
+    Same probe /api/system already uses for the GPU name, just asking for the
+    live counters too. Empty list on a CPU host — never a fabricated reading.
+    """
+    try:
+        out = subprocess.run(
+            ["nvidia-smi",
+             "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=3)
+        gpus = []
+        for line in (out.stdout or "").strip().splitlines():
+            cols = [c.strip() for c in line.split(",")]
+            if len(cols) < 5:
+                continue
+            def num(v):
+                try:
+                    return float(v)
+                except ValueError:
+                    return None
+            used, total = num(cols[2]), num(cols[3])
+            gpus.append({
+                "name": cols[0],
+                "util_pct": num(cols[1]),
+                "vram_used_gb": round(used / 1024, 2) if used is not None else None,
+                "vram_total_gb": round(total / 1024, 2) if total is not None else None,
+                "vram_pct": int(round(100 * used / total)) if used and total else 0,
+                "temp_c": num(cols[4]),
+            })
+        return gpus
+    except Exception:
+        return []
+
+
+@app.get("/api/metrics")
+async def machine_metrics():
+    """Live machine load for the dashboard's monitor.
+
+    Deliberately dependency-free: /proc for CPU and RAM, nvidia-smi for the
+    GPUs, shutil for the disk. Cached for a second so a panel polling every
+    two seconds — and several browser tabs doing it at once — cannot turn
+    into a load source of its own.
+    """
+    now = time.time()
+    if _METRICS_CACHE["data"] and now - _METRICS_CACHE["at"] < 1.0:
+        return _METRICS_CACHE["data"]
+
+    disk = None
+    try:
+        usage = shutil.disk_usage(OUTPUT_DIR if os.path.isdir(OUTPUT_DIR) else ".")
+        disk = {
+            "used_gb": round((usage.total - usage.free) / (1024 ** 3), 1),
+            "total_gb": round(usage.total / (1024 ** 3), 1),
+            "pct": int(round(100 * (usage.total - usage.free) / usage.total)),
+        }
+    except Exception:
+        pass
+
+    data = {
+        "at": now,
+        "cpu_pct": _read_cpu_percent(),
+        "cpu_count": os.cpu_count(),
+        "memory": _read_memory(),
+        "gpus": _read_gpus(),
+        "disk": disk,
+        "jobs_active": sum(1 for j in jobs.values() if j.get("status") == "processing"),
+        "jobs_queued": sum(1 for j in jobs.values() if j.get("status") == "queued"),
+        "job_slots": MAX_CONCURRENT_JOBS,
+    }
+    _METRICS_CACHE.update(at=now, data=data)
+    return data
+
+
 @app.get("/api/config")
 async def get_config():
     return {
@@ -1857,7 +1980,8 @@ async def process_endpoint(
     zoom_mode: Optional[str] = Form(None),
     style_variant: Optional[str] = Form(None),
     caption_position: Optional[str] = Form(None),
-    caption_margin: Optional[str] = Form(None)
+    caption_margin: Optional[str] = Form(None),
+    parent_job_id: Optional[str] = Form(None)
 ):
     api_key = await resolve_gemini(request)
     if not api_key:
@@ -1916,6 +2040,7 @@ async def process_endpoint(
     if "application/json" in content_type:
         body = await request.json()
         url = body.get("url")
+        parent_job_id = body.get("parent_job_id") or parent_job_id
         ack_flag = bool(body.get("acknowledged"))
         force_low = bool(body.get("force_low_quality"))
         force_new = bool(body.get("force_new"))
@@ -2074,6 +2199,16 @@ async def process_endpoint(
     # silently re-dated the project. Measured across the existing library:
     # every job was showing the wrong DAY, drifting up to 43.5 hours.
     _mark_job_created(job_output_dir)
+    # "More clips from this source": a second run against the same video,
+    # linked to the first so the library can group them as one project. The
+    # source store hardlinks the cached download, transcript and context blob,
+    # so this costs no re-download and no re-analysis spend.
+    if parent_job_id:
+        try:
+            with open(os.path.join(job_output_dir, ".parent"), "w") as f:
+                f.write(os.path.basename(str(parent_job_id)))
+        except OSError:
+            pass
 
     # Prepare Command
     cmd = ["python", "-u", "main.py"] # -u for unbuffered
@@ -2184,7 +2319,39 @@ async def process_endpoint(
 @app.get("/api/status/{job_id}")
 async def get_status(job_id: str, request: Request):
     if job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
+        # Not in memory does not mean gone. Every job persists its log to
+        # logs.jsonl as it runs, so a project reopened after a restart can
+        # still show what happened — "I go into a project and I can't see the
+        # logs" was this 404, not missing data.
+        job_dir = os.path.join(OUTPUT_DIR, os.path.basename(job_id))
+        replayed = _replay_job_logs(job_id, job_dir) if os.path.isdir(job_dir) else []
+        if not replayed:
+            raise HTTPException(status_code=404, detail="Job not found")
+        owner = await _request_owner_id(request)
+        owner_path = os.path.join(job_dir, ".owner")
+        if os.path.exists(owner_path):
+            try:
+                raw = open(owner_path).read().strip()
+                job_owner = int(raw) if raw.isdigit() else (raw or None)
+            except Exception:
+                job_owner = None
+            if job_owner is not None and job_owner != owner:
+                raise HTTPException(status_code=404, detail="Job not found")
+        archived_progress = None
+        try:
+            with open(os.path.join(job_dir, "progress.json")) as f:
+                archived_progress = json.load(f)
+        except (OSError, ValueError):
+            pass
+        stage = (archived_progress or {}).get("stage")
+        return {
+            "status": "completed" if stage == "finalize" else "failed",
+            "logs": _visible_logs(replayed),
+            "result": None,
+            "progress": archived_progress,
+            "stage_durations": None,
+            "archived": True,
+        }
 
     job = jobs[job_id]
     await _assert_job_owner(request, job)
@@ -2640,6 +2807,14 @@ async def list_history(request: Request):
         # running is "processing", full stop.
         live_status = _live_job_status(job_id)
 
+        # Runs that added clips to an earlier project point back at it.
+        parent_job_id = None
+        try:
+            with open(os.path.join(job_path, ".parent")) as pf:
+                parent_job_id = pf.read().strip() or None
+        except OSError:
+            pass
+
         # _newest_metadata_file also matches a plain metadata.json (PART 5.3:
         # what HF-restored jobs get downloaded as) — a raw "*_metadata.json"
         # glob here missed it, so a job whose clips were playing fine flipped
@@ -2687,6 +2862,7 @@ async def list_history(request: Request):
                     videos.append({
                         "id": f"{job_id}_{i}",
                         "job_id": job_id,
+                        "parent_job_id": parent_job_id,
                         "title": title,
                         "created_at": datetime.fromtimestamp(
                             _job_created_at(job_path), tz=timezone.utc).isoformat(),
@@ -2741,6 +2917,7 @@ async def list_history(request: Request):
             videos.append({
                 "id": f"{job_id}_0",
                 "job_id": job_id,
+                "parent_job_id": parent_job_id,
                 "title": label or ("Working…" if _status == "processing"
                                    else "Unfinished project"),
                 "created_at": datetime.fromtimestamp(
@@ -2813,6 +2990,7 @@ async def list_history(request: Request):
                     videos.append({
                         "id": f"{job_id}_{i}",
                         "job_id": job_id,
+                        "parent_job_id": parent_job_id,
                         "title": (clip.get("title")
                                   or clip.get("video_title_for_youtube_short")
                                   or _clean_project_label(base_name) or "Short"),
@@ -2828,6 +3006,7 @@ async def list_history(request: Request):
                 videos.append({
                     "id": f"{job_id}_{i}",
                     "job_id": job_id,
+                    "parent_job_id": parent_job_id,
                     # Prefer the AI-written short title the narrative pass
                     # already produces — raw source slugs in the UI read as
                     # "the AI isn't doing the creative part" (round-4 teardown).
@@ -2849,6 +3028,7 @@ async def list_history(request: Request):
                     videos.append({
                         "id": f"{job_id}_0",
                         "job_id": job_id,
+                        "parent_job_id": parent_job_id,
                         "title": ((clips[0].get("title") if clips else None)
                                   or _clean_project_label(base_name)
                                   or "Untitled project"),
@@ -2863,6 +3043,7 @@ async def list_history(request: Request):
                     videos.append({
                         "id": f"{job_id}_0",
                         "job_id": job_id,
+                        "parent_job_id": parent_job_id,
                         "title": ((clips[0].get("title") if clips else None)
                                   or _clean_project_label(base_name)
                                   or "Untitled project"),
@@ -2931,6 +3112,7 @@ async def list_history(request: Request):
                     videos.append({
                         "id": f"{job_id}_{i}",
                         "job_id": job_id,
+                        "parent_job_id": None,   # storage-only entry: no local .parent to read
                         "title": title,
                         "created_at": created_at,
                         "status": "completed",
@@ -3083,6 +3265,108 @@ async def delete_history_job(job_id: str, request: Request):
 
     jobs.pop(job_id, None)
     return {"deleted": job_id, "freed_bytes": freed}
+
+
+WIPE_PHRASE = "wipe everything"
+
+
+@app.post("/api/storage/wipe")
+async def wipe_storage(request: Request):
+    """Delete everything this account owns: jobs, uploads, cached sources and
+    the backup copies in HF storage.
+
+    Deliberately awkward to fire: the caller must send the exact phrase, and
+    nothing here is age- or size-based, so it can never run on its own. This
+    is the counterpart to keeping sources forever — retention is manual in
+    both directions.
+
+    Running jobs are refused rather than half-deleted underneath themselves.
+    """
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    if (body.get("confirm") or "").strip().lower() != WIPE_PHRASE:
+        raise HTTPException(
+            status_code=400,
+            detail=f'Send {{"confirm": "{WIPE_PHRASE}"}} to confirm.')
+
+    live = [jid for jid, j in jobs.items() if j.get("status") in ("queued", "processing")]
+    if live and not body.get("force"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"{len(live)} job(s) still running. Stop them first, or send force:true.")
+
+    owner = await _request_owner_id(request)
+    include_sources = body.get("include_sources", True)
+    include_storage = body.get("include_storage", True)
+
+    freed = 0
+    removed_jobs = []
+    try:
+        job_ids = os.listdir(OUTPUT_DIR)
+    except FileNotFoundError:
+        job_ids = []
+    for job_id in job_ids:
+        job_path = os.path.join(OUTPUT_DIR, job_id)
+        # The thumbnails dir backs a StaticFiles mount — removing it 500s every
+        # /thumbnails request until the server is restarted.
+        if job_id == os.path.basename(THUMBNAILS_DIR) or not os.path.isdir(job_path):
+            continue
+        # Multi-tenant safety: only ever this account's jobs.
+        owner_path = os.path.join(job_path, ".owner")
+        if os.path.exists(owner_path):
+            try:
+                raw = open(owner_path).read().strip()
+                job_owner = int(raw) if raw.isdigit() else (raw or None)
+            except Exception:
+                job_owner = None
+            if job_owner is not None and job_owner != owner:
+                continue
+        elif BILLING_ENABLED and owner is not None:
+            # An unowned dir on a multi-tenant deployment isn't provably ours.
+            continue
+        freed += _dir_size(job_path)
+        shutil.rmtree(job_path, ignore_errors=True)
+        removed_jobs.append(job_id)
+        jobs.pop(job_id, None)
+        for f in glob.glob(os.path.join(UPLOAD_DIR, f"{job_id}_*")):
+            try:
+                freed += os.path.getsize(f)
+                os.remove(f)
+            except OSError:
+                pass
+
+    # Cached sources are shared across jobs (that is the point — a re-run
+    # reuses the download), so they are their own switch.
+    sources_freed = 0
+    if include_sources and not (BILLING_ENABLED and owner is not None):
+        try:
+            src_dir = source_store.cache_dir()
+            if os.path.isdir(src_dir):
+                sources_freed = _dir_size(src_dir)
+                shutil.rmtree(src_dir, ignore_errors=True)
+                os.makedirs(src_dir, exist_ok=True)
+        except Exception as e:
+            print(f"⚠️ Source cache wipe failed ({type(e).__name__}: {e})")
+
+    # Without this the next /api/history rebuilds every deleted job from the
+    # backup repo and the wipe looks like it did nothing.
+    storage_removed = 0
+    if include_storage and hf_storage.configured():
+        for job_id in removed_jobs:
+            try:
+                storage_removed += hf_storage.delete_prefix(f"jobs/{job_id}")
+            except Exception as e:
+                print(f"⚠️ HF purge of {job_id} failed ({type(e).__name__}: {e})")
+
+    return {
+        "jobs_deleted": len(removed_jobs),
+        "freed_bytes": freed,
+        "sources_freed_bytes": sources_freed,
+        "storage_files_deleted": storage_removed,
+    }
 
 
 @app.get("/api/source/{job_id}")
