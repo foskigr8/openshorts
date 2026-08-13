@@ -2,7 +2,8 @@ import {
   Home, Image, HardDrive, History, Settings, Flame, LayoutGrid,
   Loader2, TrendingUp, Sparkles, ChevronLeft, ChevronRight,
 } from 'lucide-react';
-import { BRAND, LOGO_FALLBACK } from '../brand';
+import { useEffect, useState } from 'react';
+import { BRAND, resolveLogo, LOGO_SOURCES } from '../brand';
 
 /**
  * The navigation rail.
@@ -18,6 +19,11 @@ export default function Sidebar({
   activeTab, onSelect, billingEnabled, isSignedIn,
   todayStats, liveCount, open, onToggle,
 }) {
+  // Whichever mark is actually present — the real PNG once it has been copied
+  // into public/, the committed stand-in until then.
+  const [logo, setLogo] = useState(LOGO_SOURCES[LOGO_SOURCES.length - 1]);
+  useEffect(() => resolveLogo(setLogo), []);
+
   const navItems = [
     { id: 'dashboard', icon: Home, label: 'Home' },
     { id: 'thumbnails', icon: Image, label: 'YouTube Studio' },
@@ -50,7 +56,7 @@ export default function Sidebar({
           className="w-9 h-9 bg-paper3 rounded-input flex items-center justify-center shrink-0
                      overflow-hidden border border-rule hover:border-rule2 transition-colors relative group"
         >
-          <img src={BRAND.logo} alt="" className="w-full h-full object-contain p-1 group-hover:opacity-25 transition-opacity" />
+          <img src={logo} alt="" className="w-full h-full object-contain p-0.5 group-hover:opacity-25 transition-opacity" />
           <span className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
             {wide ? <ChevronLeft size={15} className="text-ink" /> : <ChevronRight size={15} className="text-ink" />}
           </span>

@@ -1,52 +1,73 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Ai4Ts">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Ai4Ts">
   <!--
-    The Ai4Ts mark, drawn as vector so it stays sharp from a 16px favicon up to
-    the nav badge, and so it has no white plate around it on a dark surface.
+    A hand-drawn stand-in for the Ai4Ts mark, not the artwork itself: this
+    toolchain cannot author a binary, so the real PNG has to be copied into
+    public/logo-ai4ts.png by hand — brand.js prefers it the moment it exists
+    and this file stops being used.
 
-    Mark only, no wordmark: at 16px the letters would be mud. The planet and
-    its ring are the recognisable part.
-
-    The ring is near-black like the original, with a hairline light edge —
-    on a dark interface a pure black ring simply disappears.
+    Kept faithful to the original's structure: red planet under a black
+    orbital band tilted up to the right, two sparkles above it, and the
+    wordmark riding the band's angle in outlined block letters with a red
+    offset shadow.
   -->
   <defs>
-    <radialGradient id="a4t-planet" cx="34%" cy="26%" r="78%">
-      <stop offset="0%" stop-color="#ff4d4d"/>
-      <stop offset="42%" stop-color="#ef1b1b"/>
-      <stop offset="100%" stop-color="#5c0a0a"/>
+    <radialGradient id="planet" cx="42%" cy="22%" r="82%">
+      <stop offset="0%" stop-color="#ff1a1a"/>
+      <stop offset="45%" stop-color="#e60000"/>
+      <stop offset="78%" stop-color="#8c0505"/>
+      <stop offset="100%" stop-color="#2b0202"/>
     </radialGradient>
-    <linearGradient id="a4t-ring" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#1a1a1a"/>
-      <stop offset="100%" stop-color="#000"/>
-    </linearGradient>
-    <clipPath id="a4t-top">
-      <!-- Everything above the ring's centre line: the half the ring passes behind. -->
-      <rect x="0" y="0" width="64" height="33"/>
+
+    <!-- The band: a wide flat ellipse with its middle cut out, so it reads as
+         a ring rather than a blob, with the ends running off past the planet. -->
+    <mask id="band-mask">
+      <rect width="512" height="512" fill="black"/>
+      <ellipse cx="256" cy="248" rx="228" ry="74" fill="white"/>
+      <ellipse cx="256" cy="248" rx="196" ry="44" fill="black"/>
+    </mask>
+
+    <!-- Upper half of the frame: where the band passes BEHIND the planet. -->
+    <clipPath id="above">
+      <rect x="0" y="0" width="512" height="252"/>
     </clipPath>
   </defs>
 
-  <!-- the body -->
-  <circle cx="31" cy="33" r="19" fill="url(#a4t-planet)"/>
-
-  <!-- ring, behind the planet's upper half -->
-  <g clip-path="url(#a4t-top)">
-    <ellipse cx="32" cy="33" rx="30" ry="9.5"
-             transform="rotate(-21 32 33)"
-             fill="none" stroke="url(#a4t-ring)" stroke-width="7"/>
-    <ellipse cx="32" cy="33" rx="30" ry="9.5"
-             transform="rotate(-21 32 33)"
-             fill="none" stroke="rgba(255,255,255,0.22)" stroke-width="0.9"/>
+  <g transform="rotate(-19 256 256)">
+    <!-- band, behind -->
+    <g clip-path="url(#above)">
+      <rect width="512" height="512" fill="#050505" mask="url(#band-mask)"/>
+    </g>
   </g>
 
-  <!-- ring, in front of the planet's lower half -->
-  <path d="M 2.9 39.6 A 30 9.5 -21 0 0 61.1 26.4"
-        transform="rotate(-21 32 33)"
-        fill="none" stroke="url(#a4t-ring)" stroke-width="7" stroke-linecap="round"/>
-  <path d="M 2.9 39.6 A 30 9.5 -21 0 0 61.1 26.4"
-        transform="rotate(-21 32 33)"
-        fill="none" stroke="rgba(255,255,255,0.22)" stroke-width="0.9" stroke-linecap="round"/>
+  <!-- the planet -->
+  <circle cx="256" cy="256" r="132" fill="url(#planet)"/>
 
-  <!-- the spark, top right, as in the original -->
-  <path d="M46 8 L48.1 14.2 L54 16.5 L48.1 18.8 L46 25 L43.9 18.8 L38 16.5 L43.9 14.2 Z"
-        fill="#0d0d0d" stroke="rgba(255,255,255,0.25)" stroke-width="0.7" stroke-linejoin="round"/>
+  <g transform="rotate(-19 256 256)">
+    <!-- band, in front of the planet's lower half -->
+    <g clip-path="url(#below)">
+      <rect width="512" height="512" fill="#050505" mask="url(#band-mask)"/>
+    </g>
+  </g>
+  <defs>
+    <clipPath id="below">
+      <rect x="0" y="252" width="512" height="260"/>
+    </clipPath>
+  </defs>
+
+  <!-- sparkles: four-point stars with long concave points, as in the original -->
+  <path d="M247 96 C251 124 258 131 286 135 C258 139 251 146 247 174
+           C243 146 236 139 208 135 C236 131 243 124 247 96 Z" fill="#070707"/>
+  <path d="M330 60 C336 104 346 114 390 120 C346 126 336 136 330 180
+           C324 136 314 126 270 120 C314 114 324 104 330 60 Z" fill="#070707"/>
+
+  <!-- wordmark: white letters, heavy black outline, red offset shadow -->
+  <g transform="rotate(-13 256 268)" font-family="'Arial Black', Impact, sans-serif"
+     font-size="150" font-weight="900" font-style="italic" letter-spacing="-4">
+    <text x="256" y="300" text-anchor="middle" fill="#e00000"
+          stroke="#e00000" stroke-width="26" stroke-linejoin="round"
+          transform="translate(-7 9)">Ai4Ts</text>
+    <text x="256" y="300" text-anchor="middle" fill="#ffffff"
+          stroke="#000000" stroke-width="18" stroke-linejoin="round"
+          paint-order="stroke fill">Ai4Ts</text>
+  </g>
 </svg>

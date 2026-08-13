@@ -1,38 +1,64 @@
 /**
  * Everything that identifies this app, in one place.
  *
- * The rename is coming (new name, new logo, new favicon) and it must not be a
- * hunt through JSX. Every visible occurrence of the product's identity reads
- * from here: the sidebar mark, the document title, the page shells. Change
- * these four values and the whole app is rebranded.
+ * The mark is resolved from a LIST, tried in order, first one that loads
+ * wins. That is deliberate: the real artwork is a PNG that has to be copied
+ * into public/ by hand — nothing in this toolchain can author a binary file —
+ * so the moment `logo-ai4ts.png` appears there it is picked up everywhere
+ * (nav badge, favicon, tab) with no edit in here. Until then the vector
+ * stand-in shows, and a missing file can never render a broken-image glyph.
  *
- * `logo` and `favicon` are paths under public/.
+ * To use different artwork: drop it in dashboard/public/ and put its path
+ * first in LOGO_SOURCES.
  */
 export const BRAND = {
   name: 'Ai4Ts',
   tagline: 'turn long video into shorts',
-  // Vector, so it is sharp at 16px in a tab and at 36px in the nav, and has
-  // no white plate around it on a dark surface. To use your own artwork
-  // instead, drop it in dashboard/public/ and point these two at it — a PNG
-  // is fine. Anything that fails to load falls back rather than showing a
-  // broken-image glyph.
-  logo: '/logo-ai4ts.svg',
-  favicon: '/logo-ai4ts.svg',
 };
 
-export const LOGO_FALLBACK = '/logo-openshorts.png';
+export const LOGO_SOURCES = [
+  '/logo-ai4ts.png',      // the real mark — copy it here and it wins
+  '/logo-ai4ts.svg',      // hand-drawn stand-in, committed
+  '/logo-openshorts.png', // last resort, so something always renders
+];
 
-/**
- * Apply the brand to the document (title + favicon), at boot.
- *
- * The favicon is only swapped in AFTER the image is confirmed to load. Setting
- * it blind is how a missing file becomes a broken-image glyph in the tab —
- * which is worse than the icon we already had.
- */
+// Resolved once per page load rather than per component.
+let resolved = null;
+const waiting = [];
+
+export function resolveLogo(cb) {
+  if (resolved) { cb(resolved); return; }
+  waiting.push(cb);
+  if (waiting.length > 1) return;   // a probe is already in flight
+
+  const settle = (href) => {
+    resolved = href;
+    waiting.splice(0).forEach((fn) => fn(href));
+  };
+
+  const tryAt = (i) => {
+    if (i >= LOGO_SOURCES.length) {
+      settle(LOGO_SOURCES[LOGO_SOURCES.length - 1]);
+      return;
+    }
+    const probe = new Image();
+    probe.onload = () => settle(LOGO_SOURCES[i]);
+    probe.onerror = () => tryAt(i + 1);
+    probe.src = LOGO_SOURCES[i];
+  };
+
+  try {
+    tryAt(0);
+  } catch (_) {
+    settle(LOGO_SOURCES[LOGO_SOURCES.length - 1]);
+  }
+}
+
+/** Apply the brand to the document (title + favicon), at boot. */
 export function applyBrand() {
   try {
     document.title = BRAND.name;
-    const apply = (href) => {
+    resolveLogo((href) => {
       let link = document.querySelector("link[rel='icon']");
       if (!link) {
         link = document.createElement('link');
@@ -41,11 +67,7 @@ export function applyBrand() {
       }
       link.type = href.endsWith('.svg') ? 'image/svg+xml' : 'image/png';
       link.href = href;
-    };
-    const probe = new Image();
-    probe.onload = () => apply(BRAND.favicon);
-    probe.onerror = () => apply(LOGO_FALLBACK);
-    probe.src = BRAND.favicon;
+    });
   } catch (_) { /* SSR / no DOM — nothing to brand */ }
 }
 
