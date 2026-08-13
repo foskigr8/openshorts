@@ -7,7 +7,7 @@ import { getApiUrl } from '../config';
 import { pauseAllOtherPlayers, registerPlayer } from '../lib/playerSync';
 import {
   subscribeSourceSync, clearCompareClip, sourceSyncPlay, sourceSyncTime,
-  sourceSyncStop,
+  sourceSyncStop, sourceSyncRelease,
 } from '../lib/sourceSync';
 import ProgressRing from './ProgressRing';
 
@@ -51,6 +51,12 @@ const ProcessingAnimation = ({
 
   useEffect(() => subscribeSourceSync(setSync), []);
 
+  // A job reaching the finish line starts the preview fresh. Otherwise a clip
+  // you played and paused ten minutes into the render still "owns" the source
+  // when the finished view mounts, and the preview comes up frozen on a frame
+  // nobody is looking at any more.
+  useEffect(() => { if (isComplete) clearCompareClip(); }, [isComplete]);
+
   useEffect(() => {
     setPosterFailed(false);
     setSourceFailed(false);
@@ -76,10 +82,22 @@ const ProcessingAnimation = ({
   // the same seq is the clip reporting its position as it runs → only correct
   // when the two have actually drifted, so the source glides instead of
   // stuttering on every update.
+  // Three states, not two — the missing third is why the preview sat dead
+  // after a job finished. Once ANY clip had been played, `lastSeq` was set
+  // forever, so every later render (including the remount when the layout
+  // switches to the finished view) hit the pause branch and stopped the
+  // source. It only came back if you played a clip again.
+  const ambient = (el) => {
+    el.loop = true;
+    el.muted = true;
+    el.play().catch(() => {});
+  };
+
   useEffect(() => {
     const el = videoRef.current;
     if (isYouTube || !el) return;
     if (sync.playing) {
+      // A clip is driving: follow it.
       const seeked = sync.seq !== lastSeq.current;
       lastSeq.current = sync.seq;
       if (seeked || Math.abs(el.currentTime - sync.time) > 0.4) {
@@ -88,11 +106,15 @@ const ProcessingAnimation = ({
       el.loop = false;
       el.muted = true;
       el.play().catch(() => {});
-    } else if (lastSeq.current > 0) {
-      // Mirror the clip's pause so both images hold on the same moment.
+    } else if (sync.owner) {
+      // A clip is loaded but paused: hold this frame so the two can be
+      // compared still.
       el.pause();
+    } else {
+      // Nobody is driving: the source rolls on its own.
+      ambient(el);
     }
-  }, [sync.playing, sync.time, sync.seq, isYouTube]);
+  }, [sync.playing, sync.owner, sync.time, sync.seq, isYouTube, videoSrc]);
 
   // --- follow the clip: YouTube iframe -------------------------------------
   useEffect(() => {
@@ -109,10 +131,12 @@ const ProcessingAnimation = ({
         post('seekTo', [sync.time, true]);
       }
       post('playVideo');
-    } else if (lastSeq.current > 0) {
+    } else if (sync.owner) {
       post('pauseVideo');
+    } else {
+      post('playVideo');   // ambient — the embed loops on its own
     }
-  }, [sync.playing, sync.time, sync.seq, isYouTube, videoSrc]);
+  }, [sync.playing, sync.owner, sync.time, sync.seq, isYouTube, videoSrc]);
 
   const getYouTubeId = (url) => {
     const match = (url || '').match(
@@ -194,6 +218,12 @@ const ProcessingAnimation = ({
           loop
           playsInline
           onLoadedMetadata={(e) => setDuration(e.target.duration)}
+          onCanPlay={(e) => {
+            // The effect above runs before the media is playable on a fresh
+            // mount, and play() on an unready element is a no-op — so without
+            // this the finished view could come up on a still frame.
+            if (!sync.playing && !sync.owner) ambient(e.currentTarget);
+          }}
           onError={() => setSourceFailed(true)}
         />
       ) : sourceFailed ? (
@@ -332,7 +362,7 @@ const ProcessingAnimation = ({
             sourceSyncTime(compareOwner, compare.start + e.currentTarget.currentTime);
           }}
           onPause={() => sourceSyncStop(compareOwner)}
-          onEnded={() => sourceSyncStop(compareOwner)}
+          onEnded={() => sourceSyncRelease(compareOwner)}
         />
       </div>
     </div>

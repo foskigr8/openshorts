@@ -71,10 +71,24 @@ export function sourceSyncTime(owner, time) {
   emit();
 }
 
-/** Only the owning clip can stop the source. */
+/** Only the owning clip can stop the source. Holds the frame for comparison. */
 export function sourceSyncStop(owner) {
   if (state.owner !== owner) return;
   state = { ...state, playing: false };
+  emit();
+}
+
+/**
+ * The clip is done with the source entirely (it ended, or it unmounted).
+ *
+ * Distinct from stop: stop means "we are both paused on this frame, compare
+ * them", release means "nobody is driving any more" — and with no driver the
+ * source goes back to its ambient loop instead of sitting frozen, which is
+ * what left the preview dead after a job finished.
+ */
+export function sourceSyncRelease(owner) {
+  if (state.owner !== owner) return;
+  state = { ...state, owner: null, playing: false };
   emit();
 }
 
