@@ -61,6 +61,62 @@ def test_does_not_bind_below_min_seconds():
 
 
 # ---------------------------------------------------------------------------
+# decisive_seconds — throwing out the coin-flip seconds before they vote
+# ---------------------------------------------------------------------------
+
+def test_decisive_seconds_from_margins():
+    # LR-ASD's per-second lead of the winner over the next best face.
+    margins = [0.4, 0.02, None, 0.10]
+    assert sf.decisive_seconds(margins, 0.10) == [True, False, False, True]
+
+
+def test_no_margin_data_means_no_gate():
+    # LR-ASD unavailable (or an older caller): every second keeps counting,
+    # exactly as before.
+    assert sf.decisive_seconds(None) is None
+
+
+def test_only_decisive_seconds_vote_for_a_binding():
+    # Three coin-flip seconds point at track 1 (a reacting listener scoring
+    # almost as high as the talker); two confident ones point at track 0.
+    # Counting every second binds A to the WRONG face on a bare majority.
+    per_second_speaker = ["A"] * 5
+    predicted_track = [1, 1, 1, 0, 0]
+    assert sf.resolve_speaker_bindings(
+        per_second_speaker, predicted_track) == {"A": 1}
+    decisive = [False, False, False, True, True]
+    assert sf.resolve_speaker_bindings(
+        per_second_speaker, predicted_track, decisive_ps=decisive) == {"A": 0}
+
+
+# ---------------------------------------------------------------------------
+# match_box_to_track — the head sits at the TOP of a speaker box
+# ---------------------------------------------------------------------------
+
+def test_asd_box_covering_two_faces_picks_the_head_at_its_top():
+    # One ASD speaker box swallows the talker (small face, near the box top)
+    # and a listener leaning in below with a much larger face box. Best-IoU
+    # rewards the larger face; the head region picks the person the box was
+    # actually drawn around.
+    spine = _spine({
+        0: [(0.0, (110.0, 95.0, 55.0, 55.0))],
+        1: [(0.0, (85.0, 130.0, 110.0, 155.0))],
+    })
+    box = (80.0, 90.0, 120.0, 200.0)
+    assert sf._box_iou(box, (85.0, 130.0, 110.0, 155.0)) > sf._box_iou(
+        box, (110.0, 95.0, 55.0, 55.0))
+    assert sf.match_box_to_track(spine, 0.0, box) == 0
+
+
+def test_falls_back_to_iou_when_no_face_centre_is_inside_the_box():
+    # A speaker box offset off the face: no face centre lands inside it, so
+    # the original IoU match still resolves the track.
+    spine = _spine({0: [(0.0, (0.0, 0.0, 100.0, 100.0))]})
+    box = (51.0, 0.0, 90.0, 100.0)
+    assert sf.match_box_to_track(spine, 0.0, box) == 0
+
+
+# ---------------------------------------------------------------------------
 # smooth_track_sequence — crowd-scene stabilization
 # ---------------------------------------------------------------------------
 
@@ -164,6 +220,96 @@ def test_binding_does_not_flip_on_a_single_bad_frame_mid_turn():
 
 
 # ---------------------------------------------------------------------------
+# apply_gated_rebinding — the escape hatch from a binding that came out wrong
+# ---------------------------------------------------------------------------
+
+def test_sustained_contradiction_rebinds_from_that_second_on():
+    # The clip bound speaker A to track 0 (the host). From second 4 on,
+    # decisive ASD says track 1 every single second — "held on the host while
+    # she wasn't talking". The 4th contradicting second flips the binding,
+    # and it stays flipped through the end of the clip.
+    speaker = ["A"] * 10
+    predicted = [0, 0, 0, 0, 1, 1, 1, 1, 1, 1]
+    bindings, active = sf.apply_gated_rebinding(
+        speaker, predicted, {"A": 0}, [0] * 10)
+    assert bindings == {"A": 1}
+    assert active == [0, 0, 0, 0, 0, 0, 0, 1, 1, 1]
+
+
+def test_a_single_blip_never_rebinds():
+    # The one property the one-decision-per-clip design bought us, kept.
+    speaker = ["A"] * 10
+    predicted = [0, 0, 0, 1, 0, 0, 0, 0, 0, 0]
+    bindings, active = sf.apply_gated_rebinding(
+        speaker, predicted, {"A": 0}, [0] * 10)
+    assert bindings == {"A": 0}
+    assert active == [0] * 10
+
+
+def test_agreement_decays_the_case_against_the_binding():
+    # Alternating disagreement is ambiguity, not a wrong binding: each
+    # agreeing second knocks one contradiction off, so it never reaches four.
+    speaker = ["A"] * 16
+    predicted = [1, 0] * 8
+    bindings, _ = sf.apply_gated_rebinding(
+        speaker, predicted, {"A": 0}, [0] * 16)
+    assert bindings == {"A": 0}
+
+
+def test_contradictions_spread_past_the_window_never_accumulate():
+    # Five disagreeing seconds, five seconds apart — never four inside one
+    # 8-second window, so a slow drip of noise cannot re-bind anything.
+    speaker = ["A"] * 21
+    predicted = [0] * 21
+    for i in (0, 5, 10, 15, 20):
+        predicted[i] = 1
+    bindings, _ = sf.apply_gated_rebinding(
+        speaker, predicted, {"A": 0}, [0] * 21, rebind_window=8)
+    assert bindings == {"A": 0}
+
+
+def test_no_flip_flop_after_a_rebind():
+    # Once A re-binds to track 1, a couple of seconds pointing back at track
+    # 0 must not undo it — reverting needs its own sustained case.
+    speaker = ["A"] * 12
+    predicted = [0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1]
+    bindings, active = sf.apply_gated_rebinding(
+        speaker, predicted, {"A": 0}, [0] * 12)
+    assert bindings == {"A": 1}
+    assert active[7:] == [1] * 5
+
+
+def test_only_decisive_contradictions_count_toward_a_rebind():
+    speaker = ["A"] * 10
+    predicted = [0, 0, 0, 0, 1, 1, 1, 1, 1, 1]
+    decisive = [True] * 4 + [False] * 6   # the disagreement is a coin flip
+    bindings, active = sf.apply_gated_rebinding(
+        speaker, predicted, {"A": 0}, [0] * 10, decisive_ps=decisive)
+    assert bindings == {"A": 0}
+    assert active == [0] * 10
+
+
+def test_unbound_labels_keep_their_per_second_fallback():
+    # "C" never bound; per_second_active_track already fell back to ASD for
+    # those seconds and re-binding must not touch them.
+    speaker = ["A", "C", "C", "C"]
+    predicted = [0, 5, 5, 5]
+    bindings, active = sf.apply_gated_rebinding(
+        speaker, predicted, {"A": 0}, [0, 5, 5, 5])
+    assert bindings == {"A": 0}
+    assert active == [0, 5, 5, 5]
+
+
+def test_rebinding_can_be_switched_off():
+    speaker = ["A"] * 10
+    predicted = [0, 0, 0, 0, 1, 1, 1, 1, 1, 1]
+    bindings, active = sf.apply_gated_rebinding(
+        speaker, predicted, {"A": 0}, [0] * 10, rebind_seconds=0)
+    assert bindings == {"A": 0}
+    assert active == [0] * 10
+
+
+# ---------------------------------------------------------------------------
 # per_second_speaker_label (moved from eval/ground_truth, retested here as
 # the production entry point)
 # ---------------------------------------------------------------------------
@@ -215,3 +361,42 @@ def test_fuse_speaker_tracks_resolves_speaker_names():
 
     assert bindings == {"host": 0}
     assert active == [0, 0, 0]
+
+
+def test_fuse_speaker_tracks_rebinds_on_sustained_decisive_contradiction():
+    # The whole-clip vote binds A to track 0 (12 of 18 seconds), which is
+    # right for the first two thirds and wrong for the last third. Without
+    # re-binding the camera holds track 0 to the end; with it, the tail
+    # corrects itself once the contradiction is sustained and decisive.
+    spine = _spine({
+        0: [(t, (0.0, 0.0, 10.0, 10.0)) for t in range(18)],
+        1: [(t, (100.0, 100.0, 10.0, 10.0)) for t in range(18)],
+    })
+    boxes = [(0.0, 0.0, 10.0, 10.0)] * 12 + [(100.0, 100.0, 10.0, 10.0)] * 6
+    segments = [{"start": 0.0, "end": 18.0, "speaker": "A"}]
+
+    bindings, active = sf.fuse_speaker_tracks(
+        boxes, spine, segments, clip_start=0.0, clip_end=18.0,
+        asd_per_second_margin=[0.5] * 18)
+
+    assert bindings == {"A": 1}
+    assert active[:15] == [0] * 15
+    assert active[15:] == [1] * 3
+
+
+def test_fuse_speaker_tracks_holds_when_the_contradiction_is_a_coin_flip():
+    # Same footage, but LR-ASD was never sure about the second half (the two
+    # faces scored within the decisive margin). Nothing re-binds.
+    spine = _spine({
+        0: [(t, (0.0, 0.0, 10.0, 10.0)) for t in range(18)],
+        1: [(t, (100.0, 100.0, 10.0, 10.0)) for t in range(18)],
+    })
+    boxes = [(0.0, 0.0, 10.0, 10.0)] * 12 + [(100.0, 100.0, 10.0, 10.0)] * 6
+    segments = [{"start": 0.0, "end": 18.0, "speaker": "A"}]
+
+    bindings, active = sf.fuse_speaker_tracks(
+        boxes, spine, segments, clip_start=0.0, clip_end=18.0,
+        asd_per_second_margin=[0.5] * 12 + [0.01] * 6)
+
+    assert bindings == {"A": 0}
+    assert active == [0] * 18

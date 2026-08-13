@@ -182,6 +182,22 @@ GPU pieces that were silently wrong and are now deterministic:
   through as the per-second fallback: a one-second crowd flicker (reacting
   listener vs talker) no longer flips the frame to the wrong person or
   fabricates a split exchange. `0`/`1` disables the smoothing.
+- `ASD_DECISIVE_MARGIN` — how far LR-ASD's winning face must lead the next
+  best on-screen face, that second, for the second to vote at all (default
+  `0.10`). The model already computes the lead (`score_clip`'s
+  `per_second_margin`); seconds where two faces scored within the margin are
+  the model saying "could be either", and they no longer pollute the
+  one-binding-per-clip vote. `0` counts every second (the old behaviour).
+- `SPEAKER_REBIND_SECONDS` / `SPEAKER_REBIND_WINDOW` — the gate on
+  correcting a binding mid-clip (defaults `4` and `8`). One binding per clip
+  killed the per-frame flip-flop but meant a binding that came out WRONG held
+  the camera on the wrong person for the whole clip. Now, when a bound
+  speaker is talking and decisive ASD points at a different track for
+  `SPEAKER_REBIND_SECONDS` seconds inside a `SPEAKER_REBIND_WINDOW`-second
+  window, the label re-binds from that second to the clip's end. Agreement
+  with the current binding decays the case, so a one-second blip — or an
+  alternating, ambiguous signal — can never trigger it.
+  `SPEAKER_REBIND_SECONDS=0` disables re-binding entirely.
 
 ## Dashboard ordering & data files
 
@@ -202,8 +218,15 @@ GPU pieces that were silently wrong and are now deterministic:
   glide), hard-cut snap (pixel-diff scene cut), boundary clamping, a
   containment projection that never lets the face leave the crop, and a
   full-width fallback when the face is lost. `0` keeps the static
-  union-box panels (the pre-tracking behavior). Tuning knobs:
-  `VSPLIT_HEADROOM=0.18`, `VSPLIT_SIDE_MARGIN=0.15`, `VSPLIT_VERT_MARGIN=0.10`,
+  union-box panels (the pre-tracking behavior). A panel is framed the way a
+  SINGLE shot would frame that person, then stacked: the tracked panels use
+  the same breathing room as the static engine
+  (`reframe_v3.DEFAULT_SIDE_MARGIN` / `DEFAULT_VERT_MARGIN`), and
+  `VSPLIT_PANEL_MIN_FRAC=0.25` floors a panel crop at a quarter of the source
+  height so a small or distant face can never zoom into a passport close-up.
+  Tuning knobs:
+  `VSPLIT_HEADROOM=0.18`, `VSPLIT_SIDE_MARGIN=0.55`, `VSPLIT_VERT_MARGIN=0.35`,
+  `VSPLIT_PANEL_MIN_FRAC=0.25` (fraction of source height),
   `VSPLIT_DEADZONE=0.02` (fraction of crop), `VSPLIT_SMOOTH=0.12` (pan lerp),
   `VSPLIT_SMOOTH_ZOOM=0.06` (zoom lerp), `VSPLIT_FULLWIDTH_FRAC=0.60` (box
   area fraction that triggers the wide-shot fallback), `VSPLIT_LOST_HOLD_FRAMES=30`,

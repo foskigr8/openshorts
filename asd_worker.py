@@ -311,7 +311,8 @@ def score_clip(video_path, detect_faces, identity=None, max_tracks=6,
         cap.release()
 
         if not n_frames or not crops:
-            return {"per_second": [], "per_second_box": [], "tracks": {},
+            return {"per_second": [], "per_second_box": [],
+                    "per_second_margin": [], "tracks": {},
                     "fps": ASD_VIDEO_FPS}
 
         # Only score tracks with real screen presence, biggest first — a
@@ -320,7 +321,8 @@ def score_clip(video_path, detect_faces, identity=None, max_tracks=6,
         ranked = sorted(((tid, f) for tid, f in crops.items() if len(f) >= min_frames),
                         key=lambda kv: -len(kv[1]))[:max_tracks]
         if not ranked:
-            return {"per_second": [], "per_second_box": [], "tracks": {},
+            return {"per_second": [], "per_second_box": [],
+                    "per_second_margin": [], "tracks": {},
                     "fps": ASD_VIDEO_FPS}
 
         # No explicit device: use whatever GPU this clip worker was assigned,
@@ -349,20 +351,37 @@ def score_clip(video_path, detect_faces, identity=None, max_tracks=6,
 
         # Collapse to one speaker per second: the loudest positive mean wins,
         # None when nobody is clearly speaking.
-        per_second, per_second_box = [], []
+        per_second, per_second_box, per_second_margin = [], [], []
         secs = int(np.ceil(min(len(v) for v in tracks.values()) / ASD_VIDEO_FPS))
         for sec in range(secs):
             lo, hi = sec * ASD_VIDEO_FPS, (sec + 1) * ASD_VIDEO_FPS
-            best, best_val = None, 0.0
+            means = []
             for tid, sc in tracks.items():
                 window = sc[lo:hi]
                 window = window[~np.isnan(window)]
                 if window.size == 0:
                     continue
-                val = float(np.mean(window))
+                means.append((float(np.mean(window)), tid))
+            best, best_val = None, 0.0
+            for val, tid in means:
                 if val > best_val:
                     best, best_val = tid, val
             per_second.append(best)
+            # How DECISIVE this second was: the winner's lead over the next
+            # best on-screen face. A second where two faces score nearly the
+            # same is exactly the "reacting listener vs talker" ambiguity that
+            # used to bind a speaker to the wrong track — the consumer
+            # (speaker_fusion) drops those seconds from the vote instead of
+            # letting them pollute the one-per-clip mapping. Nobody else on
+            # screen means nothing to confuse the winner with, so the lead is
+            # measured against the silence baseline (0.0). None where there
+            # was no positive winner at all.
+            if best is None:
+                per_second_margin.append(None)
+            else:
+                runner = max((v for v, tid in means if tid != best),
+                             default=0.0)
+                per_second_margin.append(best_val - max(runner, 0.0))
             # The WHERE matters more than the which. This pass runs its own
             # tracker at 25 fps; the renderer tracks at its own detection
             # stride, so the two id spaces are unrelated and an id would be
@@ -376,6 +395,7 @@ def score_clip(video_path, detect_faces, identity=None, max_tracks=6,
                     box = seen[min(near, key=lambda f: abs(f - (lo + hi) // 2))]
             per_second_box.append(box)
         return {"per_second": per_second, "per_second_box": per_second_box,
+                "per_second_margin": per_second_margin,
                 "tracks": tracks, "fps": ASD_VIDEO_FPS}
     finally:
         import shutil

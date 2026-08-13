@@ -26,6 +26,23 @@ from typing import Optional, Tuple
 Box = Tuple[float, float, float, float]        # (x, y, w, h) in pixels
 Rect = Tuple[float, float, float, float]
 
+# Breathing room around the face box, as a fraction of its own size. These
+# deliberately MATCH reframe_v3.DEFAULT_SIDE_MARGIN / DEFAULT_VERT_MARGIN —
+# a split panel should frame its person exactly the way a single shot would,
+# then be stacked. The tracker used to run far tighter margins (0.15/0.10),
+# which cropped to the face itself and read as a passport photo next to the
+# static framing of the same person. (Not imported from reframe_v3: that
+# module imports this one.)
+DEFAULT_SIDE_MARGIN = 0.55
+DEFAULT_VERT_MARGIN = 0.35
+
+# Floor on a panel crop's height, as a fraction of the source frame. A small
+# or distant face box would otherwise produce a crop only a couple of hundred
+# pixels tall — technically "correctly framed" and unwatchably close. The
+# floor is a lower bound on the crop, so it can only ever pull the camera
+# WIDER than the margin geometry asked for, never tighter.
+DEFAULT_MIN_HEIGHT_FRAC = 0.25
+
 
 def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(value, hi))
@@ -84,13 +101,14 @@ class PanelTracker:
         frame_h: int,
         aspect: float,
         headroom: float = 0.18,
-        side_margin: float = 0.15,
-        vert_margin: float = 0.10,
+        side_margin: float = DEFAULT_SIDE_MARGIN,
+        vert_margin: float = DEFAULT_VERT_MARGIN,
         dead_zone: float = 0.02,
         smooth: float = 0.12,
         smooth_zoom: float = 0.06,
         full_width_area_frac: float = 0.60,
         lost_hold_frames: int = 30,
+        min_height_frac: float = DEFAULT_MIN_HEIGHT_FRAC,
         crop: Optional[Rect] = None,
     ):
         self.frame_w = int(frame_w)
@@ -104,6 +122,7 @@ class PanelTracker:
         self.smooth_zoom = float(smooth_zoom)
         self.full_width_area_frac = float(full_width_area_frac)
         self.lost_hold_frames = int(lost_hold_frames)
+        self.min_height_frac = float(min_height_frac)
         self.crop = tuple(float(v) for v in crop) if crop else None
         self.lost_frames = 0
 
@@ -131,7 +150,11 @@ class PanelTracker:
         # split boundary.
         need_h = sh * (1.0 + 2.0 * self.vert_margin + self.headroom)
         need_w = sw * (1.0 + 2.0 * self.side_margin)
-        crop_h = max(need_h, need_w / self.aspect)
+        # Minimum-size floor: a small/distant face must not zoom the panel to
+        # a passport close-up. Applied alongside the margin geometry, so it
+        # only widens the crop.
+        crop_h = max(need_h, need_w / self.aspect,
+                     self.min_height_frac * self.frame_h)
         crop_w = crop_h * self.aspect
         # Clamp to the frame, preserving aspect.
         if crop_w > self.frame_w:

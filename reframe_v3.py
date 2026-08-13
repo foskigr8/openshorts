@@ -1101,7 +1101,7 @@ def render(input_video, final_output_video, aspect_ratio,
     if not tracks:
         raise RuntimeError("Reframe v3 found no face tracks; refusing to silently fall back")
 
-    asd_boxes = []
+    asd_boxes, asd_margins = [], None
     try:
         import asd_worker
         if asd_worker.available():
@@ -1111,16 +1111,24 @@ def render(input_video, final_output_video, aspect_ratio,
             _ctx = face_spine._resolve_ctx_id(worker_device)
             _detect = lambda frame, _ctx=_ctx: face_spine.detect_faces_per_frame(
                 frame, ctx_id=_ctx)
-            asd_boxes = asd_worker.score_clip(
-                input_video, _detect,
-                device=worker_device).get("per_second_box") or []
+            _asd = asd_worker.score_clip(
+                input_video, _detect, device=worker_device)
+            asd_boxes = _asd.get("per_second_box") or []
+            # The model already computes how far the winning face led the
+            # runner-up each second; carrying it through is free and lets the
+            # fusion throw out the seconds where it was a coin flip.
+            asd_margins = _asd.get("per_second_margin")
             print(f"   ↳ LR-ASD: {_time.time() - _t0:.0f}s")
     except Exception as exc:
         print(f"   ⚠️ LR-ASD unavailable for v3 ({type(exc).__name__}: {exc})")
     segments = (transcript or {}).get("segments", [])
     _, active = speaker_fusion.fuse_speaker_tracks(
         asd_boxes, tracks, segments, clip_start, effective_end,
-        smooth_window=int(os.environ.get("SPEAKER_SMOOTH_WINDOW", "3")))
+        smooth_window=int(os.environ.get("SPEAKER_SMOOTH_WINDOW", "3")),
+        asd_per_second_margin=asd_margins,
+        decisive_margin=float(os.environ.get("ASD_DECISIVE_MARGIN", "0.10")),
+        rebind_seconds=int(os.environ.get("SPEAKER_REBIND_SECONDS", "4")),
+        rebind_window=int(os.environ.get("SPEAKER_REBIND_WINDOW", "8")))
     if not any(track is not None for track in active):
         # A transcript/ASD gap must not turn a known person into an untracked
         # full-frame crop. Prefer the scene context's key subject when it
@@ -1189,9 +1197,17 @@ def render(input_video, final_output_video, aspect_ratio,
             _panel_aspect = aspect_ratio * 2.0 / (
                 1.0 - float(os.environ.get("VSPLIT_BAND_FRAC", "0")))
             _track_knobs = dict(
+                # Panel framing parity: the tracked panels use the SAME
+                # breathing room as a static single shot (crop_rect_containing
+                # above), so a split is "normal framing, then stacked" rather
+                # than two zoomed-in faces.
                 headroom=float(os.environ.get("VSPLIT_HEADROOM", "0.18")),
-                side_margin=float(os.environ.get("VSPLIT_SIDE_MARGIN", "0.15")),
-                vert_margin=float(os.environ.get("VSPLIT_VERT_MARGIN", "0.10")),
+                side_margin=float(os.environ.get(
+                    "VSPLIT_SIDE_MARGIN", str(DEFAULT_SIDE_MARGIN))),
+                vert_margin=float(os.environ.get(
+                    "VSPLIT_VERT_MARGIN", str(DEFAULT_VERT_MARGIN))),
+                min_height_frac=float(os.environ.get(
+                    "VSPLIT_PANEL_MIN_FRAC", "0.25")),
                 dead_zone=float(os.environ.get("VSPLIT_DEADZONE", "0.02")),
                 smooth=float(os.environ.get("VSPLIT_SMOOTH", "0.12")),
                 smooth_zoom=float(os.environ.get("VSPLIT_SMOOTH_ZOOM", "0.06")),
