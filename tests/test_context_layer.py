@@ -118,3 +118,26 @@ class TestWaitBudget:
     def test_respects_custom_target_and_floor(self):
         assert context_layer.wait_budget(0.0, target=20.0, floor=3.0) == 20.0
         assert context_layer.wait_budget(50.0, target=20.0, floor=3.0) == 3.0
+
+
+class TestTranscriptContextFallback:
+    def test_compaction_keeps_speaker_times_and_skips_empty(self):
+        segs = [
+            {"start": 10, "end": 13, "speaker": "A",
+             "words": [{"text": "hi"}, {"text": "there"}]},
+            {"start": 14, "end": 16, "speaker": "B", "text": ""},
+            {"start": 20, "end": 22, "speaker": None, "text": "no label"},
+        ]
+        out = context_layer._compact_transcript_segments(segs)
+        assert "[10.0-13.0s] speaker A: hi there" in out
+        assert "[20.0-22.0s]: no label" in out
+        assert "speaker B" not in out  # empty segment skipped
+
+    def test_disabled_by_env(self, monkeypatch):
+        monkeypatch.setenv("CONTEXT_FROM_TRANSCRIPT", "0")
+        assert context_layer.build_context_from_transcript(
+            {"segments": [{"start": 0, "end": 1, "text": "x"}]}) is None
+
+    def test_no_segments_returns_none(self, monkeypatch):
+        monkeypatch.setenv("CONTEXT_FROM_TRANSCRIPT", "1")
+        assert context_layer.build_context_from_transcript({}) is None

@@ -36,6 +36,27 @@ load_dotenv()
 CONTEXT_BLOB_FILENAME = "gemini_context.json"
 _DEFAULT_MODEL = "gemini-3.1-flash-lite"
 
+TRANSCRIPT_CONTEXT_PROMPT_TEMPLATE = """
+You are the FIRST PASS of a short-form clip pipeline. You do not have the
+video — you have its full DIARIZED TRANSCRIPT (speaker labels + timestamps).
+Build the same 3-part "brain" a clip picker uses, inferring from the
+dialogue what is actually happening: roles, the premise, format, structure,
+stakes, tone, and the beats where people react, laugh, argue, or pop.
+Never assume a niche or genre — adapt to what the dialogue shows.
+
+Return EXACTLY three sections:
+1. SUMMARY — what the video is about, who is involved (roles, not just
+   names), the setting/format, the stakes/throughline, the tone.
+2. HIGHLIGHTS — an ENUMERATION of the notable beats, each with an
+   approximate time range. Be dense: for a long video list many.
+3. LOVABLE_MOMENTS — the moments people would love/share/clip, each with an
+   approximate time range.
+
+The transcript follows, then respond with JSON:
+summary: str, highlights: [{start_s, end_s, description}],
+lovable_moments: [{start_s, end_s, description}], video_duration_s: float.
+"""
+
 _AUTH_FAILURE_TOKENS = (
     "unauthenticated", "access_token_type_unsupported",
     "invalid authentication", "api key not valid", "invalid_api_key",
@@ -211,6 +232,134 @@ def _call_with_key(api_key, url, prompt):
             print(f"⚠️ Context-layer transient error (attempt {attempt}/{max_attempts}), "
                   f"retrying in {wait}s: {msg[:150]}")
             time.sleep(wait)
+
+
+def _call_with_text(api_key, transcript_text, prompt, model=None):
+    """One TEXT-only call (no video URI — the from_uri video tier is
+    frequently quota-exhausted even when the text tier is healthy). Uses the
+    stable Part(text=...) field constructor: Part.from_text() is broken on
+    the installed google-genai (version drift)."""
+    client = gemini_worker.make_client(api_key)
+    model_name = model or _model_name()
+    config = genai_types.GenerateContentConfig(
+        response_mime_type="application/json",
+        response_schema=ContextBlobResponse,
+        safety_settings=gemini_worker.RELAXED_SAFETY_SETTINGS,
+    )
+    content = [genai_types.Part(text=transcript_text),
+               genai_types.Part(text=prompt)]
+    max_attempts = 2
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = gemini_pool.generate_with_fallback(
+                client, model_name, content, config=config, max_attempts=1,
+                log=lambda msg: print(msg))
+            gemini_worker.raise_if_blocked(response)
+            parsed_obj = getattr(response, "parsed", None)
+            if parsed_obj is not None:
+                parsed = (parsed_obj.model_dump()
+                          if hasattr(parsed_obj, "model_dump")
+                          else parsed_obj)
+            else:
+                raw_text = gemini_worker._get_response_text(response)
+                parsed = gemini_worker._parse_json_response_text(raw_text)
+            return parsed, gemini_worker._calculate_cost_analysis(
+                response, model_name)
+        except gemini_worker.GeminiBlockedError:
+            raise
+        except Exception as e:
+            msg = str(e)
+            if any(tok in msg.lower() for tok in _AUTH_FAILURE_TOKENS):
+                raise  # bad key — rotate at the caller
+            if attempt == max_attempts or not any(
+                    tok in msg for tok in _TRANSIENT_TOKENS):
+                raise
+            wait = 5 * (2 ** (attempt - 1))
+            print(f"⚠️ Context-layer transient error (attempt "
+                  f"{attempt}/{max_attempts}), retrying in {wait}s: "
+                  f"{msg[:150]}")
+            time.sleep(wait)
+
+
+def _call_gemini_text(api_key, transcript_text, prompt, model=None):
+    """Structured TEXT context call with the same per-key rotation as the
+    video-link call."""
+    keys = _api_keys(api_key)
+    last_exc = None
+    for i, key in enumerate(keys):
+        try:
+            return _call_with_text(key, transcript_text, prompt, model=model)
+        except gemini_worker.GeminiBlockedError:
+            raise
+        except Exception as e:
+            last_exc = e
+            if not any(tok in str(e).lower() for tok in _TRANSIENT_TOKENS):
+                raise
+            if i < len(keys) - 1:
+                print(f"⚠️ Context-layer Gemini key {i + 1}/{len(keys)} hit a "
+                      f"transient error ({str(e)[:120]}) — rotating to the "
+                      f"next key")
+    raise last_exc
+
+
+def _compact_transcript_segments(segments, max_chars=20000) -> str:
+    """Flatten diarized segments to '[start-end]s speaker X: text' lines —
+    the transcript-only context brain's input. Skips empty segments."""
+    lines = []
+    for seg in segments or []:
+        speaker = seg.get("speaker")
+        words = " ".join((w.get("text") or w.get("word") or "")
+                         for w in (seg.get("words") or []))
+        text = (words or str(seg.get("text") or "")).strip()
+        if not text:
+            continue
+        s = float(seg.get("start") or 0)
+        e = float(seg.get("end") or 0)
+        lines.append(f"[{s:.1f}-{e:.1f}s]"
+                     + (f" speaker {speaker}:" if speaker else ":")
+                     + f" {text[:300]}")
+    return "\n".join(lines)[:max_chars]
+
+
+def build_context_from_transcript(transcript, source_url="", source_title="",
+                                  model=None):
+    """Transcript-only context brain: when the video-link (from_uri) call is
+    quota-exhausted — the video tier dies long before the text tier — build
+    the same 3-part blob from the diarized transcript with a plain-text call.
+    Returns the blob dict or None (fail-open)."""
+    if os.environ.get("CONTEXT_FROM_TRANSCRIPT", "1").strip().lower() in (
+            "0", "false", "no", "off"):
+        return None
+    segments = (transcript or {}).get("segments") or []
+    if not segments:
+        return None
+    compact = _compact_transcript_segments(segments)
+    if not compact:
+        return None
+    api_key = resolve_api_key()
+    if not api_key:
+        return None
+    print(f"🧠 Context layer (transcript fallback): building the brain from "
+          f"the transcript (model={model or _model_name()})...")
+    try:
+        parsed, _cost = _call_gemini_text(
+            api_key, compact, TRANSCRIPT_CONTEXT_PROMPT_TEMPLATE, model=model)
+    except Exception as e:
+        print(f"   ⚠️ Transcript context failed ({type(e).__name__}: {e})")
+        return None
+    blob = {
+        "source_url": source_url,
+        "source_title": source_title,
+        "summary": str(parsed.get("summary", "")),
+        "highlights": parsed.get("highlights") or [],
+        "lovable_moments": parsed.get("lovable_moments") or [],
+        "video_duration_s": parsed.get("video_duration_s"),
+        "context_source": "transcript",
+    }
+    print(f"✅ Context layer (transcript) ready: "
+          f"{len(blob['highlights'])} highlight(s), "
+          f"{len(blob['lovable_moments'])} lovable moment(s)")
+    return blob
 
 
 def analyze_url(url, output_path=None, source_title=""):
