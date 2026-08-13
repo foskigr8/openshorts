@@ -661,6 +661,26 @@ def test_compose_very_far_pair_stays_vsplit():
     assert composed.panels is not None
 
 
+def test_compose_wide_fallback_when_subject_moves_too_much():
+    # A speaker pacing across the shot unions into a box too wide for a 9:16
+    # crop (subject (372,160,1012,400)) — emit the 4:3 wide centred on them
+    # instead of failing composition (the ASR-first identity path hands us
+    # exactly these shots).
+    spine = {
+        1: {"frames": [0.0, 1.0, 2.0],
+            "boxes": [(372.0, 160.0, 400.0, 400.0),
+                      (984.0, 160.0, 400.0, 400.0),
+                      (372.0, 160.0, 400.0, 400.0)]},
+    }
+    shot = Shot(0.0, 3.0, SHOT_SINGLE, [1], None)
+    composed = _compose_shot(shot, spine, [1, 1, 1],
+                             np.zeros((1080, 1920), dtype=np.float32),
+                             1920, 1080, VERTICAL_9_16)
+    assert composed.layout == LAYOUT_WIDE
+    assert composed.crop is not None
+    validate_composition([composed], 1920, 1080, VERTICAL_9_16)
+
+
 def test_compose_wide_shot_uses_provided_rect():
     shot = Shot(0.0, 3.0, SHOT_WIDE, [], (100.0, 200.0, 405.0, 720.0))
     composed = _compose_shot(shot, {}, [None, None, None],

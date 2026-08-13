@@ -811,7 +811,23 @@ def _compose_shot(shot, spine_tracks: Dict[int, dict], active_tracks,
         crop = _enforce_min_crop(
             crop, frame_w, frame_h, aspect,
             float(os.environ.get("MIN_CROP_FRAC", "0.45")))
-    return ComposedShot(shot.start, shot.end, layout, crop, subjects)
+        # A subject whose movement union is too wide for the 9:16 crop (a
+        # speaker pacing across the shot, or a loose detection — the ASR-first
+        # identity path hands us these) cannot be contained by a tight shot.
+        # Emit the 4:3 WIDE centred on them instead of failing composition —
+        # the owner-approved "show more context" output.
+        if subject is not None and not contains(crop, subject):
+            _wide = _wide43_rect(frame_w, frame_h, [subject])
+            if contains(_wide, subject):
+                return ComposedShot(shot.start, shot.end, LAYOUT_WIDE, _wide,
+                                    subjects, track_ids=list(shot.track_ids))
+            # Even the wide can't hold the full movement range — show the
+            # whole frame (fit-rendered, letterboxed).
+            return ComposedShot(
+                shot.start, shot.end, LAYOUT_WIDE,
+                (0.0, 0.0, float(frame_w), float(frame_h)),
+                subjects, track_ids=list(shot.track_ids))
+        return ComposedShot(shot.start, shot.end, layout, crop, subjects)
 
 
 def compose_shots(shots, spine_tracks: Dict[int, dict], active_tracks,
@@ -941,15 +957,15 @@ def _regular_filtergraph(composed: Sequence[ComposedShot], frame_w: int, frame_h
         x, y, w, h = _integer_crop(shot.crop, frame_w, frame_h)
         label = f"s{i}"
         if shot.layout == LAYOUT_WIDE:
-            # 4:3 wide: scale to fit the width, pad the rest black (the
-            # letterboxed "show everyone" look).
-            _content_h = max(2, int(round(out_w * 3.0 / 4.0)))
-            _pad_y = max(0, (out_h - _content_h) // 2)
+            # Wide: scale to FIT within the 9:16 frame (preserving the
+            # content's own aspect — 4:3 normally, 16:9 for the whole-frame
+            # fallback) and pad the rest black. Never stretches.
             parts.append(
                 f"[0:v]trim=start={shot.start:.6f}:end={shot.end:.6f},"
                 f"setpts=PTS-STARTPTS,crop={w}:{h}:{x}:{y},"
-                f"scale={out_w}:{_content_h}:flags=lanczos,"
-                f"pad={out_w}:{out_h}:0:{_pad_y}:black,setsar=1[{label}]"
+                f"scale={out_w}:{out_h}:force_original_aspect_ratio=decrease:"
+                f"flags=lanczos,"
+                f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:black,setsar=1[{label}]"
             )
         else:
             parts.append(
