@@ -383,6 +383,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--skip-youtube", action="store_true",
                         help="skip the cookie check (it is the slowest)")
+    parser.add_argument("--strict", action="store_true",
+                        help="exit non-zero on any failed check (default: "
+                             "failures are REPORTED but never fatal)")
     args = parser.parse_args()
 
     results = []
@@ -415,7 +418,17 @@ def main():
         if "Transcription backend" in failed:
             print("  Transcription: add ASSEMBLYAI_API_KEY as a Kaggle secret "
                   "to get diarization and drop ~200s from every job.")
-    return 1 if failed else 0
+        # A FAIL report must NOT tear the run down. Cell 3 starts the API +
+        # Cloudflare tunnel with nohup; in a headless/Run All run, a
+        # non-zero exit here stops the notebook (or marks the Batch run
+        # failed) and Kaggle recycles the session — killing the tunnel and
+        # turning the printed URL into a Cloudflare "tunnel error" page.
+        # The report above is the deliverable; the session stays up so the
+        # dashboard keeps working. --strict restores the old gate behaviour.
+        print("\nFailures are reported above but are NOT fatal — the "
+              "session/tunnel stays up. Use --strict to make them exit "
+              "non-zero.")
+    return 1 if (failed and args.strict) else 0
 
 
 if __name__ == "__main__":
