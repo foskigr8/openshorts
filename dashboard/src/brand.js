@@ -2,14 +2,11 @@
  * Everything that identifies this app, in one place.
  *
  * The mark is resolved from a LIST, tried in order, first one that loads
- * wins. That is deliberate: the real artwork is a PNG that has to be copied
- * into public/ by hand — nothing in this toolchain can author a binary file —
- * so the moment `logo-ai4ts.png` appears there it is picked up everywhere
- * (nav badge, favicon, tab) with no edit in here. Until then the vector
- * stand-in shows, and a missing file can never render a broken-image glyph.
+ * wins — so a missing or misnamed file degrades to the previous icon instead
+ * of rendering a broken-image glyph in the nav and the tab.
  *
- * To use different artwork: drop it in dashboard/public/ and put its path
- * first in LOGO_SOURCES.
+ * To swap the artwork: drop the file in dashboard/public/ and put its path
+ * first in LOGO_SOURCES. Transparent background, roughly square.
  */
 export const BRAND = {
   name: 'Ai4Ts',
@@ -17,8 +14,7 @@ export const BRAND = {
 };
 
 export const LOGO_SOURCES = [
-  '/logo-ai4ts.png',      // the real mark — copy it here and it wins
-  '/logo-ai4ts.svg',      // hand-drawn stand-in, committed
+  '/logo-ai4ts.png',      // the real mark, trimmed and squared
   '/logo-openshorts.png', // last resort, so something always renders
 ];
 
