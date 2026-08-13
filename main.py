@@ -680,79 +680,88 @@ def download_youtube_video(url, output_dir=".", require_hd=False):
         """Rough sharpness ordering for choosing between landed files."""
         return (specs["height"], specs["bitrate_mbps"])
 
-    for idx, (label, ea, fmt, proxy, use_cookies) in enumerate(attempts):
-        # PART 6 (6-aug-2026): a low-quality success must not stop the ladder
-        # when a better (HD-labeled) strategy is still queued — the goal is
-        # that HD LANDS, not that the first success ships. Only attempts that
-        # can plausibly produce a better stream count as "remaining HD".
-        remaining_hd = any("HD" in a[0] for a in attempts[idx + 1:])
-        # A 403 on the media fetch is usually transient: the googlevideo URL is
-        # bound to the IP that extracted it, and the residential proxy rotates
-        # its exit IP between requests. Retrying re-extracts and usually lands
-        # on a consistent IP (3 of 62 downloads hit this on 22-jul-2026).
-        for retry in range(2):
-            try:
-                print(f"📥 Download attempt: {label}" + (f" (retry {retry})" if retry else ""))
-                sanitized_title = _attempt(ea, fmt, proxy, use_cookies,
-                                           allow_subfloor=(
-                                               idx == len(attempts) - 1))
-                used_proxy = proxy is not None
-                print(f"✅ Download succeeded ({label}).")
-                # Verify what actually landed BEFORE deciding to proceed.
-                _landed = os.path.join(output_dir, f"{sanitized_title}.mp4")
-                _specs = _probe_video_specs(_landed)
-                if _specs is not None:
-                    print(f"📐 Source specs ({label}): {_specs['width']}x"
-                          f"{_specs['height']} @ {_specs['fps']}fps · "
-                          f"{_specs['bitrate_mbps']} Mbps · "
-                          f"codec {_specs.get('codec') or '?'} "
-                          f"({_specs.get('pix_fmt') or '?'}) · "
-                          f"{_specs['size_mb']} MiB")
-                    _reason = _download_quality_floor(_specs)
-                    if _reason:
-                        print(f"⚠️ LOW-QUALITY SOURCE ({label}): {_reason}")
-                        if remaining_hd:
-                            # Park this file aside, keep climbing; restore it
-                            # at the end if nothing better lands.
-                            try:
-                                _best = _landed + ".best"
-                                shutil.copy2(_landed, _best)
-                                best_title, best_specs = sanitized_title, _specs
-                                best_path = _best
-                                print("   ↪️ Below the HD floor — continuing "
-                                      "the ladder for a higher-quality stream.")
-                            except OSError as _e:
-                                print(f"   ⚠️ Could not park best download ({_e})")
-                            sanitized_title = None  # keep climbing
-                            break
-                break
-            except ClientCannotServeFloor as _skip:
-                # The probe decided this client can't serve the floor at
-                # all; its format list is stable, so retrying is pointless —
-                # move to the next strategy without burning a download.
-                last_err = _skip
-                print(f"   ↪️ {label} can't serve the HD floor "
-                      f"(best {_skip.best_height}p) — skipping to the next "
-                      "strategy")
-                break
-            except Exception as e:
-                last_err = e
-                print(f"⚠️  Download attempt '{label}' failed: {str(e)[:200]}")
-                # 403s and YouTube's bot wall ("Sign in to confirm you're not
-                # a bot") are often transient IP-level flags — the earlier
-                # ladder pass may have succeeded on the same video minutes
-                # ago. Retry them once with a short backoff before moving on.
-                _msg = str(e)
-                retryable = (any(t in _msg for t in (
-                    '403', 'Forbidden', 'Sign in to confirm', 'not a bot',
-                    'Sign in', 'confirm you'))
-                    or 'bot' in _msg.lower())
-                if not retryable or retry == 1:
+    # Bot-wall flags are transient IP-level bans that often clear in a minute
+    # or two ("worked effortlessly before, now walls" = IP flag, not a code
+    # regression). When EVERY strategy walls, cool down and give the whole
+    # ladder one more pass before declaring the job dead.
+    for _ladder_pass in range(2):
+        for idx, (label, ea, fmt, proxy, use_cookies) in enumerate(attempts):
+            # PART 6 (6-aug-2026): a low-quality success must not stop the
+            # ladder when a better (HD-labeled) strategy is still queued —
+            # the goal is that HD LANDS, not that the first success ships.
+            remaining_hd = any("HD" in a[0] for a in attempts[idx + 1:])
+            # A 403 on the media fetch is usually transient: the googlevideo
+            # URL is bound to the IP that extracted it, and the residential
+            # proxy rotates its exit IP between requests.
+            for retry in range(2):
+                try:
+                    print(f"📥 Download attempt: {label}"
+                          + (f" (retry {retry})" if retry else ""))
+                    sanitized_title = _attempt(ea, fmt, proxy, use_cookies,
+                                               allow_subfloor=(
+                                                   idx == len(attempts) - 1))
+                    used_proxy = proxy is not None
+                    print(f"✅ Download succeeded ({label}).")
+                    # Verify what actually landed BEFORE deciding to proceed.
+                    _landed = os.path.join(output_dir, f"{sanitized_title}.mp4")
+                    _specs = _probe_video_specs(_landed)
+                    if _specs is not None:
+                        print(f"📐 Source specs ({label}): {_specs['width']}x"
+                              f"{_specs['height']} @ {_specs['fps']}fps · "
+                              f"{_specs['bitrate_mbps']} Mbps · "
+                              f"codec {_specs.get('codec') or '?'} "
+                              f"({_specs.get('pix_fmt') or '?'}) · "
+                              f"{_specs['size_mb']} MiB")
+                        _reason = _download_quality_floor(_specs)
+                        if _reason:
+                            print(f"⚠️ LOW-QUALITY SOURCE ({label}): {_reason}")
+                            if remaining_hd:
+                                try:
+                                    _best = _landed + ".best"
+                                    shutil.copy2(_landed, _best)
+                                    best_title, best_specs = sanitized_title, _specs
+                                    best_path = _best
+                                    print("   ↪️ Below the HD floor — "
+                                          "continuing the ladder for a "
+                                          "higher-quality stream.")
+                                except OSError as _e:
+                                    print(f"   ⚠️ Could not park best download ({_e})")
+                                sanitized_title = None  # keep climbing
+                                break
                     break
-                # Bot-wall flags usually need a longer cool-down than a 403.
-                time.sleep(25 if ('Sign in' in _msg or 'bot' in _msg.lower())
-                           else 3)
+                except ClientCannotServeFloor as _skip:
+                    # The probe decided this client can't serve the floor at
+                    # all; its format list is stable, so retrying is
+                    # pointless — move to the next strategy.
+                    last_err = _skip
+                    print(f"   ↪️ {label} can't serve the HD floor "
+                          f"(best {_skip.best_height}p) — skipping to the "
+                          "next strategy")
+                    break
+                except Exception as e:
+                    last_err = e
+                    print(f"⚠️  Download attempt '{label}' failed: {str(e)[:200]}")
+                    _msg = str(e)
+                    retryable = (any(t in _msg for t in (
+                        '403', 'Forbidden', 'Sign in to confirm', 'not a bot',
+                        'Sign in', 'confirm you'))
+                        or 'bot' in _msg.lower())
+                    if not retryable or retry == 1:
+                        break
+                    # Bot-wall flags usually need a longer cool-down.
+                    time.sleep(25 if ('Sign in' in _msg or 'bot' in _msg.lower())
+                               else 3)
+            if sanitized_title is not None:
+                break
         if sanitized_title is not None:
+            break
+        if _ladder_pass == 0 and (
+                'Sign in' in str(last_err or '')
+                or 'bot' in str(last_err or '').lower()):
+            print("   ⏳ Bot wall on every strategy — cooling down 90s and "
+                  "giving the ladder one more pass (transient IP flag)...")
+            time.sleep(90)
+        else:
             break
 
     if sanitized_title is None:
