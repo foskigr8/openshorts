@@ -571,16 +571,16 @@ else
 fi
 
 # Outbound reachability probe — separates "no internet at all" (Batch runs
-# can be network-restricted) from "tunnel registration failed". QUIC (UDP)
+# can be network-restricted) from "tunnel registration failed". Only
+# cloudflare.com is probed: the argotunnel edge hosts don't answer a plain
+# HTTPS GET, so probing them only produces a misleading FAILED. QUIC (UDP)
 # is cloudflared's default and is exactly what restricted/headless networks
-# block, so every retry round also tries the TCP/HTTP2 protocol.
-for host in https://cloudflare.com https://region1.v2.argotunnel.com; do
-    if curl -sf -o /dev/null --max-time 8 "$host" 2>/dev/null; then
-        echo "    outbound OK: $host"
-    else
-        echo "    outbound FAILED: $host"
-    fi
-done
+# block, so every retry round below also tries the TCP/HTTP2 protocol.
+if curl -sf -o /dev/null --max-time 8 https://cloudflare.com 2>/dev/null; then
+    echo "    outbound internet: OK"
+else
+    echo "    outbound internet: FAILED (headless runs can be network-restricted)"
+fi
 
 URL=""
 for round in 1 2 3; do
