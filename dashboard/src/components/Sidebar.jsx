@@ -50,7 +50,7 @@ export default function Sidebar({
           className="w-9 h-9 bg-paper3 rounded-input flex items-center justify-center shrink-0
                      overflow-hidden border border-rule hover:border-rule2 transition-colors relative group"
         >
-          <img src={BRAND.logo} alt="" className="w-full h-full object-cover group-hover:opacity-25 transition-opacity" />
+          <img src={BRAND.logo} alt="" className="w-full h-full object-contain p-1 group-hover:opacity-25 transition-opacity" />
           <span className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
             {wide ? <ChevronLeft size={15} className="text-ink" /> : <ChevronRight size={15} className="text-ink" />}
           </span>
