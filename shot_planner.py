@@ -377,7 +377,7 @@ def plan_shots_from_samples(samples: List[Tuple[float, Optional[int]]],
                             total_duration: float,
                             forced_boundaries: Optional[List[float]] = None,
                             min_shot_seconds: float = 1.8,
-                            max_shot_seconds: float = 8.0,
+                            max_shot_seconds: float = 14.0,
                             default_wide_rect: Optional[tuple] = None) -> List[Shot]:
     """The general entry point: arbitrary-timestamp samples -> a stable shot
     list. See `plan_shots` for the 1Hz-feed convenience wrapper.
@@ -437,6 +437,7 @@ def plan_shots(per_second_active_track: List[Optional[int]],
                total_duration: Optional[float] = None,
                forced_boundaries: Optional[List[float]] = None,
                min_shot_seconds: float = 1.8,
+               max_shot_seconds: float = 14.0,
                default_wide_rect: Optional[tuple] = None) -> List[Shot]:
     """Convenience entry point for TODAY's feed: `speaker_fusion.
     per_second_active_track`'s 1Hz list, index i = second i.
@@ -447,6 +448,7 @@ def plan_shots(per_second_active_track: List[Optional[int]],
     return plan_shots_from_samples(samples, spine_tracks, duration,
                                    forced_boundaries=forced_boundaries,
                                    min_shot_seconds=min_shot_seconds,
+                                   max_shot_seconds=max_shot_seconds,
                                    default_wide_rect=default_wide_rect)
 
 

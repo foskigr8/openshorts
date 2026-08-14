@@ -243,13 +243,11 @@ def test_plan_shots_end_to_end_with_realistic_flicker():
     })
     active = [0, 0, 0, 0, 0, 1, 0, 0, 0, 0]
     shots = sp.plan_shots(active, spine, min_shot_seconds=1.2)
-    # The 10s single-speaker run is capped into <=8s chunks (each chunk
-    # re-anchors on the current position) — but the ASD flicker still has
-    # zero visible effect: every shot is track 0, covering 0-10.
-    assert len(shots) == 2
-    assert all(s.track_ids == [0] for s in shots)
-    assert shots[0].start == 0.0 and shots[-1].end == 10.0
-    assert all(s.duration <= 8.0 + 1e-6 for s in shots)
+    # The 10s single-speaker run is under the 14s cap, so it stays ONE shot
+    # — the ASD flicker has zero visible effect: track 0, covering 0-10.
+    assert len(shots) == 1
+    assert shots[0].track_ids == [0]
+    assert shots[0].start == 0.0 and shots[0].end == 10.0
 
 
 # ---------------------------------------------------------------------------
