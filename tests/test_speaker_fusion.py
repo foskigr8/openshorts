@@ -458,3 +458,42 @@ class TestSpeakerLockScore:
     def test_nothing_to_score_returns_none(self):
         assert sf.speaker_lock_score([None, None], {}, [None, None]) is None
         assert sf.speaker_lock_score(["A"], {}, [None]) is None
+
+
+class TestCrowdPluralityBinding:
+    """A 60% majority is a high bar with 6-11 faces on screen: the vote for
+    one speaker scatters across neighbours, nothing binds, and the whole clip
+    goes wide. A clear plurality is not the same ambiguity as a coin flip."""
+
+    def test_a_clear_plurality_binds_in_a_crowd(self):
+        # 5 votes for track 0, spread of 1 each across four neighbours.
+        speaker = ["A"] * 9
+        predicted = [0, 0, 0, 0, 0, 1, 2, 3, 4]
+        assert sf.resolve_speaker_bindings(speaker, predicted) == {"A": 0}
+
+    def test_a_dead_tie_still_binds_nothing(self):
+        """The case the majority bar was actually written for."""
+        assert "A" not in sf.resolve_speaker_bindings(["A"] * 4, [0, 1, 0, 1])
+
+    def test_a_narrow_lead_inside_the_plurality_band_still_binds_nothing(self):
+        # 5 vs 4 vs 1: agreement 0.5 sits in the plurality band, but the lead
+        # over the runner-up is only 1.25x — that is a contest, not a winner.
+        speaker = ["A"] * 10
+        predicted = [0, 0, 0, 0, 0, 1, 1, 1, 1, 2]
+        assert "A" not in sf.resolve_speaker_bindings(speaker, predicted)
+
+
+class TestBindingDiagnostics:
+    def test_it_separates_no_diarization_from_no_match(self):
+        no_asd = sf.binding_diagnostics(["A", "A"], [None, None], {})
+        assert no_asd["labelled"] == 2 and no_asd["matched"] == 0
+        assert no_asd["voting"] == 0        # nothing could vote
+
+        no_labels = sf.binding_diagnostics([None, None], [1, 1], {})
+        assert no_labels["labelled"] == 0 and no_labels["matched"] == 2
+
+    def test_it_reports_the_top_share_for_an_unbound_label(self):
+        d = sf.binding_diagnostics(["A"] * 4, [0, 1, 0, 1], {})
+        track, share, total, spread = d["labels"]["A"]
+        assert (track, share, total, spread) == (0, 0.5, 4, 2)
+        assert d["bound"] == 0

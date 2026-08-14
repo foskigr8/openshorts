@@ -1581,7 +1581,11 @@ def render(input_video, final_output_video, aspect_ratio,
             # goes WIDE rather than being pointed at the nearest torso.
             unmapped_policy=os.environ.get(
                 "SPEAKER_UNMAPPED_POLICY",
-                speaker_fusion.UNMAPPED_POLICY_WIDE).strip().lower())
+                speaker_fusion.UNMAPPED_POLICY_WIDE).strip().lower(),
+            # ...but never to the point of an all-wide clip: past this share
+            # of labelled seconds the bindings have failed, and a guess beats
+            # nothing while the fusion gets fixed.
+            max_wide=float(os.environ.get("SPEAKER_UNMAPPED_MAX_WIDE", "0.5")))
     if _identity_map is None and not any(track is not None for track in active):
         # NOTHING bound for the whole clip. This used to pick a track anyway —
         # the scene director's key subject, else whichever face was on screen

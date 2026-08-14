@@ -240,7 +240,9 @@ def resolve_speaker_bindings(per_second_speaker: List[Optional[str]],
                              predicted_track_ps: List[Optional[int]],
                              min_agreement: float = 0.6,
                              min_seconds: float = 1.0,
-                             decisive_ps: Optional[List[bool]] = None
+                             decisive_ps: Optional[List[bool]] = None,
+                             min_plurality: float = 0.40,
+                             plurality_lead: float = 2.0
                              ) -> Dict[str, int]:
     """The core Phase 3 fusion: ONE speaker_label -> track_id binding per
     label, decided from ALL the evidence across the whole clip at once.
@@ -286,6 +288,19 @@ def resolve_speaker_bindings(per_second_speaker: List[Optional[str]],
         agreement = track_votes[best_track] / total
         if agreement >= min_agreement:
             bindings[label] = best_track
+            continue
+        # PLURALITY TIER. A 60% majority is a high bar in a crowd: with 6-11
+        # faces on screen, LR-ASD's vote for one speaker scatters across
+        # several neighbours and no track reaches it, so NOTHING binds and the
+        # whole clip goes wide. But "spread thin across many" is not the same
+        # ambiguity as "a coin flip between two" — a track that leads the
+        # runner-up by `plurality_lead`x is a clear winner even at 40%.
+        # A dead 50/50 tie still binds nothing, which is the case the
+        # majority bar was actually written for.
+        if agreement >= min_plurality and len(track_votes) > 1:
+            runner_up = sorted(track_votes.values(), reverse=True)[1]
+            if runner_up > 0 and track_votes[best_track] >= plurality_lead * runner_up:
+                bindings[label] = best_track
     return bindings
 
 
@@ -335,6 +350,73 @@ def per_second_active_track(per_second_speaker: List[Optional[str]],
         else:
             out.append(None)
     return out
+
+
+def binding_diagnostics(per_second_speaker: List[Optional[str]],
+                        predicted_track_ps: List[Optional[int]],
+                        bindings: Dict[str, int],
+                        decisive_ps: Optional[List[bool]] = None) -> dict:
+    """Where the speaker->face signal survives or dies, stage by stage.
+
+    Four numbers answer "why did nothing bind?" without a re-run:
+      * `labelled`   — seconds the transcript says someone is talking. Zero
+                       means diarization is the problem, not the fusion.
+      * `asd_boxes`  — seconds LR-ASD made any call at all.
+      * `matched`    — seconds an ASD box resolved to a known face track.
+                       `asd_boxes` high but `matched` near zero means the ASD
+                       boxes are not landing on the spine's faces (a
+                       coordinate-space or scaling bug), which no threshold
+                       change will fix.
+      * `voting`     — seconds with BOTH a label and a matched track. These
+                       are the only seconds that can produce a binding.
+    Plus, per label, the top track's share — so a clip that fails only the
+    agreement bar looks different from one with no evidence at all.
+    """
+    n = len(per_second_speaker)
+    labelled = sum(1 for l in per_second_speaker if l is not None)
+    asd_boxes = sum(1 for t in (predicted_track_ps or []) if t is not None)
+    matched = asd_boxes
+    voting = sum(1 for i in range(min(n, len(predicted_track_ps or [])))
+                 if per_second_speaker[i] is not None
+                 and predicted_track_ps[i] is not None
+                 and (decisive_ps is None
+                      or (i < len(decisive_ps) and decisive_ps[i])))
+    shares: Dict[str, tuple] = {}
+    votes: Dict[str, Dict[int, int]] = {}
+    for i in range(min(n, len(predicted_track_ps or []))):
+        label, track = per_second_speaker[i], predicted_track_ps[i]
+        if label is None or track is None:
+            continue
+        if decisive_ps is not None and not (
+                i < len(decisive_ps) and decisive_ps[i]):
+            continue
+        votes.setdefault(label, {})
+        votes[label][track] = votes[label].get(track, 0) + 1
+    for label, tv in votes.items():
+        total = sum(tv.values())
+        best = max(tv, key=tv.get)
+        shares[label] = (best, tv[best] / total, total, len(tv))
+    return {"seconds": n, "labelled": labelled, "asd_boxes": asd_boxes,
+            "matched": matched, "voting": voting, "bound": len(bindings),
+            "labels": shares}
+
+
+def _explain_bindings(per_second_speaker, predicted_track_ps, bindings,
+                      decisive_ps=None) -> None:
+    """Print `binding_diagnostics` compactly, loudly when nothing bound."""
+    d = binding_diagnostics(per_second_speaker, predicted_track_ps,
+                            bindings, decisive_ps)
+    if not d["labelled"] and not d["asd_boxes"]:
+        return
+    print(f"   🔗 binding: {d['labelled']}/{d['seconds']}s diarized, "
+          f"{d['matched']}s matched to a face, {d['voting']}s could vote, "
+          f"{d['bound']}/{len(d['labels']) or 0} label(s) bound")
+    if d["bound"] < len(d["labels"]):
+        for label, (track, share, total, spread) in sorted(d["labels"].items()):
+            if label in bindings:
+                continue
+            print(f"      · {label}: best track {track} at {share:.0%} of "
+                  f"{total} vote(s) across {spread} track(s) — no binding")
 
 
 def speaker_lock_score(per_second_speaker: List[Optional[str]],
@@ -475,6 +557,7 @@ def fuse_speaker_tracks(asd_per_second_boxes: List[Optional[tuple]],
                         rebind_seconds: int = DEFAULT_REBIND_SECONDS,
                         rebind_window: int = DEFAULT_REBIND_WINDOW,
                         unmapped_policy: str = UNMAPPED_POLICY_WIDE,
+                        max_wide: float = 0.5,
                         ) -> tuple:
     """Full Phase 3 pipeline for one clip: ASD boxes + the Phase 1 face
     spine + the diarized transcript -> (bindings, per_second_active_track).
@@ -503,8 +586,30 @@ def fuse_speaker_tracks(asd_per_second_boxes: List[Optional[tuple]],
     bindings = resolve_speaker_bindings(
         speaker_ps, predicted_track_ps, min_agreement, min_seconds,
         decisive_ps=decisive_ps)
+    # WHY did (or didn't) anything bind? Without this the failure mode is a
+    # silent all-wide clip and no way to tell which stage dropped the signal.
+    _explain_bindings(speaker_ps, predicted_track_ps, bindings, decisive_ps)
+
     active = per_second_active_track(speaker_ps, bindings, predicted_track_ps,
                                      unmapped_policy=unmapped_policy)
+    # SAFETY VALVE. The no-guess rule is right about a stray unmapped second
+    # and wrong about a whole clip: an all-wide render is not a clip. If the
+    # rule is sending more than `max_wide` of the labelled seconds wide, the
+    # bindings failed — that is a fusion bug to fix, not a framing choice to
+    # honour — so fall back to the ASD prediction and say so loudly.
+    if unmapped_policy == UNMAPPED_POLICY_WIDE:
+        labelled = [i for i, l in enumerate(speaker_ps) if l is not None]
+        if labelled:
+            wide = sum(1 for i in labelled if active[i] is None)
+            share = wide / len(labelled)
+            if share > max_wide:
+                print(f"   ⚠️ speaker binding failed: {share:.0%} of labelled "
+                      f"seconds have no mapped face (limit {max_wide:.0%}). "
+                      f"Falling back to LR-ASD rather than shipping an "
+                      f"all-wide clip — the framing will be a guess.")
+                active = per_second_active_track(
+                    speaker_ps, bindings, predicted_track_ps,
+                    unmapped_policy=UNMAPPED_POLICY_ASD)
     # A binding that came out wrong is corrected mid-clip under sustained,
     # decisive contradiction — the only escape hatch from "wrong person for
     # the whole clip". Returns the binding table as of the clip's end.

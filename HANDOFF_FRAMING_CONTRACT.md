@@ -102,6 +102,43 @@ FAIL  flop clip 4   eyeline 0.385  face 0.100  empty 27%  40% of shots under 1s
 
 ~35s per clip. `--strict` exits 1 on any failure.
 
+## READ THIS FIRST — the all-wide regression
+
+A run of this code sent **every** binding wide. That was my no-guess rule
+working exactly as written and the binding underneath failing: LR-ASD ran and
+the spine found 6-11 faces, but no diarized speaker mapped to a face, so every
+labelled second became a WIDE. The rule was right about a stray unmapped
+second and wrong about a whole clip — an all-wide render is not a clip. Three
+changes:
+
+1. **Safety valve.** Past `SPEAKER_UNMAPPED_MAX_WIDE` (default 0.5) of
+   labelled seconds going wide, the fusion is broken rather than cautious.
+   It falls back to the LR-ASD prediction and says so loudly. The framing will
+   be a guess — but a guess beats an unwatchable clip while the real bug
+   gets found.
+2. **Plurality binding.** A 60% majority is a high bar with 6-11 faces: the
+   vote for one speaker scatters across neighbours and nothing clears it. A
+   track leading the runner-up by 2x now binds even at 40%. A dead 50/50 tie
+   still binds nothing — that is the case the majority bar was written for.
+3. **Diagnostics.** Every clip now prints where the signal dies:
+
+   ```
+   🔗 binding: 41/58s diarized, 12s matched to a face, 9s could vote,
+      0/3 label(s) bound
+      · SPEAKER_01: best track 4 at 33% of 6 vote(s) across 4 track(s) — no binding
+   ```
+
+   Read it like this: **`diarized` near zero** → diarization is the problem,
+   not the fusion. **`matched` far below `diarized`** → the ASD boxes are not
+   landing on the spine's faces (a coordinate-space or scaling bug), and no
+   threshold change will help. **`could vote` healthy but nothing bound** →
+   it really is the agreement bar, and the plurality tier should now catch it.
+
+**Note:** those clips also crashed at `plan_shots` immediately after this log
+(the `max_shot_seconds` TypeError, since fixed), so **no render of this state
+has ever been seen** — only the planning log. Treat the next run as the first
+real look.
+
 ## Remaining work, in priority order
 
 1. **Re-render the three flop clips on the GPU host and re-run the audit.**
