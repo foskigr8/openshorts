@@ -6,42 +6,53 @@ a time, and the approved framing method wants a subtle camera that glides to
 keep that person framed as they move. This module implements that per-panel
 tracker with the exact guardrails that make it safe:
 
-- head-anchored crops (15-20% headroom above the hair — hair never clips)
+- contract-framed crops (`framing_contract.frame_panel`): size from the target
+  face fraction, position from the target eyeline, so hair never clips
 - dead zone (hysteresis): micro head-bobs do not move the camera at all
 - exponential smoothing (lerp): the camera glides instead of teleporting
-- containment safety valve: if the face ever leaves the crop despite the
-  smoothing (fast move / cut), the crop snaps back — the face is never cut
+- containment safety valve: if the head ever leaves the crop despite the
+  smoothing (fast move / cut), the crop snaps back
 - boundary clamping: the crop can never pan past the source frame
 - hard-cut reset: a scene change snaps instantly instead of gliding
 - fit-to-width fallback: if tracking loses the face or the box fills the
   frame (wide shot), the panel relaxes to a full-width view
 
-`VSPLIT_TRACK=0` disables this and keeps the static union-box panels.
+`VSPLIT_TRACK=0` disables this and keeps the static contract panels.
+
+WHAT CHANGED, AND WHY
+---------------------
+This tracker used to compute its crop the same broken way the static engine
+did, only spelled differently::
+
+    need_h = sh * (1 + 2*vert_margin + headroom)     # size, from margins
+    y      = sy - sh * headroom                      # position, from the FACE BOX
+
+Two problems, both fatal. First, the size and the anchor were derived from
+different references — `crop_h` could be floored to 45% of the source height
+while `y` stayed pinned `0.18 * face_height` above the box, so the actual
+headroom depended on which term happened to win. Second, `headroom = 0.18` is
+measured against the DETECTOR box, and the detector box stops at the eyebrows:
+real hair sits about `0.35 * face_height` higher. `0.18 < 0.35`, so the anchor
+was inside the subject's hair every single time.
+
+Now both come from `framing_contract`, which derives size and position from the
+same two measured ratios. See PLAN_FRAMING_CONTRACT.md §3.1 and §5.3.
 """
 
 from __future__ import annotations
 
 from typing import Optional, Tuple
 
+import framing_contract
+
 Box = Tuple[float, float, float, float]        # (x, y, w, h) in pixels
 Rect = Tuple[float, float, float, float]
 
-# Breathing room around the face box, as a fraction of its own size. These
-# deliberately MATCH reframe_v3.DEFAULT_SIDE_MARGIN / DEFAULT_VERT_MARGIN —
-# a split panel should frame its person exactly the way a single shot would,
-# then be stacked. The tracker used to run far tighter margins (0.15/0.10),
-# which cropped to the face itself and read as a passport photo next to the
-# static framing of the same person. (Not imported from reframe_v3: that
-# module imports this one.)
-DEFAULT_SIDE_MARGIN = 0.55
-DEFAULT_VERT_MARGIN = 0.35
-
-# Floor on a panel crop's height, as a fraction of the source frame. A small
-# or distant face box would otherwise produce a crop only a couple of hundred
-# pixels tall — technically "correctly framed" and unwatchably close. The
-# floor is a lower bound on the crop, so it can only ever pull the camera
-# WIDER than the margin geometry asked for, never tighter.
-DEFAULT_MIN_HEIGHT_FRAC = 0.45
+#: Floor on a panel crop's height, as a fraction of the source frame. A small
+#: or distant face box would otherwise produce a crop only a couple of hundred
+#: pixels tall — technically "correctly framed" and unwatchably blurry once
+#: upscaled. The floor only ever pulls the camera WIDER, never tighter.
+DEFAULT_MIN_HEIGHT_FRAC = framing_contract.DEFAULT_MIN_CROP_FRAC
 
 
 def _clamp(value: float, lo: float, hi: float) -> float:
@@ -56,23 +67,42 @@ def _contains(crop: Rect, subject: Box, tolerance: float = 0.5) -> bool:
             and sy + sh <= cy + ch + tolerance)
 
 
-def _recontain(rect: Rect, box: Box, frame_w: int, frame_h: int) -> Rect:
-    """Project a crop onto the set of crops that fully contain `box`.
+def _recontain(rect: Rect, box: Box, frame_w: int, frame_h: int,
+               aspect: Optional[float] = None) -> Rect:
+    """Project a crop onto the set of ASPECT-CORRECT crops containing `box`.
 
-    Gliding toward a tighter head-anchored crop passes through intermediate
-    crops that would clip the face (hair briefly above the crop top). Instead
-    of a hard snap, nudge and (boundedly) enlarge the crop so the face is
-    ALWAYS fully inside — the never-cut guarantee, without breaking the
-    smoothness of the camera move.
+    Gliding toward a tighter crop passes through intermediate crops that would
+    clip the head. Instead of a hard snap, nudge and (boundedly) enlarge the
+    crop so the head is ALWAYS fully inside — the never-cut guarantee, without
+    breaking the smoothness of the camera move.
+
+    **The aspect argument is not optional in spirit.** This function used to
+    grow `w` and `h` independently, which silently drifted the panel away from
+    its target ratio. `reframe_v3._crop_resize_panel` letterboxes anything more
+    than 10% off-aspect, so that drift is exactly the black bar between panels
+    reported in clip 2. Growing to the aspect-correct size instead keeps the
+    stacked panels edge to edge.
     """
     x, y, w, h = rect
     bx, by, bw, bh = box
-    if w < bw:
-        w = min(bw, float(frame_w))
-        x = _clamp(x, 0.0, frame_w - w)
-    if h < bh:
-        h = min(bh, float(frame_h))
-        y = _clamp(y, 0.0, frame_h - h)
+
+    need_w, need_h = max(w, bw), max(h, bh)
+    if aspect:
+        need_h = max(need_h, need_w / aspect)
+        need_w = need_h * aspect
+        if need_w > frame_w:
+            need_w = float(frame_w)
+            need_h = need_w / aspect
+        if need_h > frame_h:
+            need_h = float(frame_h)
+            need_w = need_h * aspect
+    else:
+        need_w, need_h = min(need_w, float(frame_w)), min(need_h, float(frame_h))
+
+    # Grow around the current centre, then slide the minimum distance that
+    # brings the box fully inside.
+    cx, cy = x + w / 2.0, y + h / 2.0
+    x, y, w, h = cx - need_w / 2.0, cy - need_h / 2.0, need_w, need_h
     if bx < x:
         x = bx
     if bx + bw > x + w:
@@ -100,9 +130,6 @@ class PanelTracker:
         frame_w: int,
         frame_h: int,
         aspect: float,
-        headroom: float = 0.18,
-        side_margin: float = DEFAULT_SIDE_MARGIN,
-        vert_margin: float = DEFAULT_VERT_MARGIN,
         dead_zone: float = 0.02,
         smooth: float = 0.12,
         smooth_zoom: float = 0.06,
@@ -114,9 +141,6 @@ class PanelTracker:
         self.frame_w = int(frame_w)
         self.frame_h = int(frame_h)
         self.aspect = float(aspect)
-        self.headroom = float(headroom)
-        self.side_margin = float(side_margin)
-        self.vert_margin = float(vert_margin)
         self.dead_zone = float(dead_zone)
         self.smooth = float(smooth)
         self.smooth_zoom = float(smooth_zoom)
@@ -140,34 +164,19 @@ class PanelTracker:
         if box is None:
             return None
         sx, sy, sw, sh = box
+        if sw <= 0 or sh <= 0:
+            return None
         # Wide-shot fallback: a box that fills the frame (or a person too
         # close to contain) relaxes to a full-width view instead of fighting
         # it — the panel renderer letterboxes the result.
         if sw * sh > self.full_width_area_frac * self.frame_w * self.frame_h:
             return self._full_frame_crop()
-        # Head-anchored size: headroom above the hair + side/vertical
-        # margins keep the face (and chin) clear of the panel edges and the
-        # split boundary.
-        need_h = sh * (1.0 + 2.0 * self.vert_margin + self.headroom)
-        need_w = sw * (1.0 + 2.0 * self.side_margin)
-        # Minimum-size floor: a small/distant face must not zoom the panel to
-        # a passport close-up. Applied alongside the margin geometry, so it
-        # only widens the crop.
-        crop_h = max(need_h, need_w / self.aspect,
-                     self.min_height_frac * self.frame_h)
-        crop_w = crop_h * self.aspect
-        # Clamp to the frame, preserving aspect.
-        if crop_w > self.frame_w:
-            crop_w = float(self.frame_w)
-            crop_h = crop_w / self.aspect
-        if crop_h > self.frame_h:
-            crop_h = float(self.frame_h)
-            crop_w = crop_h * self.aspect
-        x = sx + sw / 2.0 - crop_w / 2.0
-        y = sy - sh * self.headroom
-        x = _clamp(x, 0.0, self.frame_w - crop_w)
-        y = _clamp(y, 0.0, self.frame_h - crop_h)
-        return (x, y, crop_w, crop_h)
+        # THE crop. Size and position from the same two contract ratios, so
+        # the headroom is a property of the geometry rather than of whichever
+        # margin term happened to bind.
+        return framing_contract.frame_panel(
+            box, self.frame_w, self.frame_h, self.aspect,
+            min_frac=self.min_height_frac)
 
     def step(self, box: Optional[Box], scene_cut: bool = False) -> Rect:
         """Advance one frame and return the crop rect to render."""
@@ -191,11 +200,11 @@ class PanelTracker:
             self.crop = target
             return self.crop
 
-        # Containment safety valve: smoothing must never let the face leave
-        # the crop (the "never cut the head" guarantee). This fires only if
-        # the invariant was broken upstream (seeded crop not containing its
-        # subject); the per-step _recontain projection below keeps it intact.
-        if box is not None and not _contains(self.crop, box):
+        # Containment safety valve, now measured on the HEAD box rather than
+        # the detector box. A crop that contains the face rectangle can still
+        # shear the hair, which is the whole defect this rebuild removes.
+        head = framing_contract.head_box(box, self.frame_w, self.frame_h)
+        if not _contains(self.crop, head):
             self.crop = target
             return self.crop
 
@@ -206,8 +215,8 @@ class PanelTracker:
 
         # Dead zone (hysteresis): tiny movements inside the zone do not PAN
         # the camera at all — kills micro-jitter from head bobs. Zoom is a
-        # separate control (dynamic zoom scaling) and keeps easing toward
-        # the target size, so a genuinely smaller box still zooms.
+        # separate control and keeps easing toward the target size, so a
+        # genuinely smaller box still zooms.
         dz_x = self.dead_zone * cur_w
         dz_y = self.dead_zone * cur_h
         pan_held = (abs(tgt_cx - cur_cx) < dz_x
@@ -227,9 +236,9 @@ class PanelTracker:
         # Boundary clamping: never pan past the source frame edge.
         new_x = _clamp(new_cx - new_w / 2.0, 0.0, self.frame_w - new_w)
         new_y = _clamp(new_cy - new_h / 2.0, 0.0, self.frame_h - new_h)
-        # Containment projection: keep the face fully inside while gliding,
-        # so shrinking toward the head-anchored target never clips hair.
-        new_x, new_y, new_w, new_h = _recontain(
-            (new_x, new_y, new_w, new_h), box, self.frame_w, self.frame_h)
-        self.crop = (new_x, new_y, new_w, new_h)
+        # Containment projection: keep the HEAD fully inside while gliding,
+        # aspect preserved so the panel never letterboxes mid-move.
+        self.crop = _recontain(
+            (new_x, new_y, new_w, new_h), head,
+            self.frame_w, self.frame_h, self.aspect)
         return self.crop

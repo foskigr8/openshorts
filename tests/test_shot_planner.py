@@ -2,6 +2,8 @@
 after a cut" fix — the two most specific, most repeated complaints in this
 rebuild. Pure Python, no video/GPU, so every claim here is checked directly.
 """
+import pytest
+
 import shot_planner as sp
 
 
@@ -110,12 +112,25 @@ def test_first_run_meeting_minimum_is_kept():
     assert result == [(0.0, 2.0, 0), (2.0, 10.0, 1)]
 
 
-def test_short_run_at_forced_boundary_is_never_reabsorbed():
-    # A splice point forces a real cut even if the resulting shot is short --
-    # the video is physically discontinuous there, it cannot be smoothed away.
-    runs = [(0.0, 5.0, 0), (5.0, 5.3, 0)]  # same target both sides, but forced
+def test_a_forced_boundary_still_earns_a_cut_when_the_shot_is_watchable():
+    # A splice point forces a real cut -- the video is physically
+    # discontinuous there, it cannot be smoothed away -- provided the shot it
+    # produces is long enough to register.
+    runs = [(0.0, 5.0, 0), (5.0, 6.2, 0)]  # same target both sides, but forced
     result = sp.merge_short_runs(runs, min_shot_seconds=1.2, forced_boundaries=[5.0])
-    assert result == [(0.0, 5.0, 0), (5.0, 5.3, 0)]
+    assert result == [(0.0, 5.0, 0), (5.0, 6.2, 0)]
+
+
+def test_a_forced_boundary_below_the_floor_is_absorbed():
+    """The flash frame. `starts_at_forced` used to mean "never reabsorb", full
+    stop, so a splice landing 0.3s before the next one emitted a 0.3s shot.
+    The video really is discontinuous there, but a shot that brief is a glitch
+    rather than a cut -- the surrounding shot carries the splice instead."""
+    runs = [(0.0, 5.0, 0), (5.0, 5.3, 0)]
+    result = sp.merge_short_runs(runs, min_shot_seconds=1.2, forced_boundaries=[5.0])
+    assert result == [(0.0, 5.3, 0)]
+    assert all(end - start >= sp.MIN_FORCED_SHOT_SECONDS
+               for start, end, _ in result)
 
 
 def test_adjacent_equal_targets_coalesce_after_reabsorption():
@@ -450,3 +465,71 @@ def test_apply_two_shot_skips_when_no_addressee():
     shots = [sp.Shot(0.0, 10.0, sp.SHOT_SINGLE, [0], None)]
     result = sp.apply_two_shot(shots, [None] * 10, {}, min_shot_seconds=1.0)
     assert result == shots
+
+
+# ---------------------------------------------------------------------------
+# snap_shots_to_speech — the cut follows the sentence (I9)
+# ---------------------------------------------------------------------------
+
+def _words(*spans):
+    return [{"word": "w", "start": s, "end": e} for s, e in spans]
+
+
+def test_word_gaps_ignores_coarticulation():
+    # 0.05s between words is run-on speech, not a place you can cut.
+    gaps = sp.word_gaps(_words((0.0, 1.0), (1.05, 2.0), (2.5, 3.0)))
+    assert len(gaps) == 1
+    assert gaps[0] == pytest.approx(2.25)   # midpoint of the 2.0-2.5 silence
+
+
+def test_word_gaps_tolerates_no_words():
+    assert sp.word_gaps(None) == []
+    assert sp.word_gaps([]) == []
+
+
+def test_boundary_snaps_to_the_nearest_silence():
+    shots = [sp.Shot(0.0, 5.15, sp.SHOT_SINGLE, [1]),
+             sp.Shot(5.15, 11.0, sp.SHOT_SINGLE, [2])]
+    out = sp.snap_shots_to_speech(shots, [5.0])
+    assert out[0].end == pytest.approx(5.0)
+    assert out[1].start == pytest.approx(5.0)
+
+
+def test_a_boundary_too_far_from_any_gap_stays_put():
+    shots = [sp.Shot(0.0, 5.0, sp.SHOT_SINGLE, [1]),
+             sp.Shot(5.0, 11.0, sp.SHOT_SINGLE, [2])]
+    out = sp.snap_shots_to_speech(shots, [9.0])       # 4s away
+    assert out[0].end == pytest.approx(5.0)
+
+
+def test_forced_boundaries_never_move():
+    """The video is physically spliced there — the cut has to be at the
+    splice, not near it."""
+    shots = [sp.Shot(0.0, 5.0, sp.SHOT_SINGLE, [1]),
+             sp.Shot(5.0, 11.0, sp.SHOT_SINGLE, [2])]
+    out = sp.snap_shots_to_speech(shots, [4.9], forced_boundaries=[5.0])
+    assert out[0].end == pytest.approx(5.0)
+
+
+def test_the_clip_in_and_out_are_never_moved():
+    """They are already sentence-anchored upstream."""
+    shots = [sp.Shot(0.0, 5.0, sp.SHOT_SINGLE, [1]),
+             sp.Shot(5.0, 11.0, sp.SHOT_SINGLE, [2])]
+    out = sp.snap_shots_to_speech(shots, [0.2, 5.0, 10.8])
+    assert out[0].start == pytest.approx(0.0)
+    assert out[-1].end == pytest.approx(11.0)
+
+
+def test_a_snap_that_would_starve_a_shot_is_skipped():
+    shots = [sp.Shot(0.0, 2.0, sp.SHOT_SINGLE, [1]),
+             sp.Shot(2.0, 11.0, sp.SHOT_SINGLE, [2])]
+    out = sp.snap_shots_to_speech(shots, [0.5], min_shot_seconds=1.8)
+    assert out[0].end == pytest.approx(2.0)
+
+
+def test_snapping_preserves_total_coverage():
+    shots = [sp.Shot(0.0, 5.15, sp.SHOT_SINGLE, [1]),
+             sp.Shot(5.15, 11.0, sp.SHOT_SINGLE, [2])]
+    out = sp.snap_shots_to_speech(shots, [5.0])
+    assert sum(s.duration for s in out) == pytest.approx(11.0)
+    assert all(a.end == b.start for a, b in zip(out, out[1:]))

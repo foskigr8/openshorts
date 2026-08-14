@@ -289,28 +289,79 @@ def resolve_speaker_bindings(per_second_speaker: List[Optional[str]],
     return bindings
 
 
+#: What to do with a second whose diarized speaker has no confidently mapped
+#: face. "wide" is the no-guess rule (plan §5.6); "asd" is the old behaviour.
+UNMAPPED_POLICY_WIDE = "wide"
+UNMAPPED_POLICY_ASD = "asd"
+
+
 def per_second_active_track(per_second_speaker: List[Optional[str]],
                             bindings: Dict[str, int],
-                            predicted_track_ps: Optional[List[Optional[int]]] = None
+                            predicted_track_ps: Optional[List[Optional[int]]] = None,
+                            unmapped_policy: str = UNMAPPED_POLICY_WIDE
                             ) -> List[Optional[int]]:
     """Expand the binding table across the clip: for each second, whichever
     track is bound to the speaker active that second.
 
-    When a second's diarized speaker never got a confident binding (the
-    "framed the host instead of the talker" failure — diarization can lag or
-    miss, but ASD watched the faces), fall back to the LR-ASD predicted track
-    for that second if one exists: the model that directly marks who is
-    speaking beats a silent guess. None only where BOTH signals are absent.
+    THE NO-GUESS RULE. Two different situations used to share one fallback,
+    and conflating them is how a clip ends up with the host talking over a
+    picture of the group:
+
+    * **No diarized label this second** (silence, a gap, an unlabelled
+      stretch). Nobody has told us who is talking, so LR-ASD — the model that
+      directly watches faces for speech — is the best available answer. Fall
+      back to it.
+    * **A diarized label with no confident binding.** Here we *know who is
+      talking* and simply cannot find their face. Falling back to ASD means
+      showing whoever the model liked this second: a laughing listener, the
+      nearest torso, the biggest face. That is a guess dressed as a signal,
+      and it is wrong precisely when it matters. Emit None instead, which the
+      planner renders as a WIDE — show the room honestly rather than point
+      confidently at the wrong person.
+
+    `unmapped_policy="asd"` restores the old behaviour for both cases.
     """
     out = []
     for i, label in enumerate(per_second_speaker):
         if label is not None and label in bindings:
             out.append(bindings[label])
+            continue
+        known_but_unmapped = (label is not None
+                              and unmapped_policy == UNMAPPED_POLICY_WIDE)
+        if known_but_unmapped:
+            out.append(None)
         elif predicted_track_ps is not None and i < len(predicted_track_ps):
             out.append(predicted_track_ps[i])
         else:
             out.append(None)
     return out
+
+
+def speaker_lock_score(per_second_speaker: List[Optional[str]],
+                       bindings: Dict[str, int],
+                       active: List[Optional[int]]) -> Optional[float]:
+    """How often the rendered subject IS the diarized speaker's mapped face.
+
+    The number to move before any further framing work is worth doing: a
+    sharp, perfectly composed shot of the wrong person is still the wrong
+    person. Returns None when there is no diarized speech to score against.
+
+    Counts only seconds where we HAVE a label and a binding for it — seconds
+    that legitimately went wide (the no-guess rule above) are excluded rather
+    than counted as failures, so this measures aim, not coverage.
+    """
+    scored = hits = 0
+    for i, label in enumerate(per_second_speaker):
+        if label is None or label not in bindings:
+            continue
+        if i >= len(active):
+            break
+        scored += 1
+        if active[i] == bindings[label]:
+            hits += 1
+    if not scored:
+        return None
+    return hits / scored
 
 
 def active_from_identity_map(per_second_speaker: List[Optional[str]],
@@ -423,6 +474,7 @@ def fuse_speaker_tracks(asd_per_second_boxes: List[Optional[tuple]],
                         decisive_margin: float = DEFAULT_DECISIVE_MARGIN,
                         rebind_seconds: int = DEFAULT_REBIND_SECONDS,
                         rebind_window: int = DEFAULT_REBIND_WINDOW,
+                        unmapped_policy: str = UNMAPPED_POLICY_WIDE,
                         ) -> tuple:
     """Full Phase 3 pipeline for one clip: ASD boxes + the Phase 1 face
     spine + the diarized transcript -> (bindings, per_second_active_track).
@@ -451,7 +503,8 @@ def fuse_speaker_tracks(asd_per_second_boxes: List[Optional[tuple]],
     bindings = resolve_speaker_bindings(
         speaker_ps, predicted_track_ps, min_agreement, min_seconds,
         decisive_ps=decisive_ps)
-    active = per_second_active_track(speaker_ps, bindings, predicted_track_ps)
+    active = per_second_active_track(speaker_ps, bindings, predicted_track_ps,
+                                     unmapped_policy=unmapped_policy)
     # A binding that came out wrong is corrected mid-clip under sustained,
     # decisive contradiction — the only escape hatch from "wrong person for
     # the whole clip". Returns the binding table as of the clip's end.
@@ -459,4 +512,14 @@ def fuse_speaker_tracks(asd_per_second_boxes: List[Optional[tuple]],
         speaker_ps, predicted_track_ps, bindings, active,
         decisive_ps=decisive_ps, rebind_seconds=rebind_seconds,
         rebind_window=rebind_window)
+
+    # The number to move (plan §5.6). Printed every clip so a regression in
+    # WHO we frame is visible without watching the render.
+    lock = speaker_lock_score(speaker_ps, bindings, active)
+    if lock is not None:
+        _wide = sum(1 for i, l in enumerate(speaker_ps)
+                    if l is not None and l not in bindings)
+        _note = f", {_wide}s wide (speaker unmapped)" if _wide else ""
+        _flag = "" if lock >= 0.85 else "  ⚠️ below the 0.85 target"
+        print(f"   🎯 speaker lock {lock:.0%}{_note}{_flag}")
     return bindings, active

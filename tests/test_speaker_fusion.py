@@ -417,3 +417,44 @@ def test_fuse_speaker_tracks_holds_when_the_contradiction_is_a_coin_flip():
 
     assert bindings == {"A": 0}
     assert active == [0] * 18
+
+
+# ---------------------------------------------------------------------------
+# The no-guess rule and the speaker-lock score (plan §5.6)
+# ---------------------------------------------------------------------------
+
+class TestNoGuessRule:
+    def test_a_mapped_speaker_is_always_framed(self):
+        assert sf.per_second_active_track(["A", "A"], {"A": 7}, [3, 3]) == [7, 7]
+
+    def test_an_unmapped_speaker_goes_wide_not_to_the_nearest_face(self):
+        """Clip 2's defect: the host is talking, the picture is the group."""
+        assert sf.per_second_active_track(["HOST"], {}, [9]) == [None]
+
+    def test_an_unlabelled_second_still_uses_asd(self):
+        """Nobody said who is talking, so the model that watches faces wins."""
+        assert sf.per_second_active_track([None], {}, [9]) == [9]
+
+    def test_policy_asd_restores_the_old_behaviour(self):
+        assert sf.per_second_active_track(
+            ["HOST"], {}, [9], unmapped_policy="asd") == [9]
+
+    def test_no_signals_at_all_is_still_none(self):
+        assert sf.per_second_active_track([None, None], {}, None) == [None, None]
+
+
+class TestSpeakerLockScore:
+    def test_perfect_lock(self):
+        assert sf.speaker_lock_score(["A", "A"], {"A": 1}, [1, 1]) == 1.0
+
+    def test_a_wrong_frame_lowers_the_score(self):
+        assert sf.speaker_lock_score(["A", "A"], {"A": 1}, [1, 2]) == 0.5
+
+    def test_wide_seconds_are_excluded_not_counted_as_misses(self):
+        """The score measures AIM, not coverage. A second that honestly went
+        wide because the speaker was unmappable is not a framing error."""
+        assert sf.speaker_lock_score(["A", "B"], {"A": 1}, [1, None]) == 1.0
+
+    def test_nothing_to_score_returns_none(self):
+        assert sf.speaker_lock_score([None, None], {}, [None, None]) is None
+        assert sf.speaker_lock_score(["A"], {}, [None]) is None

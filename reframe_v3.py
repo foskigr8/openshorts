@@ -18,8 +18,9 @@ Three problems are solved here that the previous engines did not solve:
 
 2. VERTICAL COMPOSITION. Every crop the old engine produced was full-frame
    height — horizontal pan only — so a face could sit anywhere vertically.
-   `crop_rect_containing` places the subject at a deliberate height
-   (`DEFAULT_HEAD_Y`) whenever the crop is tighter than the full frame.
+   `crop_rect_containing` places the subject's EYELINE at a measured height
+   (`framing_contract.SINGLE_EYE_Y`) whenever the crop is tighter than the
+   full frame, and sizes the crop from the same ratio pair.
 
 3. TWO SUBJECTS TOO FAR APART. Previously this became a wide shot with both
    people small, or a crop centred on the gap between them. It now becomes a
@@ -49,6 +50,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import os
 
 import numpy as np
+
+import framing_contract
 
 Box = Tuple[float, float, float, float]        # (x, y, w, h) in pixels
 Rect = Tuple[float, float, float, float]
@@ -174,20 +177,29 @@ def attention_center(composite: np.ndarray) -> Tuple[float, float]:
 # Crop geometry
 # ---------------------------------------------------------------------------
 
-# Fraction of the crop HEIGHT above the subject's centre. 0.36 is the value
-# tuned on this footage during the v1/v2 era (CAMERA_HEAD_Y) and kept here:
-# it leaves headroom above and body below rather than centring the face
-# vertically, which reads as a snapshot.
-DEFAULT_HEAD_Y = 0.36
-
-# Breathing room around the subject box, as a fraction of its own size. The
-# side band is wider than the vertical one because a face box is much narrower
-# than a person's shoulders; cropping tight to a face box alone cuts ears and
-# shoulders off.
-DEFAULT_SIDE_MARGIN = 0.55
-DEFAULT_VERT_MARGIN = 0.35
-
+# Crop geometry now lives in framing_contract.py. The constants that used to
+# sit here — DEFAULT_HEAD_Y = 0.36, DEFAULT_SIDE_MARGIN = 0.55,
+# DEFAULT_VERT_MARGIN = 0.35 — are DELETED, not retuned.
+#
+# They were the head-cut. Sizing a crop from margins around the face box and
+# then placing the face CENTRE at a fixed fraction of it works by luck: for a
+# 9:16 single the width term binds and leaves ~7.5% headroom, but for a 9:8
+# split panel it stops binding, the crop collapses to 1.70x the face height,
+# and the hair (0.35x the face height above the detector box, which the
+# detector never sees) ends up 14% of the panel height ABOVE the crop top.
+# Every split panel this engine rendered cut the head, by construction.
+#
+# framing_contract derives size AND position from the same two measured
+# ratios, so that failure mode cannot recur. See PLAN_FRAMING_CONTRACT.md §3.1.
 VERTICAL_9_16 = 9.0 / 16.0
+
+# What can be a SUBJECT at all. A detection outside these bounds is not a face
+# we can compose on, and letting one through is how clip 1 framed a placard and
+# clip 4 framed the back of a head (plan §3.4).
+MIN_FACE_ASPECT = 0.55          # narrower than this is not a head, even in profile
+MAX_FACE_ASPECT = 1.35          # wider than this is a placard held at chest height
+MAX_FACE_AREA_FRAC = 0.10       # of the frame; above this it is a torso or a lens-filler
+MIN_FACE_HEIGHT_FRAC = 0.02     # below this no crop can frame it above the blur floor
 
 
 def _enforce_min_crop(crop: Rect, frame_w: int, frame_h: int,
@@ -215,67 +227,85 @@ def _enforce_min_crop(crop: Rect, frame_w: int, frame_h: int,
 
 def crop_rect_containing(subject: Box, frame_w: int, frame_h: int,
                          aspect: float = VERTICAL_9_16,
-                         head_y: float = DEFAULT_HEAD_Y,
-                         side_margin: float = DEFAULT_SIDE_MARGIN,
-                         vert_margin: float = DEFAULT_VERT_MARGIN) -> Rect:
-    """Smallest `aspect`-correct crop that CONTAINS `subject` with margins.
+                         layout: str = framing_contract.SINGLE,
+                         look_dir: float = 0.0) -> Rect:
+    """The `aspect`-correct crop that FRAMES `subject` to the contract.
 
-    Containment is the property that matters: the previous engine chose a crop
-    from an aim point and only afterwards discovered the subject was half
-    outside it. Here the subject box plus its margins is the input constraint,
-    so a returned rect that fails `contains()` is a bug, not a tuning issue.
+    Kept as the module's crop entry point so every call site inherits the fix,
+    but the body is now `framing_contract.frame_subject`: size comes from the
+    target face fraction and position from the target eyeline, both measured
+    off reference footage. Margins are a consequence, not a control.
 
-    Vertical placement uses `head_y` whenever the crop is shorter than the
-    frame. When the crop is full-frame height (the usual 9:16-from-16:9 case)
-    there is no vertical freedom left and the rect simply spans the frame —
-    the same degenerate case upstream hard-codes, reached here as a
-    consequence rather than as an assumption.
+    `layout` selects the ratio pair — SINGLE/TWO_SHOT frame the face at 0.155
+    of the output height with the eyeline at 0.22, a PANEL frames it at 0.30 of
+    the PANEL height (= 0.15 of the output, deliberately the same subject size)
+    with the eyeline at 0.34. Passing the panel aspect without passing
+    `layout=PANEL` is the bug that cut every split panel's head; the two must
+    agree, so a caller that widens the aspect must say why.
+
+    `look_dir` in [-1, 1] biases the crop horizontally toward the person the
+    speaker is facing, which is what reproduces the reference's
+    over-the-shoulder composition from a single source frame. The shift is
+    capped inside `frame_subject` so the crop centre can never leave the head.
     """
-    sx, sy, sw, sh = subject
-    need_w = sw * (1.0 + 2.0 * side_margin)
-    need_h = sh * (1.0 + 2.0 * vert_margin)
-
-    # Grow to the target aspect, whichever dimension is binding.
-    crop_h = max(need_h, need_w / aspect)
-    crop_w = crop_h * aspect
-
-    # Clamp to the frame, preserving aspect (the frame may be too small).
-    if crop_w > frame_w:
-        crop_w = float(frame_w)
-        crop_h = crop_w / aspect
-    if crop_h > frame_h:
-        crop_h = float(frame_h)
-        crop_w = crop_h * aspect
-    crop_w = min(crop_w, float(frame_w))
-
-    subject_cx = sx + sw / 2.0
-    subject_cy = sy + sh / 2.0
-
-    crop_x = subject_cx - crop_w / 2.0
-    crop_y = subject_cy - crop_h * head_y
-
-    crop_x = max(0.0, min(crop_x, frame_w - crop_w))
-    crop_y = max(0.0, min(crop_y, frame_h - crop_h))
-
-    return crop_x, crop_y, crop_w, crop_h
+    if layout == framing_contract.PANEL:
+        return framing_contract.frame_panel(
+            subject, frame_w, frame_h, aspect, look_dir=look_dir)
+    return framing_contract.frame_single(
+        subject, frame_w, frame_h, aspect, look_dir=look_dir)
 
 
 def _wide43_rect(frame_w: int, frame_h: int,
-                 faces: Optional[Sequence[Box]] = None) -> Rect:
-    """The 4:3 'show everyone' crop, centered on the on-screen faces when
-    any are known (reactions / both people relevant), else the frame."""
+                 faces: Optional[Sequence[Box]] = None,
+                 subject: Optional[Box] = None) -> Rect:
+    """The 4:3 'show everyone' crop — anchored on a PERSON, never on the gap.
+
+    This used to centre on `union_box(*faces)`. For two people with space
+    between them the union's centre IS the empty space between them, which is
+    how clip 4 shipped a crop of the aisle with a shoulder at each edge (I6,
+    plan §3.3). Now the anchor is the bound `subject` when one is known, and the
+    crop only slides far enough to pull the others in — it never slides so far
+    that the subject leaves the middle of the frame.
+    """
     crop_h = min(float(frame_h), float(frame_w) / WIDE_ASPECT)
     crop_w = crop_h * WIDE_ASPECT
-    if faces:
-        real = [f for f in faces if f is not None]
-        if real:
-            ux, uy, uw, uh = union_box(*real)
-            cx, cy = ux + uw / 2.0, uy + uh / 2.0
-            x = max(0.0, min(cx - crop_w / 2.0, frame_w - crop_w))
-            y = max(0.0, min(cy - crop_h / 2.0, frame_h - crop_h))
-            return (x, y, crop_w, crop_h)
-    return ((frame_w - crop_w) / 2.0, (frame_h - crop_h) / 2.0,
-            crop_w, crop_h)
+    real = [f for f in (faces or ()) if f is not None]
+    if subject is None and real:
+        # No bound speaker: the biggest face is the best available stand-in.
+        subject = max(real, key=lambda b: b[2] * b[3])
+    if subject is None:
+        return ((frame_w - crop_w) / 2.0, (frame_h - crop_h) / 2.0,
+                crop_w, crop_h)
+
+    head = framing_contract.head_box(subject, frame_w, frame_h)
+    anchor_x = head[0] + head[2] / 2.0
+    anchor_y = head[1] + head[3] / 2.0
+    x = anchor_x - crop_w / 2.0
+    y = anchor_y - crop_h / 2.0
+
+    if real:
+        heads = [framing_contract.head_box(f, frame_w, frame_h) for f in real]
+        ux0 = min(h[0] for h in heads)
+        ux1 = max(h[0] + h[2] for h in heads)
+        uy0 = min(h[1] for h in heads)
+        uy1 = max(h[1] + h[3] for h in heads)
+        if (ux1 - ux0) <= crop_w and (uy1 - uy0) <= crop_h:
+            # Everyone fits: showing everyone IS the job of the 4:3 wide, so
+            # containment wins and the crop centres on the group.
+            x = (ux0 + ux1) / 2.0 - crop_w / 2.0
+            y = (uy0 + uy1) / 2.0 - crop_h / 2.0
+        else:
+            # They do NOT all fit. This is the case that produced clip 4's
+            # crop of the aisle: centring the union here centres the gap. Stay
+            # anchored on the subject and only slide within the slack that
+            # keeps their head in the middle band (I6).
+            band = crop_w * framing_contract.CENTRE_BAND / 2.0
+            want = (ux0 + ux1) / 2.0
+            x = max(anchor_x - band, min(want, anchor_x + band)) - crop_w / 2.0
+
+    x = max(0.0, min(x, frame_w - crop_w))
+    y = max(0.0, min(y, frame_h - crop_h))
+    return (x, y, crop_w, crop_h)
 
 
 def contains(crop: Rect, subject: Box, tolerance: float = 0.5) -> bool:
@@ -315,14 +345,27 @@ def attention_shifted_crop(crop: Rect, subject: Box, attention_x: float,
     fully in shot. No feasible shift (e.g. the crop already spans the frame)
     returns the base crop unchanged.
 
-    Vertical placement is deliberately left untouched: `DEFAULT_HEAD_Y` is a
-    footage-tuned aesthetic, and the failure mode this exists for — a
-    reaction happening beside the speaker — is horizontal.
+    Vertical placement is deliberately left untouched: the eyeline is a
+    measured contract invariant (I3), and the failure mode this exists for —
+    a reaction happening beside the speaker — is horizontal.
+
+    The shift is ALSO bounded by the look-room budget, not just by
+    containment. Two things now move the crop horizontally — the look-room
+    bias applied in `frame_subject`, and this — and containment alone is a
+    loose enough constraint that saliency could drag the crop until its centre
+    sat off the subject's head entirely (invariant I6), or simply cancel the
+    look room. Capping both adjustments with the same budget keeps them
+    composable instead of competing.
     """
     cx, cy, cw, ch = crop
     sx, sy, sw, sh = subject
     lo = max(0.0, sx + sw - cw)                  # subject right edge inside
     hi = min(float(frame_w - cw), sx)            # subject left edge inside
+    if hi <= lo:
+        return crop
+    budget = framing_contract.LOOK_ROOM * cw
+    lo = max(lo, cx - budget)
+    hi = min(hi, cx + budget)
     if hi <= lo:
         return crop
     target = attention_x * frame_w - cw / 2.0
@@ -452,9 +495,17 @@ class ComposedShot:
         return self.end - self.start
 
 
+def _soft(bucket: List[str], where: str, found: Sequence[str]) -> None:
+    """Collect contract violations that depend on the source, not on us."""
+    for f in found:
+        if f.startswith("I2") or f.startswith("I0"):
+            continue      # those are hard failures, reported separately
+        bucket.append(f"{where}: {f}")
+
+
 def validate_composition(shots: Sequence[ComposedShot], frame_w: int, frame_h: int,
                          aspect: float = VERTICAL_9_16,
-                         min_shot_seconds: float = 1.2,
+                         min_shot_seconds: float = 1.8,
                          aspect_tolerance: float = 0.02) -> None:
     """Assert every hard guarantee, or raise listing ALL violations.
 
@@ -473,6 +524,7 @@ def validate_composition(shots: Sequence[ComposedShot], frame_w: int, frame_h: i
     meaningful constraint on them.
     """
     problems: List[str] = []
+    problems_soft: List[str] = []
 
     for i, shot in enumerate(shots):
         where = f"shot {i} [{shot.start:.2f}-{shot.end:.2f}s]"
@@ -482,24 +534,32 @@ def validate_composition(shots: Sequence[ComposedShot], frame_w: int, frame_h: i
                 f"{where}: duration {shot.duration:.2f}s < min {min_shot_seconds}s"
             )
 
-        if shot.layout == LAYOUT_SPLIT:
-            # Exempt by construction: subjects live in separate panels.
-            continue
-
-        if shot.layout == LAYOUT_VSPLIT:
-            # Each participant lives in its own contained panel — verify the
-            # panels exist and contain their subjects (the face-never-cut
-            # guarantee for the split), then move on (no single containing
-            # rect applies to a split by construction).
+        if shot.layout in (LAYOUT_SPLIT, LAYOUT_VSPLIT):
+            # NO LONGER EXEMPT. `LAYOUT_SPLIT` used to `continue` outright and
+            # `LAYOUT_VSPLIT` only checked contains(panel, face_box) — which a
+            # panel whose top edge bisects the subject's hair satisfies, because
+            # the detector box excludes hair. That exemption is why every clip
+            # in the failing batch rendered without an error (plan §3.2).
             if not shot.panels or len(shot.panels) != 2:
-                problems.append(f"{where}: vsplit has no two panels")
+                problems.append(f"{where}: split has no two panels")
                 continue
             for j, (panel, subject) in enumerate(zip(shot.panels, shot.subjects or [])):
-                if subject is not None and not contains(panel, subject):
+                if subject is None:
+                    continue
+                if not contains(panel, subject):
                     problems.append(
-                        f"{where}: vsplit panel {j} does not contain its subject "
+                        f"{where}: split panel {j} does not contain its subject "
                         f"{tuple(round(v) for v in subject)} in "
                         f"{tuple(round(v) for v in panel)}")
+                room = framing_contract.headroom_frac(panel, subject,
+                                                      frame_w, frame_h)
+                if room < framing_contract.HEADROOM_MIN - 1e-6 and panel[1] > 0.5:
+                    problems.append(
+                        f"{where}: split panel {j} cuts the head — headroom "
+                        f"{room:+.3f} of panel height, needs "
+                        f"{framing_contract.HEADROOM_MIN}")
+            _soft(problems_soft, where, framing_contract.check_panels(
+                list(shot.panels), list(shot.subjects or []), frame_w, frame_h))
             continue
 
         if shot.crop is None:
@@ -543,6 +603,33 @@ def validate_composition(shots: Sequence[ComposedShot], frame_w: int, frame_h: i
                     f"{where}: subject {j} {tuple(round(v) for v in subject)} "
                     f"not contained in crop {tuple(round(v) for v in shot.crop)}"
                 )
+
+        # The head-cut check, on the layout that actually holds a person.
+        _bound = next((s for s in (shot.subjects or []) if s is not None), None)
+        if _bound is not None and shot.layout in (LAYOUT_SINGLE, LAYOUT_TWO_SHOT):
+            room = framing_contract.headroom_frac(shot.crop, _bound,
+                                                  frame_w, frame_h)
+            if room < framing_contract.HEADROOM_MIN - 1e-6 and shot.crop[1] > 0.5:
+                problems.append(
+                    f"{where}: crop cuts the head — headroom {room:+.3f} of "
+                    f"crop height, needs {framing_contract.HEADROOM_MIN}")
+            _soft(problems_soft, where, framing_contract.check(
+                shot.crop, list(shot.subjects or []), framing_contract.SINGLE,
+                frame_w, frame_h))
+
+    if problems_soft:
+        # I3/I4/I5/I6 depend on what the SOURCE can deliver — a group wide with
+        # 0.09-height faces breaches I4 no matter how the crop is placed (the
+        # resolution budget, plan §5.7). Killing the job over that would punish
+        # the clip for the camera's position, so these are loud by default and
+        # fatal only on request.
+        _report = "\n  ".join(problems_soft)
+        if os.environ.get("FRAMING_STRICT", "0") == "1":
+            raise CompositionError(
+                f"{len(problems_soft)} framing-contract violation(s) "
+                f"(FRAMING_STRICT=1):\n  {_report}")
+        print(f"⚠️  {len(problems_soft)} framing-contract violation(s) — "
+              f"rendering anyway (set FRAMING_STRICT=1 to fail):\n  {_report}")
 
     if problems:
         raise CompositionError(
@@ -648,46 +735,116 @@ def _clip_and_filter_box(box: Optional[Box], frame_w: int,
     # Implausibly large "faces" (body/false detections in crowd shots).
     if w > 0.8 * frame_w or h > 0.95 * frame_h:
         return None
+    # A real face is roughly as tall as it is wide, or taller. The show's
+    # placards ("CHEATER", "Red Flag") are wide rectangles held at chest
+    # height, and they repeatedly won the frame in clip 1.
+    # NB: plausibility is judged on the ORIGINAL box, not the clipped one —
+    # clipping a real face at the frame edge legitimately changes its aspect,
+    # and rejecting it for that would throw away exactly the edge-of-frame
+    # detections this function exists to rescue.
+    ratio = w / max(h, 1e-6)
+    if not (MIN_FACE_ASPECT <= ratio <= MAX_FACE_ASPECT):
+        return None
+    # Area: a "face" covering more than a tenth of the frame is a torso, a
+    # placard, or the back of somebody's head filling the lens — clip 4 held
+    # one of those for four seconds as if it were the subject.
+    if w * h > MAX_FACE_AREA_FRAC * frame_w * frame_h:
+        return None
+    # ...and one too small to frame is not a subject either. Composing on it
+    # would demand a crop far below the blur floor, so it can only ever
+    # produce a mushy upscale (plan §5.7).
+    if h < MIN_FACE_HEIGHT_FRAC * frame_h:
+        return None
     return (vx0, vy0, vis_w, vis_h)
+
+
+#: A track detected in fewer than this fraction of a shot's sampled instants
+#: is not present enough to hold a tight single (plan §5.2).
+MIN_TRACK_PRESENCE = 0.70
 
 
 def _track_boxes_for_shot(shot, spine_tracks: Dict[int, dict],
                           frame_w: int, frame_h: int) -> List[Box]:
-    """Per-subject box = the UNION of that subject's face boxes across the
-    WHOLE shot (AutoFlip-style), so the static crop contains the subject for
-    the entire duration.
+    """Per-subject box for the whole shot, as a ROBUST envelope of that
+    subject's face boxes over [start, end].
 
-    The old version used the planner's MEDIAN box — one instant. A subject who
-    moves (leans, turns, steps) within a shot then exits the static crop and
-    gets their head cut (the "only half his head" failure from the 04:06
-    run). Unioning the sampled boxes over [start, end] makes containment a
-    property of the whole shot, not of its midpoint.
+    Two deliberate departures from the previous versions:
+
+    * Not the planner's MEDIAN box (one instant). A subject who leans, turns or
+      steps within a shot leaves a crop built from their midpoint, and gets
+      their head cut — the original "only half his head" failure.
+    * Not the raw UNION either. A union is a max over every sample, so one bad
+      detection (a placard, a passer-by picked up by the same track) inflates
+      the box permanently, and an inflated box drags the crop off the person
+      and pushes the composition toward the 4:3 wide. This takes the ~p90
+      envelope instead: wide enough to hold normal movement, immune to a
+      single outlier.
+
+    A track present in fewer than ``MIN_TRACK_PRESENCE`` of the sampled
+    instants returns nothing. Holding a tight crop on somebody who is only
+    on screen half the shot is how clip 4 ended up parked on the back of a
+    head — the composition falls back to a wider layout instead.
     """
     from shot_planner import crop_rect_for_track
 
     boxes = []
     for track_id in shot.track_ids:
         track = spine_tracks.get(track_id)
-        union = None
+        seen, sampled = [], 0
         if track:
             t = float(shot.start)
             while t <= float(shot.end) + 1e-6:
+                sampled += 1
                 b = _nearest_box(track, t)
                 if b is not None:
                     b = _clip_and_filter_box(b, frame_w, frame_h)
                     if b is not None:
-                        union = b if union is None else union_box(union, b)
+                        seen.append(b)
                 t += 0.5
-        if union is None:
+
+        envelope = None
+        if seen and (sampled <= 1 or len(seen) / sampled >= MIN_TRACK_PRESENCE):
+            envelope = _robust_envelope(seen)
+        elif seen:
+            # Present, but not enough to compose on. Say so by omission.
+            continue
+
+        if envelope is None:
             # No per-frame boxes sampled (sparse track) — fall back to the
-            # planner's median, the previous behavior.
+            # planner's median, the previous behaviour.
             box = crop_rect_for_track(spine_tracks, track_id, shot.start, shot.end)
             if box is not None:
                 box = _clip_and_filter_box(box, frame_w, frame_h)
-                union = tuple(float(v) for v in box) if box is not None else None
-        if union is not None:
-            boxes.append(tuple(float(v) for v in union))
+                envelope = tuple(float(v) for v in box) if box is not None else None
+        if envelope is not None:
+            boxes.append(tuple(float(v) for v in envelope))
     return boxes
+
+
+def _robust_envelope(boxes: Sequence[Box], quantile: float = 0.90) -> Box:
+    """The box covering ``quantile`` of the samples on each edge.
+
+    Same intent as a union — hold the subject for the whole shot — without
+    letting one bad frame define the crop for all of it.
+    """
+    if len(boxes) <= 2:
+        return union_box(*boxes)
+
+    def q(values, frac):
+        v = sorted(values)
+        return v[min(len(v) - 1, max(0, int(round(frac * (len(v) - 1)))))]
+
+    x0 = q([b[0] for b in boxes], 1.0 - quantile)
+    y0 = q([b[1] for b in boxes], 1.0 - quantile)
+    x1 = q([b[0] + b[2] for b in boxes], quantile)
+    y1 = q([b[1] + b[3] for b in boxes], quantile)
+    # Never smaller than the median box — the envelope is a floor, not a crop.
+    mid = boxes[len(boxes) // 2]
+    x0 = min(x0, mid[0])
+    y0 = min(y0, mid[1])
+    x1 = max(x1, mid[0] + mid[2])
+    y1 = max(y1, mid[1] + mid[3])
+    return (x0, y0, max(1.0, x1 - x0), max(1.0, y1 - y0))
 
 
 def _speaker_shares(active_tracks: Sequence[Optional[int]], shot) -> List[float]:
@@ -783,8 +940,12 @@ def _compose_shot(shot, spine_tracks: Dict[int, dict], active_tracks,
         # or distortion.
         _band = float(os.environ.get("VSPLIT_BAND_FRAC", "0"))
         _panel_aspect = aspect * 2.0 / (1.0 - _band)
-        panel_a = crop_rect_containing(subjects[0], frame_w, frame_h, _panel_aspect)
-        panel_b = crop_rect_containing(subjects[1], frame_w, frame_h, _panel_aspect)
+        panel_a = crop_rect_containing(subjects[0], frame_w, frame_h,
+                                       _panel_aspect,
+                                       layout=framing_contract.PANEL)
+        panel_b = crop_rect_containing(subjects[1], frame_w, frame_h,
+                                       _panel_aspect,
+                                       layout=framing_contract.PANEL)
         if not (contains(panel_a, subjects[0])
                 and contains(panel_b, subjects[1])):
             # The subjects' movement ranges span more than the panels can
@@ -820,9 +981,11 @@ def _compose_shot(shot, spine_tracks: Dict[int, dict], active_tracks,
         _band = float(os.environ.get("VSPLIT_BAND_FRAC", "0"))
         _panel_aspect = aspect * 2.0 / (1.0 - _band)
         panel_a = crop_rect_containing(subjects[0], frame_w, frame_h,
-                                       _panel_aspect)
+                                       _panel_aspect,
+                                       layout=framing_contract.PANEL)
         panel_b = crop_rect_containing(subjects[1], frame_w, frame_h,
-                                       _panel_aspect)
+                                       _panel_aspect,
+                                       layout=framing_contract.PANEL)
         if not (contains(panel_a, subjects[0])
                 and contains(panel_b, subjects[1])):
             return _wide_fallback_composed(
@@ -833,7 +996,21 @@ def _compose_shot(shot, spine_tracks: Dict[int, dict], active_tracks,
                             panels=(panel_a, panel_b))
     else:
         subject = union_box(*subjects)
-        crop = crop_rect_containing(subject, frame_w, frame_h, aspect)
+        # LOOK ROOM. We cannot select an over-the-shoulder shot — the source
+        # gives us one frame per moment, already picked — but biasing the crop
+        # toward the person the speaker faces pulls that listener into the near
+        # edge, which is the composition the reference gets from real OTS
+        # coverage (plan §1.3). The shift is capped inside frame_subject so the
+        # crop centre can never leave the subject's head.
+        _bound = subjects[0] if subjects else subject
+        _others = [b for b in subjects[1:] if b is not None]
+        if not _others:
+            _others = [f.box for f in faces
+                       if f.role == ROLE_BYSTANDER and f.box is not subject]
+        _probe = crop_rect_containing(_bound, frame_w, frame_h, aspect)
+        _look = framing_contract.look_room_dir(_bound, _others, _probe[2])
+        crop = crop_rect_containing(subject, frame_w, frame_h, aspect,
+                                    look_dir=_look)
         # Saliency is a nudge within containment slack, never a free aim:
         # a reaction beside the speaker pulls the frame toward it, but the
         # subject containment constraint (the "half a person" fix) still
@@ -848,7 +1025,7 @@ def _compose_shot(shot, spine_tracks: Dict[int, dict], active_tracks,
         # Emit the 4:3 WIDE centred on them instead of failing composition —
         # the owner-approved "show more context" output.
         if subject is not None and not contains(crop, subject):
-            _wide = _wide43_rect(frame_w, frame_h, [subject])
+            _wide = _wide43_rect(frame_w, frame_h, subjects, subject=_bound)
             if contains(_wide, subject):
                 return ComposedShot(shot.start, shot.end, LAYOUT_WIDE, _wide,
                                     subjects, track_ids=list(shot.track_ids))
@@ -1286,6 +1463,34 @@ def _render_with_splits(input_video: str, output_video: str, composed: Sequence[
             os.remove(silent)
 
 
+def _clip_relative_words(segments, clip_start: float,
+                         duration: float) -> List[dict]:
+    """ASR words for this clip, re-based to clip-relative seconds.
+
+    The planner works in 0..duration; `segments` are absolute source times.
+    Words outside the clip are dropped rather than clamped — a boundary must
+    never snap to a gap that is not in the clip.
+    """
+    out: List[dict] = []
+    for seg in segments or []:
+        for w in (seg.get("words") or []):
+            s, e = w.get("start"), w.get("end")
+            if s is None or e is None:
+                continue
+            rs, re_ = float(s) - clip_start, float(e) - clip_start
+            if re_ <= 0 or rs >= duration:
+                continue
+            out.append({"word": w.get("word", ""), "start": rs, "end": re_})
+    out.sort(key=lambda w: w["start"])
+    return out
+
+
+def _sentence_end_times(words: Sequence[dict]) -> List[float]:
+    """End times of words that close a sentence, by punctuation."""
+    return [float(w["end"]) for w in words or []
+            if str(w.get("word", "")).strip().endswith((".", "!", "?"))]
+
+
 def render(input_video, final_output_video, aspect_ratio,
            transcript=None, clip_start=0.0, clip_end=None,
            focus_directives=None, primary_subject_x=None,
@@ -1361,28 +1566,50 @@ def render(input_video, final_output_video, aspect_ratio,
         _, active = speaker_fusion.fuse_speaker_tracks(
             asd_boxes, tracks, segments, clip_start, effective_end,
             smooth_window=int(os.environ.get("SPEAKER_SMOOTH_WINDOW", "3")),
-            # Fall-back-to-base defaults: the decisive-margin gating and the
-            # gated mid-clip re-binding (both from the framing experiment)
-            # degraded the last session — margin 0 counts every second and
-            # rebind 0 disables re-binding, matching the pre-experiment
-            # binding. Both remain tunable via env.
+            # `decisive_margin` stays at 0 (every second votes) — the
+            # experiment's 0.10 gate degraded a session and nothing since has
+            # re-tested it. Re-binding is now ON by default (4s of sustained,
+            # decisive contradiction inside an 8s window): one binding per clip
+            # killed the per-frame flip-flop, but it also meant a binding that
+            # came out WRONG held the camera on the wrong person for the entire
+            # clip, with no way out. That trade is worse.
             asd_per_second_margin=asd_margins,
             decisive_margin=float(os.environ.get("ASD_DECISIVE_MARGIN", "0")),
-            rebind_seconds=int(os.environ.get("SPEAKER_REBIND_SECONDS", "0")),
-            rebind_window=int(os.environ.get("SPEAKER_REBIND_WINDOW", "8")))
+            rebind_seconds=int(os.environ.get("SPEAKER_REBIND_SECONDS", "4")),
+            rebind_window=int(os.environ.get("SPEAKER_REBIND_WINDOW", "8")),
+            # The no-guess rule: a diarized speaker we cannot map to a face
+            # goes WIDE rather than being pointed at the nearest torso.
+            unmapped_policy=os.environ.get(
+                "SPEAKER_UNMAPPED_POLICY",
+                speaker_fusion.UNMAPPED_POLICY_WIDE).strip().lower())
     if _identity_map is None and not any(track is not None for track in active):
-        # A transcript/ASD gap must not turn a known person into an untracked
-        # full-frame crop. Prefer the scene context's key subject when it
-        # names one; otherwise hold the most continuously observed identity.
+        # NOTHING bound for the whole clip. This used to pick a track anyway —
+        # the scene director's key subject, else whichever face was on screen
+        # longest — and hold it for the entire clip. When that guess was wrong
+        # it was wrong for every second, which is the "wrong person the whole
+        # way through" failure.
+        #
+        # Under the no-guess rule we only take that gamble when the director
+        # actually NAMED someone. Otherwise the honest output is the 4:3 wide:
+        # we do not know who is talking, so show the room.
+        _policy = os.environ.get(
+            "SPEAKER_UNMAPPED_POLICY",
+            speaker_fusion.UNMAPPED_POLICY_WIDE).strip().lower()
         fallback = _track_nearest_x(tracks, primary_subject_x, frame_w)
-        if fallback is None:
-            fallback = max(tracks, key=lambda track_id: len(tracks[track_id].get("frames") or []))
-        active = [fallback] * max(1, int(np.ceil(duration)))
-        print("   ⚠️ No confident active-speaker binding; holding a single fallback track")
+        if fallback is None and _policy != speaker_fusion.UNMAPPED_POLICY_WIDE:
+            fallback = max(tracks,
+                           key=lambda track_id: len(tracks[track_id].get("frames") or []))
+        if fallback is not None:
+            active = [fallback] * max(1, int(np.ceil(duration)))
+            print("   ⚠️ No confident active-speaker binding; "
+                  "holding the director's named subject")
+        else:
+            print("   ⚠️ No confident active-speaker binding and no named "
+                  "subject; showing the wide rather than guessing")
 
     planned = shot_planner.plan_shots(
         active, tracks, total_duration=duration,
-        max_shot_seconds=float(os.environ.get("MAX_SHOT_SECONDS", "8")))
+        max_shot_seconds=float(os.environ.get("MAX_SHOT_SECONDS", "14")))
     planned = shot_planner.insert_reaction_shots(
         planned, _directive_dicts(focus_directives), tracks, frame_w)
     # Conversation framing (owner-approved, fully local): vertical split on
@@ -1391,13 +1618,28 @@ def render(input_video, final_output_video, aspect_ratio,
     # SPLIT=0 keeps the speaker-binding fix but skips the beat planner.
     _conv = os.environ.get("CONVERSATION_FRAMING", "1").strip().lower()
     _split = os.environ.get("SPLIT", "1").strip().lower()
+    # Speech timing, in CLIP-relative seconds (segments are absolute).
+    _clip_words = _clip_relative_words(segments, clip_start, duration)
+    _gaps = shot_planner.word_gaps(_clip_words)
+    _sentence_ends = _sentence_end_times(_clip_words)
     if _conv not in ("0", "false", "no", "off") and _split not in ("0", "false", "no", "off"):
         planned = shot_planner.plan_conversation_beats(
             planned, active, tracks,
             min_exchange_s=float(os.environ.get("SPLIT_MIN_EXCHANGE_S", "2.5")),
-            min_span_s=float(os.environ.get("SPLIT_MIN_SPAN_S", "2.0")),
-            max_split_span=float(os.environ.get("SPLIT_MAX_SPAN_S", "12")),
-            frame_w=frame_w, frame_h=frame_h, aspect=aspect_ratio)
+            min_span_s=float(os.environ.get("SPLIT_MIN_SPAN_S", "2.5")),
+            max_split_span=float(os.environ.get("SPLIT_MAX_SPAN_S", "10")),
+            frame_w=frame_w, frame_h=frame_h, aspect=aspect_ratio,
+            sentence_ends=_sentence_ends)
+    # The cut follows the sentence (I9). Every failing clip opened mid-sentence
+    # and two died mid-thought; the clip's own in/out are sentence-anchored
+    # upstream, but the boundaries BETWEEN shots landed wherever the speaker
+    # track happened to change. Nudge each onto the nearest silence.
+    if _gaps:
+        _before = [s.start for s in planned]
+        planned = shot_planner.snap_shots_to_speech(planned, _gaps)
+        _moved = sum(1 for a, s in zip(_before, planned) if abs(a - s.start) > 1e-6)
+        if _moved:
+            print(f"   ↳ snapped {_moved} shot boundary(ies) onto word gaps")
     print(f"   ↳ shot planning: {_time.time() - _t0:.0f}s")
     composed = compose_shots(planned, tracks, active, input_video, frame_w, frame_h, aspect_ratio)
     print(f"   ↳ saliency + composition: {_time.time() - _t0:.0f}s")
@@ -1441,17 +1683,15 @@ def render(input_video, final_output_video, aspect_ratio,
             _panel_aspect = aspect_ratio * 2.0 / (
                 1.0 - float(os.environ.get("VSPLIT_BAND_FRAC", "0")))
             _track_knobs = dict(
-                # Panel framing parity: the tracked panels use the SAME
-                # breathing room as a static single shot (crop_rect_containing
-                # above), so a split is "normal framing, then stacked" rather
-                # than two zoomed-in faces.
-                headroom=float(os.environ.get("VSPLIT_HEADROOM", "0.18")),
-                side_margin=float(os.environ.get(
-                    "VSPLIT_SIDE_MARGIN", str(DEFAULT_SIDE_MARGIN))),
-                vert_margin=float(os.environ.get(
-                    "VSPLIT_VERT_MARGIN", str(DEFAULT_VERT_MARGIN))),
+                # VSPLIT_HEADROOM / VSPLIT_SIDE_MARGIN / VSPLIT_VERT_MARGIN are
+                # GONE. They described a framing method that cut heads by
+                # construction (see smart_crop's module docstring); the tracker
+                # now derives its crop from framing_contract, exactly like the
+                # static panels, so a split really is "normal framing, then
+                # stacked". Four fewer knobs to be wrong.
                 min_height_frac=float(os.environ.get(
-                    "VSPLIT_PANEL_MIN_FRAC", "0.45")),
+                    "VSPLIT_PANEL_MIN_FRAC",
+                    str(framing_contract.DEFAULT_MIN_CROP_FRAC))),
                 dead_zone=float(os.environ.get("VSPLIT_DEADZONE", "0.02")),
                 smooth=float(os.environ.get("VSPLIT_SMOOTH", "0.12")),
                 smooth_zoom=float(os.environ.get("VSPLIT_SMOOTH_ZOOM", "0.06")),

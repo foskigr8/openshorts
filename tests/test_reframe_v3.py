@@ -7,9 +7,9 @@ split-screen delegation runs without opencv, onnxruntime or a GPU.
 import numpy as np
 import pytest
 
+import framing_contract as fc
 from reframe_v3 import (
     BYSTANDER_SUPPRESSION,
-    DEFAULT_HEAD_Y,
     LAYOUT_SINGLE,
     LAYOUT_SPLIT,
     LAYOUT_TWO_SHOT,
@@ -28,7 +28,7 @@ from reframe_v3 import (
     decide_layout,
     union_box,
 )
-from reframe_v3 import ComposedShot, _render_regular
+from reframe_v3 import ComposedShot, _render_regular, _wide43_rect
 
 FRAME_W, FRAME_H = 1920, 1080
 
@@ -290,14 +290,19 @@ def test_crop_stays_inside_the_frame():
 
 def test_head_is_placed_high_not_centred():
     """Vertical composition — the thing upstream's crop window cannot express
-    at all, since it always returns y=0 and full frame height."""
-    subject = (900, 400, 100, 100)
-    x, y, w, h = crop_rect_containing(subject, FRAME_W, FRAME_H)
+    at all, since it always returns y=0 and full frame height.
 
-    subject_cy = 450
-    placement = (subject_cy - y) / h
-    assert placement == pytest.approx(DEFAULT_HEAD_Y, abs=0.02)
-    assert placement < 0.5  # strictly above centre
+    The assertion is now the measured eyeline (0.22 of the crop, reference IQR
+    0.20-0.24) rather than the old DEFAULT_HEAD_Y=0.36 face-centre placement.
+    Same intent, but tied to a number taken off footage that works — and, more
+    to the point, to the same ratio that sets the crop's SIZE, which is what
+    stops the panel head-cut recurring.
+    """
+    subject = (900, 400, 100, 100)
+    crop = crop_rect_containing(subject, FRAME_W, FRAME_H)
+    assert fc.eye_frac(crop, subject) == pytest.approx(fc.SINGLE_EYE_Y, abs=0.02)
+    assert fc.eye_frac(crop, subject) < 0.5      # strictly above centre
+    assert fc.headroom_frac(crop, subject, FRAME_W, FRAME_H) >= fc.HEADROOM_MIN
 
 
 def test_full_height_crop_is_a_consequence_not_an_assumption():
@@ -520,13 +525,56 @@ def test_non_split_layout_without_a_crop_raises():
         validate_composition([shot], FRAME_W, FRAME_H)
 
 
-def test_split_layout_is_exempt_from_containment():
-    """Split panels hold their subjects separately, so a single containing
-    rect is not a meaningful constraint — but duration still applies."""
+def test_split_layout_is_no_longer_exempt_from_validation():
+    """The exemption that let every bad clip ship.
+
+    `LAYOUT_SPLIT` used to `continue` straight past validation on the grounds
+    that "subjects live in separate panels by construction". That construction
+    was never checked, so a split with no panels at all — or with panels whose
+    top edge bisects the subject's hair — validated cleanly and rendered
+    (plan §3.2). Now a split without panels is a hard failure.
+    """
     shot = ComposedShot(
         start=0.0, end=3.0, layout=LAYOUT_SPLIT, crop=None,
         subjects=[(200, 400, 120, 120), (1600, 400, 120, 120)],
     )
+    with pytest.raises(CompositionError, match="no two panels"):
+        validate_composition([shot], FRAME_W, FRAME_H)
+
+
+def test_a_split_panel_that_cuts_the_head_is_rejected():
+    """The defect clip 1 is made of, as an assertion.
+
+    The panel below CONTAINS the face box — the old check passed it — but its
+    top edge sits below the hairline, so the rendered panel shears the skull.
+    """
+    subject = (900, 400, 120, 150)
+    panel_aspect = VERTICAL_9_16 * 2.0
+    # The pre-contract geometry: margins around the face box, face centre at
+    # 0.36 of the crop. For a 9:8 panel this always cuts the head.
+    crop_h = max(150 * 1.7, 120 * 2.1 / panel_aspect)
+    bad = (960 - crop_h * panel_aspect / 2.0, 475 - crop_h * 0.36,
+           crop_h * panel_aspect, crop_h)
+    assert contains(bad, subject), "the old containment check passes this"
+
+    good = crop_rect_containing(subject, FRAME_W, FRAME_H, panel_aspect,
+                                layout=fc.PANEL)
+    shot = ComposedShot(
+        start=0.0, end=3.0, layout=LAYOUT_VSPLIT, crop=None,
+        subjects=[subject, subject], panels=(bad, good))
+    with pytest.raises(CompositionError, match="cuts the head"):
+        validate_composition([shot], FRAME_W, FRAME_H)
+
+
+def test_a_well_formed_split_still_validates():
+    a, b = (200, 400, 120, 150), (1600, 400, 120, 150)
+    panel_aspect = VERTICAL_9_16 * 2.0
+    shot = ComposedShot(
+        start=0.0, end=3.0, layout=LAYOUT_VSPLIT, crop=None, subjects=[a, b],
+        panels=(crop_rect_containing(a, FRAME_W, FRAME_H, panel_aspect,
+                                     layout=fc.PANEL),
+                crop_rect_containing(b, FRAME_W, FRAME_H, panel_aspect,
+                                     layout=fc.PANEL)))
     validate_composition([shot], FRAME_W, FRAME_H)
 
     shot.end = 0.3
@@ -819,3 +867,109 @@ def test_aspect_tuple_maps_float_to_integer_ratio():
     assert _aspect_tuple(9.0 / 16.0) == (9, 16)
     assert _aspect_tuple(1.0) == (1, 1)
     assert abs(_aspect_tuple(0.75)[0] / _aspect_tuple(0.75)[1] - 0.75) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# The framing contract, wired in (PLAN_FRAMING_CONTRACT.md §5.2)
+# ---------------------------------------------------------------------------
+
+def test_crop_rect_containing_frames_to_the_contract():
+    """The single path now inherits the measured ratios rather than margins."""
+    subject = (900, 300, 120, 150)
+    crop = crop_rect_containing(subject, FRAME_W, FRAME_H)
+    assert fc.check(crop, [subject], fc.SINGLE, FRAME_W, FRAME_H,
+                    aspect=VERTICAL_9_16) == []
+
+
+def test_panel_layout_must_be_asked_for_explicitly():
+    """Passing the wide panel aspect WITHOUT layout=PANEL was the head-cut: the
+    width term stops binding and the crop collapses onto the face. The two
+    ratios and the aspect now have to agree."""
+    subject = (900, 300, 120, 150)
+    panel_aspect = VERTICAL_9_16 * 2.0
+    panel = crop_rect_containing(subject, FRAME_W, FRAME_H, panel_aspect,
+                                 layout=fc.PANEL)
+    assert fc.headroom_frac(panel, subject, FRAME_W, FRAME_H) >= fc.HEADROOM_MIN
+    assert fc.check(panel, [subject], fc.PANEL, FRAME_W, FRAME_H,
+                    aspect=panel_aspect) == []
+
+
+def test_look_room_shifts_the_crop_toward_the_listener():
+    speaker = (900, 300, 120, 150)
+    listener = (1300, 300, 120, 150)
+    centred = crop_rect_containing(speaker, FRAME_W, FRAME_H)
+    d = fc.look_room_dir(speaker, [listener], centred[2])
+    shifted = crop_rect_containing(speaker, FRAME_W, FRAME_H, look_dir=d)
+    assert shifted[0] > centred[0]
+    assert fc.check(shifted, [speaker], fc.SINGLE, FRAME_W, FRAME_H,
+                    aspect=VERTICAL_9_16) == []
+
+
+# ---------------------------------------------------------------------------
+# _wide43_rect must not centre the gap (I6, plan §3.3)
+# ---------------------------------------------------------------------------
+
+def test_wide_contains_everyone_when_everyone_fits():
+    a, b = (300, 400, 120, 150), (900, 400, 120, 150)
+    crop = _wide43_rect(FRAME_W, FRAME_H, [a, b])
+    assert contains(crop, union_box(a, b))
+
+
+def test_wide_stays_on_the_subject_when_they_do_not_all_fit():
+    """Two people too far apart for one 4:3: centring their union centres the
+    empty space between them, which is what clip 4 shipped.
+
+    Uses a 2560-wide source on purpose. At 1920x1080 a 4:3 crop is 1440px —
+    75% of the frame — so it has almost no room to slide and frame clamping
+    would mask the behaviour under test.
+    """
+    wide_w, wide_h = 2560, 1080
+    speaker, far = (600, 400, 120, 150), (2300, 400, 120, 150)
+    crop = _wide43_rect(wide_w, wide_h, [speaker, far], subject=speaker)
+    head = fc.head_box(speaker, wide_w, wide_h)
+    centre = crop[0] + crop[2] / 2.0
+    band = crop[2] * fc.CENTRE_BAND / 2.0
+    assert abs((head[0] + head[2] / 2.0) - centre) <= band + 0.5
+
+    # The regression, stated directly: the OLD behaviour centred on the union
+    # of the face boxes, which for this pair lands in the empty space between
+    # them and pushes the subject clean out of the middle band.
+    far_head = fc.head_box(far, wide_w, wide_h)
+    union_centre = (head[0] + far_head[0] + far_head[2]) / 2.0
+    assert abs((head[0] + head[2] / 2.0) - union_centre) > band
+
+
+def test_wide_with_no_faces_is_the_centre_of_the_frame():
+    crop = _wide43_rect(FRAME_W, FRAME_H, [])
+    assert crop[0] == pytest.approx((FRAME_W - crop[2]) / 2.0)
+
+
+# ---------------------------------------------------------------------------
+# _clip_and_filter_box — what can be a subject at all (plan §3.4)
+# ---------------------------------------------------------------------------
+
+def test_a_placard_is_not_a_face():
+    """The show's 'CHEATER' / 'Red Flag' cards are wide rectangles held at
+    chest height, and they repeatedly won the frame in clip 1."""
+    from reframe_v3 import _clip_and_filter_box
+    assert _clip_and_filter_box((600.0, 500.0, 300.0, 180.0),
+                                FRAME_W, FRAME_H) is None
+
+
+def test_a_lens_filling_head_is_not_a_subject():
+    """Clip 4 held a full-frame back-of-head close-up for four seconds."""
+    from reframe_v3 import _clip_and_filter_box
+    assert _clip_and_filter_box((300.0, 100.0, 700.0, 800.0),
+                                FRAME_W, FRAME_H) is None
+
+
+def test_a_speck_is_not_a_subject():
+    from reframe_v3 import _clip_and_filter_box
+    assert _clip_and_filter_box((900.0, 500.0, 14.0, 18.0),
+                                FRAME_W, FRAME_H) is None
+
+
+def test_a_real_face_still_survives_the_filters():
+    from reframe_v3 import _clip_and_filter_box
+    box = (900.0, 300.0, 120.0, 150.0)
+    assert _clip_and_filter_box(box, FRAME_W, FRAME_H) == box

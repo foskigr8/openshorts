@@ -81,7 +81,30 @@ MIN_CORROBORATION_MOTION_FRAC = 0.03
 # Two people this close on screen fit one crop at usable size → TWO_SHOT
 # instead of a split (mirrors reframe_v3.decide_layout; kept local so the
 # planner never needs to import the renderer).
-MAX_TWO_SHOT_WIDTH_FRAC = 0.72
+MAX_TWO_SHOT_WIDTH_FRAC = 0.82
+
+# The size floor on the far-apart test. A two-shot only "holds both" if it
+# holds them big enough to read on a phone; below this the split wins, because
+# two panels keep each person at ~0.15 of the output while a wide does not.
+MIN_TWO_SHOT_FACE = 0.12
+
+# Even a physically-spliced boundary must produce a shot long enough to read.
+# Shorter than this and the "cut" is a flash frame, not an edit.
+MIN_FORCED_SHOT_SECONDS = 0.8
+
+# A back-and-forth needs the floor to change hands more than once: two
+# switches is one handover (A finishes, B starts), which is an ordinary
+# speaker change and reads better as a cut than as a split.
+MIN_EXCHANGE_SWITCHES = 3
+
+# A split you cannot read is a glitch. Two complete sentences is the
+# legibility bar — enforced only when sentence times are supplied.
+MIN_EXCHANGE_SENTENCES = 2
+
+# Above this share of a clip, the split has stopped being a device and the
+# two-shot test is almost certainly misfiring. Diagnostic, never a downgrade:
+# a split that passed every admission test is not demoted to hit a quota.
+SPLIT_SHARE_WARN = 0.60
 
 
 @dataclass
@@ -193,11 +216,23 @@ def merge_short_runs(runs: List[Tuple[float, float, Optional[int]]],
     the same track for no reason.
     """
     forced = set(forced_boundaries or [])
+
+    def _protected(start: float, duration: float) -> bool:
+        """A forced boundary earns a shot only if the shot is watchable.
+
+        The old rule was "starts at a forced boundary → never reabsorb", full
+        stop. A splice point landing 0.2s before the next one therefore emitted
+        a 0.2s shot, which is the flash-frame reported in every failing clip.
+        The video really is discontinuous there, but a shot too brief to
+        register is not a cut — it is a glitch. Below the floor, absorb it and
+        let the surrounding shot carry the splice.
+        """
+        return start in forced and duration >= MIN_FORCED_SHOT_SECONDS
+
     output: List[Tuple[float, float, Optional[int]]] = []
     for start, end, value in runs:
         duration = end - start
-        starts_at_forced = start in forced
-        should_reabsorb = output and not starts_at_forced and (
+        should_reabsorb = output and not _protected(start, duration) and (
             duration < min_shot_seconds or output[-1][2] == value)
         if should_reabsorb:
             prev_start, _prev_end, prev_value = output[-1]
@@ -208,11 +243,81 @@ def merge_short_runs(runs: List[Tuple[float, float, Optional[int]]],
     # into): merge it forward into the next run.
     while (len(output) > 1
            and output[0][1] - output[0][0] < min_shot_seconds
-           and output[0][0] not in forced):
+           and not _protected(output[0][0], output[0][1] - output[0][0])):
         first = output.pop(0)
         nxt = output[0]
         output[0] = (first[0], nxt[1], nxt[2])
     return output
+
+
+#: How far a shot boundary may move to reach a word gap.
+SNAP_TOLERANCE_S = 0.4
+#: A pause shorter than this is not a gap you can cut on — it is coarticulation.
+MIN_WORD_GAP_S = 0.12
+
+
+def word_gaps(words: Optional[List[dict]]) -> List[float]:
+    """Midpoints of the silences between words, as candidate cut points.
+
+    `words` is the ASR word list (`{"start": float, "end": float, ...}`).
+    Only gaps of at least `MIN_WORD_GAP_S` count — anything shorter is the
+    natural run-on between words, and cutting there sounds like a dropout.
+    """
+    times: List[float] = []
+    if not words:
+        return times
+    ordered = sorted(
+        (w for w in words if w.get("start") is not None and w.get("end") is not None),
+        key=lambda w: float(w["start"]))
+    for prev, nxt in zip(ordered, ordered[1:]):
+        gap = float(nxt["start"]) - float(prev["end"])
+        if gap >= MIN_WORD_GAP_S:
+            times.append(float(prev["end"]) + gap / 2.0)
+    return times
+
+
+def snap_shots_to_speech(shots: List[Shot], gaps: Optional[List[float]],
+                         forced_boundaries: Optional[List[float]] = None,
+                         tolerance: float = SNAP_TOLERANCE_S,
+                         min_shot_seconds: float = 1.8) -> List[Shot]:
+    """Move every shot boundary onto the nearest silence between words.
+
+    The reference cuts on the sentence, not on the clock: every failing clip
+    opened mid-sentence and two of them died mid-thought. The clip's own
+    in/out are already sentence-anchored upstream (`main.py`), but the
+    boundaries BETWEEN shots were wherever the speaker-track happened to
+    change, which lands mid-word about as often as not.
+
+    Constraints, all of them deliberate:
+      * a boundary moves at most `tolerance` seconds — this is a polish pass,
+        not a re-plan, and a boundary that cannot reach a gap stays put;
+      * FORCED boundaries never move, because the video is physically spliced
+        there and the cut has to be exactly at the splice;
+      * the first and last boundaries never move, because they are the clip's
+        own sentence-anchored in/out;
+      * a snap that would push a shot below `min_shot_seconds` is skipped.
+    """
+    if not shots or not gaps:
+        return list(shots)
+
+    forced = set(forced_boundaries or [])
+    ordered = sorted(float(g) for g in gaps)
+    out = [Shot(s.start, s.end, s.shot_type, list(s.track_ids), s.crop_rect)
+           for s in shots]
+
+    for i in range(1, len(out)):
+        boundary = out[i].start
+        if boundary in forced:
+            continue
+        best = min(ordered, key=lambda g: abs(g - boundary))
+        if abs(best - boundary) > tolerance:
+            continue
+        if (best - out[i - 1].start < min_shot_seconds
+                or out[i].end - best < min_shot_seconds):
+            continue
+        out[i - 1].end = best
+        out[i].start = best
+    return out
 
 
 def _nearest_box_in_track(track: dict, timestamp: float, time_tolerance: float = 1.0):
@@ -271,7 +376,7 @@ def plan_shots_from_samples(samples: List[Tuple[float, Optional[int]]],
                             spine_tracks: Dict[int, dict],
                             total_duration: float,
                             forced_boundaries: Optional[List[float]] = None,
-                            min_shot_seconds: float = 1.2,
+                            min_shot_seconds: float = 1.8,
                             max_shot_seconds: float = 8.0,
                             default_wide_rect: Optional[tuple] = None) -> List[Shot]:
     """The general entry point: arbitrary-timestamp samples -> a stable shot
@@ -331,7 +436,7 @@ def plan_shots(per_second_active_track: List[Optional[int]],
                spine_tracks: Dict[int, dict],
                total_duration: Optional[float] = None,
                forced_boundaries: Optional[List[float]] = None,
-               min_shot_seconds: float = 1.2,
+               min_shot_seconds: float = 1.8,
                default_wide_rect: Optional[tuple] = None) -> List[Shot]:
     """Convenience entry point for TODAY's feed: `speaker_fusion.
     per_second_active_track`'s 1Hz list, index i = second i.
@@ -481,7 +586,7 @@ def is_directive_corroborated(spine_tracks: Dict[int, dict], track_id: int,
 def insert_reaction_shots(shots: List[Shot], directives: List[dict],
                           spine_tracks: Dict[int, dict], frame_width: float,
                           max_reaction_seconds: float = DEFAULT_MAX_REACTION_SECONDS,
-                          min_shot_seconds: float = 1.2,
+                          min_shot_seconds: float = 1.8,
                           require_corroboration: bool = True) -> List[Shot]:
     """For each `causing_reaction`/`referenced` directive (gemini_worker's
     "show the cause, not the reaction" / "cut to who was referenced" rule),
@@ -552,7 +657,7 @@ def two_shot_crop_rect(spine_tracks: Dict[int, dict], track_a: int, track_b: int
 
 def apply_two_shot(shots: List[Shot], addressee_per_second: List[Optional[int]],
                    spine_tracks: Dict[int, dict],
-                   min_shot_seconds: float = 1.2) -> List[Shot]:
+                   min_shot_seconds: float = 1.8) -> List[Shot]:
     """Widen a SINGLE shot to a TWO_SHOT wherever its speaking track has a
     known, DIFFERENT addressee for the whole shot span.
 
@@ -624,8 +729,10 @@ def find_exchange_windows(active: List[Optional[int]],
         # Extend while the two keep the floor (A/B alternation, short gaps
         # ok). A third track persisting for 2+ seconds is a real takeover,
         # not a flicker — close the window at its start. Count actual
-        # alternations: a single A->B transition is NOT an exchange (that is
-        # just the speaker changing once); the split needs them trading.
+        # alternations: the floor has to change hands MIN_EXCHANGE_SWITCHES
+        # times. Two switches is just A finishing and B starting, which is an
+        # ordinary speaker change; committing half the frame to it is what
+        # made clip 1 a split screen from end to end.
         end = j
         k = j + 1
         third_streak = 0
@@ -646,7 +753,7 @@ def find_exchange_windows(active: List[Optional[int]],
             k += 1
         w_start = max(0.0, float(i) - 0.5)
         w_end = min(float(n), float(end) + 0.5)
-        if switches >= 2 and w_end - w_start >= min_span_s:
+        if switches >= MIN_EXCHANGE_SWITCHES and w_end - w_start >= min_span_s:
             windows.append((w_start, w_end, a, b))
         i = end + 1
 
@@ -703,26 +810,58 @@ def _splice_two_track_window(shots: List[Shot], w_start: float, w_end: float,
     return result
 
 
+#: A participant must be on screen for at least this share of an exchange
+#: window to be worth half the frame (plan §5.4).
+MIN_SPLIT_PRESENCE = 0.70
+
+
 def _track_present_in_span(spine_tracks: Dict[int, dict], track_id: int,
-                           start: float, end: float) -> bool:
-    """Did `track_id` actually have face detections inside [start, end)?
-    An exchange between a track and a face that was never on screen is not
-    an exchange — the normal single/wide shots hold instead (the "showing
-    feet / nothing to split" rule: show what's actually there)."""
+                           start: float, end: float,
+                           min_presence: float = MIN_SPLIT_PRESENCE) -> bool:
+    """Is `track_id` on screen for enough of [start, end) to hold a panel?
+
+    This used to be `any()` — ONE detection anywhere in the window admitted a
+    participant to half the frame for its whole duration. That is how a panel
+    ended up holding an empty chair, or the back of somebody's head, while the
+    other panel did the talking. A panel is a commitment for seconds at a
+    time, so the presence bar has to be a share, not an existence check.
+    """
     track = spine_tracks.get(track_id)
     if not track:
         return False
-    frames = track.get("frames") or []
-    return any(start <= float(t) < end for t in frames)
+    frames = [float(t) for t in (track.get("frames") or [])]
+    inside = [t for t in frames if start <= t < end]
+    if not inside:
+        return False
+    # Sampled instants the track COULD have appeared at, at the feed's own
+    # resolution — inferred from the track rather than assumed to be 1Hz.
+    step = _track_sample_step(frames)
+    expected = max(1.0, (end - start) / step)
+    return len(inside) / expected >= min_presence
+
+
+def _track_sample_step(frames: List[float]) -> float:
+    """Median gap between a track's samples; 1.0s if it cannot be inferred."""
+    gaps = [b - a for a, b in zip(sorted(frames), sorted(frames)[1:]) if b > a]
+    if not gaps:
+        return 1.0
+    return max(1e-3, statistics.median(gaps))
 
 
 def _tracks_close_enough(spine_tracks: Dict[int, dict], track_a: int,
                          track_b: int, start: float, end: float,
                          frame_w: int, frame_h: int,
                          aspect: float) -> bool:
-    """Can ONE crop hold both tracks' median positions at usable size?
-    Two people working together (host + guest, both in frame) get a
-    two-shot instead of a forced split; only far-apart people split."""
+    """Can ONE crop hold both people **at a readable size**?
+
+    This is the far-apart test, and the size floor is the point of it. A crop
+    that technically contains both but shrinks them below `MIN_TWO_SHOT_FACE`
+    is not holding both — that is the 4:3 wide that gave clips 2 and 4 their
+    0.09-height faces, and a correct split beats it. So this test now pushes
+    in BOTH directions: side-by-side pairs that used to be split become
+    two-shots, and far-apart pairs that used to become a tiny wide become
+    splits.
+    """
     rect_a = crop_rect_for_track(spine_tracks, track_a, start, end)
     rect_b = crop_rect_for_track(spine_tracks, track_b, start, end)
     if rect_a is None or rect_b is None:
@@ -738,29 +877,71 @@ def _tracks_close_enough(spine_tracks: Dict[int, dict], track_a: int,
         return False
     # The aspect-fit test decide_layout applies: the vertical crop needed to
     # hold the union must fit inside the source frame.
-    return max(union_h, union_w / aspect) <= frame_h
+    if max(union_h, union_w / aspect) > frame_h:
+        return False
+    import framing_contract
+    return framing_contract.two_shot_holds_both(
+        [rect_a, rect_b], frame_w, frame_h, aspect,
+        min_face_frac=MIN_TWO_SHOT_FACE)
+
+
+def _split_geometry_holds(spine_tracks: Dict[int, dict], track_a: int,
+                          track_b: int, start: float, end: float,
+                          frame_w: int, frame_h: int, aspect: float) -> bool:
+    """Would the two panels actually satisfy the framing contract?
+
+    Checked BEFORE committing the window, not after rendering it. Every
+    shipped split failure was a plan that looked fine and geometry that did
+    not: a panel whose top edge bisected the subject's hair, or one panel a
+    close-up next to another holding a distant crowd. If the geometry cannot
+    work here, the window falls through to a two-shot instead.
+    """
+    import framing_contract
+
+    rect_a = crop_rect_for_track(spine_tracks, track_a, start, end)
+    rect_b = crop_rect_for_track(spine_tracks, track_b, start, end)
+    if rect_a is None or rect_b is None:
+        return False
+    panel_aspect = aspect * 2.0
+    panels = (
+        framing_contract.frame_panel(rect_a, frame_w, frame_h, panel_aspect),
+        framing_contract.frame_panel(rect_b, frame_w, frame_h, panel_aspect),
+    )
+    return not framing_contract.check_panels(
+        panels, [rect_a, rect_b], frame_w, frame_h, panel_aspect=panel_aspect)
 
 
 def plan_conversation_beats(shots: List[Shot], active: List[Optional[int]],
                             spine_tracks: Dict[int, dict],
                             min_exchange_s: float = 2.5,
-                            min_span_s: float = 2.0,
-                            min_shot_seconds: float = 1.2,
-                            max_split_span: float = 12.0,
+                            min_span_s: float = 2.5,
+                            min_shot_seconds: float = 1.8,
+                            max_split_span: float = 10.0,
                             frame_w: Optional[int] = None,
                             frame_h: Optional[int] = None,
-                            aspect: Optional[float] = None) -> List[Shot]:
+                            aspect: Optional[float] = None,
+                            sentence_ends: Optional[List[float]] = None
+                            ) -> List[Shot]:
     """Cut to a two-track edit over genuine two-person exchange windows,
     preserving the base shot list everywhere else.
 
-    A window becomes a VERTICAL SPLIT only when both people are on screen
-    AND too far apart for one crop; when they are working together in one
-    frame it becomes a TWO_SHOT instead (composition re-decides the exact
-    layout). Windows where either "participant" has no face on screen are
-    skipped entirely — the normal single/wide logic holds. Returns a NEW
-    list, and uses the same conservative splice as reaction shots (a window
-    that would leave a sub-minimum sliver is skipped rather than breaking
-    the no-jitter/min-duration guarantees).
+    A window becomes a VERTICAL SPLIT only when it passes every admission
+    test in PLAN_FRAMING_CONTRACT.md §5.4: the floor changes hands at least
+    `MIN_EXCHANGE_SWITCHES` times, the window is long enough to read (and
+    covers `MIN_EXCHANGE_SENTENCES` complete sentences when `sentence_ends`
+    is supplied), BOTH participants are on screen for most of it, they are
+    too far apart to hold in one crop at a readable size, and the two panels
+    would actually satisfy the framing contract. Anything that fails falls
+    through to a TWO_SHOT, then to the normal single/wide logic.
+
+    The goal of the gate is not fewer splits — it is only correct ones. The
+    far-apart test carries a face-size floor, so a pair that used to be
+    squashed into a tiny 4:3 wide now becomes a split, while a side-by-side
+    pair that used to be split becomes a two-shot.
+
+    Returns a NEW list, and uses the same conservative splice as reaction
+    shots (a window that would leave a sub-minimum sliver is skipped rather
+    than breaking the no-jitter/min-duration guarantees).
     """
     windows = find_exchange_windows(active, min_exchange_s, min_span_s)
     if not windows:
@@ -779,13 +960,65 @@ def plan_conversation_beats(shots: List[Shot], active: List[Optional[int]],
                                   w_start, w_end)
         if rect is None:
             continue
-        close = (frame_w is not None and frame_h is not None
-                 and aspect is not None
-                 and _tracks_close_enough(spine_tracks, track_a, track_b,
-                                          w_start, w_end, frame_w, frame_h,
-                                          aspect))
+        _measurable = (frame_w is not None and frame_h is not None
+                       and aspect is not None)
+        close = _measurable and _tracks_close_enough(
+            spine_tracks, track_a, track_b, w_start, w_end,
+            frame_w, frame_h, aspect)
+        if close:
+            _type = SHOT_TWO_SHOT
+        elif not _window_is_legible(w_start, w_end, sentence_ends):
+            # Too short to read. A split that flashes past registers as a
+            # glitch rather than as a device — show them together instead.
+            _type = SHOT_TWO_SHOT
+        elif _measurable and not _split_geometry_holds(
+                spine_tracks, track_a, track_b, w_start, w_end,
+                frame_w, frame_h, aspect):
+            # Far apart, but the panels would violate the contract (a crowd in
+            # one, mismatched scales, a face too small to panel). Show them
+            # together rather than shipping a broken split — a wrong two-shot
+            # is recoverable, a sheared head is not.
+            _type = SHOT_TWO_SHOT
+        else:
+            _type = SHOT_VSPLIT
         result = _splice_two_track_window(
             result, w_start, w_end, [track_a, track_b], rect,
-            SHOT_TWO_SHOT if close else SHOT_VSPLIT,
-            min_shot_seconds)
+            _type, min_shot_seconds)
+    _warn_on_split_share(result)
     return result
+
+
+def _window_is_legible(w_start: float, w_end: float,
+                       sentence_ends: Optional[List[float]]) -> bool:
+    """Does the window cover enough complete sentences to be worth a split?
+
+    Fails OPEN when `sentence_ends` is not supplied: callers that have no
+    transcript keep the previous behaviour rather than losing every split.
+    """
+    if w_end - w_start < MIN_EXCHANGE_SENTENCES * 1.0:
+        return False
+    if not sentence_ends:
+        return True
+    inside = sum(1 for t in sentence_ends if w_start <= float(t) <= w_end)
+    return inside >= MIN_EXCHANGE_SENTENCES
+
+
+def _warn_on_split_share(shots: List[Shot]) -> float:
+    """Log — never enforce — how much of the clip ended up as a split.
+
+    This is a diagnostic, not a quota. A split that passed every admission
+    test above has earned its place, and silently downgrading it to hit a
+    percentage would be exactly the kind of taste rule this rebuild replaced
+    with measurements. But a clip that is mostly split screen means the
+    two-shot test is not firing, which IS a bug worth seeing (clip 1 ran ~90%).
+    """
+    total = sum(s.duration for s in shots)
+    if total <= 0:
+        return 0.0
+    split = sum(s.duration for s in shots if s.shot_type == SHOT_VSPLIT)
+    share = split / total
+    if share > SPLIT_SHARE_WARN:
+        print(f"⚠️  split screen on {share:.0%} of this clip "
+              f"({split:.1f}s of {total:.1f}s) — every panel passed admission, "
+              f"but the two-shot test is probably not firing (plan §5.4)")
+    return share

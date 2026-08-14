@@ -168,12 +168,20 @@ GPU pieces that were silently wrong and are now deterministic:
   back-and-forth (single → split → single), driven by LR-ASD + diarization +
   stable anonymous face identities. `0` reverts to the pre-conversation
   pipeline. `SPLIT=0` keeps the speaker-binding fix but skips the beat
-  planner; `SPLIT_MIN_EXCHANGE_S=2.5` / `SPLIT_MIN_SPAN_S=2.0` tune the
-  exchange windows. An exchange only cuts to a two-track edit when BOTH
-  participants actually have faces on screen during the window (no face →
-  the normal single/wide shot holds — the "show what's actually there"
-  rule), and then as a VERTICAL SPLIT only when they are too far apart for
-  one crop; people working together in one frame become a TWO_SHOT instead.
+  planner; `SPLIT_MIN_EXCHANGE_S=2.5` / `SPLIT_MIN_SPAN_S=2.5` /
+  `SPLIT_MAX_SPAN_S=10` tune the exchange windows.
+  **A window becomes a split only if it passes every admission test**
+  (`PLAN_FRAMING_CONTRACT.md` §5.4): the floor changes hands ≥ 3 times (two
+  switches is one handover, not a back-and-forth), the window runs 2.5–10s and
+  covers ≥ 2 complete sentences, BOTH participants are on screen for ≥ 70% of
+  it, one crop cannot hold them both at ≥ 0.12 face height, and the two panels
+  would actually satisfy the framing contract. Anything failing falls through
+  to TWO_SHOT → look-room single → 4:3 wide.
+  The size floor makes the gate push in BOTH directions: side-by-side pairs
+  that used to be split become two-shots, and far-apart pairs that used to be
+  squashed into a tiny wide become splits. There is **no split quota** — a
+  clip over 60% split logs a warning (the two-shot test is probably
+  misfiring) but nothing is ever silently downgraded.
   `VSPLIT_BAND_FRAC=0` (default) stacks the two panels edge-to-edge with no
   separating bar — each panel fills half the frame and frames its person
   head-and-shoulders (9:8 for 9:16 output, no letterbox, no distortion), and
@@ -195,16 +203,24 @@ GPU pieces that were silently wrong and are now deterministic:
   the model saying "could be either", and they no longer pollute the
   one-binding-per-clip vote. `0` counts every second (the old behaviour).
 - `SPEAKER_REBIND_SECONDS` / `SPEAKER_REBIND_WINDOW` — the gate on
-  correcting a binding mid-clip (default `0` = disabled, the pre-experiment
-  behaviour; `4` and `8` were the experiment's values). One binding per clip
-  killed the per-frame flip-flop but meant a binding that came out WRONG held
-  the camera on the wrong person for the whole clip. Now, when a bound
-  speaker is talking and decisive ASD points at a different track for
-  `SPEAKER_REBIND_SECONDS` seconds inside a `SPEAKER_REBIND_WINDOW`-second
-  window, the label re-binds from that second to the clip's end. Agreement
-  with the current binding decays the case, so a one-second blip — or an
-  alternating, ambiguous signal — can never trigger it.
-  `SPEAKER_REBIND_SECONDS=0` disables re-binding entirely.
+  correcting a binding mid-clip (**defaults `4` and `8`; re-binding is ON**).
+  One binding per clip killed the per-frame flip-flop but meant a binding that
+  came out WRONG held the camera on the wrong person for the whole clip, with
+  no way out — a worse trade. When a bound speaker is talking and decisive ASD
+  points at a different track for `SPEAKER_REBIND_SECONDS` seconds inside a
+  `SPEAKER_REBIND_WINDOW`-second window, the label re-binds from that second
+  to the clip's end. Agreement with the current binding decays the case, so a
+  one-second blip — or an alternating, ambiguous signal — can never trigger
+  it. `SPEAKER_REBIND_SECONDS=0` disables re-binding entirely.
+- `SPEAKER_UNMAPPED_POLICY` — `wide` (default) | `asd`. **The no-guess rule.**
+  When the diarized transcript says who is talking but no face can be
+  confidently mapped to them, `wide` renders the 4:3 wide instead of pointing
+  at the nearest torso. A second with NO diarized label still falls back to
+  LR-ASD — nobody told us who is talking, so the model that watches faces is
+  the best answer available. `asd` restores the old behaviour of guessing in
+  both cases. Every clip now logs `🎯 speaker lock NN%` — the share of
+  diarized seconds where the framed subject really is the mapped speaker.
+  Target ≥ 85%; it warns below that.
 - `IDENTITY_CONFIRM` — director v2's Gemini face-identity confirmation
   (default `0` = off; the rendered-clip review showed the per-clip maps
   can't reliably tell speakers apart in a crowd — the LR-ASD fusion is the
@@ -217,6 +233,33 @@ GPU pieces that were silently wrong and are now deterministic:
   Fail-open: any error falls back to the LR-ASD fusion unchanged.
   `IDENTITY_CONFIRM_MODEL` picks the model (default `GEMINI_MODEL` /
   `gemini-3.1-flash-lite`).
+
+## The framing contract
+
+`framing_contract.py` owns all crop geometry. Sizes and positions come from
+ratios measured off two reference shorts (695 sampled frames), not from
+margins: **face height 0.155 of the output, eyeline at 0.22, ~10% headroom
+above the hair**. A split panel uses 0.30 of the PANEL height, which is the
+same 0.15 of the output — a split keeps subject size, which is the entire
+reason it beats a 4:3 wide when people are far apart.
+
+The constants that used to live in `reframe_v3` (`DEFAULT_HEAD_Y = 0.36`,
+`DEFAULT_SIDE_MARGIN`, `DEFAULT_VERT_MARGIN`) and in `smart_crop`
+(`VSPLIT_HEADROOM`, `VSPLIT_SIDE_MARGIN`, `VSPLIT_VERT_MARGIN`) are **deleted,
+not retuned**. They sized a crop from margins and then placed the face centre
+at a fixed fraction of it — for a 9:8 split panel the width term stops binding,
+the crop collapses to 1.7x the face height, and the hair ends up 14% of the
+panel ABOVE the crop top. Every split panel cut the head, by construction.
+See `PLAN_FRAMING_CONTRACT.md` §3.1.
+
+- `FRAMING_STRICT` — `0` (default: log contract violations and render) | `1`
+  (raise `CompositionError`). Headroom violations and containment failures are
+  ALWAYS fatal; the source-dependent invariants (subject size, eyeline,
+  emptiness) only warn, because a group wide with 0.09-height faces breaches
+  them no matter how the crop is placed.
+- `eval/framing_audit.py CLIP.mp4 [--strict]` audits a rendered clip. Its
+  thresholds are calibrated so both reference clips pass and all three known-bad
+  renders fail — a gate that passes the known-bad clips is not a gate.
 
 ## Dashboard ordering & data files
 
@@ -244,7 +287,6 @@ GPU pieces that were silently wrong and are now deterministic:
   `VSPLIT_PANEL_MIN_FRAC=0.45` floors a panel crop at ~half the source
   height so a small or distant face can never zoom into a passport close-up.
   Tuning knobs:
-  `VSPLIT_HEADROOM=0.18`, `VSPLIT_SIDE_MARGIN=0.55`, `VSPLIT_VERT_MARGIN=0.35`,
   `VSPLIT_PANEL_MIN_FRAC=0.45` (fraction of source height),
   `MIN_CROP_FRAC=0.45` (same floor for regular single/two-shot crops — the
   blurry-zoom fix: a tiny crop upscaled to 1080x1920 is unreadable),
@@ -266,6 +308,14 @@ GPU pieces that were silently wrong and are now deterministic:
   the file) | `0` (allow the cheap 48×27 CPU retry + PySceneDetect).
 - `SCENE_DETECTION` — `1` (default) | `0` (skip scene detection entirely —
   faster runs, clips lose the end-shot-boundary polish).
+- `MAX_SHOT_SECONDS` — longest single shot, default **`14`** (was 8). The
+  reference shorts hold their payoff shots for 10.9s, 12.3s, 17.0s and 17.8s;
+  an 8s cap made that impossible and forced a cut mid-thought. The cut grid
+  also has a floor: shots are ≥ 1.8s, a physically-spliced boundary only earns
+  its own shot if that shot runs ≥ 0.8s (otherwise it is a flash frame and gets
+  absorbed), and every shot boundary is snapped onto the nearest ≥ 120ms gap
+  between words within ±0.4s, so cuts land between words rather than through
+  them.
 - `SCENE_DETECT_TIMEOUT` — TransNetV2 decode cap in seconds (default 300).
 - `FFMPEG_DIR` — nvenc ffmpeg location (default `/kaggle/working/ffmpeg-nvenc`).
 - `GEMINI_MODEL` / `GEMINI_FALLBACK_MODEL` — picker/context model
@@ -288,6 +338,8 @@ GPU pieces that were silently wrong and are now deterministic:
 | `context_layer.py` | Pre-download Gemini link brain (3-part audiovisual summary) |
 | `source_store.py` | Per-source cache (video/transcript/context) keyed by video ID |
 | `scene_detection.py` | TransNetV2 shot boundaries (GPU decode; skip-if-not-GPU) |
+| `framing_contract.py` | **The crop geometry contract** — measured ratios, invariants, `check()` |
+| `eval/framing_audit.py` | Framing gate: audits a rendered clip against the contract |
 | `reframe_v3.py` | Composition engine (saliency + role-weighted faces, static shots) |
 | `face_spine.py` | SCRFD + ArcFace face tracks (onnxruntime-gpu) |
 | `asd_worker.py` | LR-ASD active-speaker detection (torch CUDA) |
